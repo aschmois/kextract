@@ -1,0 +1,101 @@
+name: Build and test kextract
+
+on:
+  push:
+    branches: [kextract]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TOOLCHAIN_VERSION: 25
+  GRADLE_JAVA_VERSION: 21
+  LLVM_VERSION: 22.1.6
+  KOTLIN_VERSION: 2.3.21
+
+jobs:
+  validate-gradle-wrapper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: gradle/actions/wrapper-validation@v4
+
+  build-and-test:
+    needs: [validate-gradle-wrapper]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            run-examples: true
+          - os: macos-14
+            platform: macos-aarch64
+            run-examples: true
+          - os: windows-latest
+            platform: windows-x86_64
+            run-examples: false
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - id: setup
+        uses: ./.github/actions/setup-kextract-build
+        with:
+          toolchain-version: ${{ env.TOOLCHAIN_VERSION }}
+          gradle-java-version: ${{ env.GRADLE_JAVA_VERSION }}
+          llvm-version: ${{ env.LLVM_VERSION }}
+          platform: ${{ matrix.platform }}
+
+      - name: 'Install kotlinc'
+        if: matrix.run-examples
+        shell: bash
+        run: |
+          curl -fsSL -o /tmp/kotlin.zip \
+            "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
+          unzip -q /tmp/kotlin.zip -d "$HOME"
+          echo "$HOME/kotlinc/bin" >> "$GITHUB_PATH"
+          "$HOME/kotlinc/bin/kotlinc" -version
+
+      - name: 'Build'
+        shell: bash
+        run: |
+          ./gradlew \
+            -Pjdk_home="${{ steps.setup.outputs.toolchain-path }}" \
+            -Pllvm_home= \
+            assemble
+
+      - name: 'Unit tests'
+        shell: bash
+        run: |
+          ./gradlew \
+            -Pjdk_home="${{ steps.setup.outputs.toolchain-path }}" \
+            -Pllvm_home= \
+            test
+
+      - name: 'Examples smoke test'
+        if: matrix.run-examples
+        shell: bash
+        run: |
+          ./gradlew \
+            -Pjdk_home="${{ steps.setup.outputs.toolchain-path }}" \
+            -Pllvm_home= \
+            verifyExamples
+
+      - name: 'Upload test reports'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.platform }}
+          path: |
+            build/reports/tests/**
+            build/test-results/**
+          if-no-files-found: ignore
