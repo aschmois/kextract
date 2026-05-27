@@ -239,6 +239,10 @@ tasks.register("prepareInputs") {
                 rename("libclang\\.so\\..+", "libclang.so")
             }
             into(libsDir)
+            // On Linux the archive contains both libclang.so (symlink) and a
+            // versioned libclang.so.X; both get renamed to libclang.so. The
+            // last copy wins — both have the same content so the result is fine.
+            duplicatesStrategy = DuplicatesStrategy.INCLUDE
         }
         // Sanity-check that we actually copied libclang. On Linux/macOS the unversioned
         // file must exist; on Windows it's libclang.dll.
