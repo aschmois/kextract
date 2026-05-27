@@ -145,12 +145,12 @@ object ObjCRuntime {
     private val autoreleasePoolPopAddr: MemorySegment =
         objcLib.find("objc_autoreleasePoolPop").orElseThrow { UnsatisfiedLinkError("objc_autoreleasePoolPop not found") }
 
-    private val autoreleasePoolPushHandle = linker.downcallHandle(
+    @PublishedApi internal val autoreleasePoolPushHandle = linker.downcallHandle(
         autoreleasePoolPushAddr,
         FunctionDescriptor.of(ValueLayout.ADDRESS)
     )
 
-    private val autoreleasePoolPopHandle = linker.downcallHandle(
+    @PublishedApi internal val autoreleasePoolPopHandle = linker.downcallHandle(
         autoreleasePoolPopAddr,
         FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
     )

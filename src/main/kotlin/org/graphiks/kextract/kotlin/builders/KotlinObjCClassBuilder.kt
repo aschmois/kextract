@@ -79,10 +79,24 @@ class KotlinObjCClassBuilder(
         builder.appendLine("}")
         builder.appendLine()
 
-        // Instance methods (-) — deduplicate by Kotlin name to avoid colliding function signatures
+        // Collect all selectors already covered by property getter/setter synthesis so that
+        // we don't emit a plain method AND a property accessor with the same signature.
+        // ObjC synthesises a getter (and optional setter) method for every @property, so
+        // the same selector appears in both decl.methods() and decl.properties().
+        val propertySelectors: Set<String> = decl.properties()
+            .flatMapTo(mutableSetOf()) { prop ->
+                buildList {
+                    add(prop.getterSelector())
+                    if (!prop.isReadOnly()) add(prop.setterSelector())
+                }
+            }
+
+        // Instance methods (-) — deduplicate by Kotlin name; skip any selector already emitted
+        // as a property accessor to avoid "conflicting overloads" in the generated source.
         val seenInstanceMethods = LinkedHashSet<String>()
         val uniqueInstanceMethods = decl.methods()
             .filter { !it.isClassMethod() }
+            .filter { it.selector() !in propertySelectors }
             .filter { seenInstanceMethods.add(kotlinName(it.selector())) }
         for (method in uniqueInstanceMethods) {
             emitMethod(method, receiver = "ptr")

@@ -1,7 +1,6 @@
 package org.graphiks.kextract.clang
 
 import org.graphiks.kextract.clang.libclang.*
-import java.util.NoSuchElementException
 
 enum class CursorKind(val value: Int) {
     UnexposedDecl(CXCursor_UnexposedDecl()),
@@ -81,16 +80,18 @@ enum class CursorKind(val value: Int) {
     MacroExpansion(CXCursor_MacroExpansion()),
     MacroInstantiation(CXCursor_MacroInstantiation()),
     InclusionDirective(CXCursor_InclusionDirective()),
-    StaticAssert(CXCursor_StaticAssert());
+    StaticAssert(CXCursor_StaticAssert()),
+    /** Sentinel for any cursor kind integer not listed above (e.g. expression nodes libclang exposes during traversal). */
+    Unknown(-1);
 
     companion object {
         private val lookup = entries.associateBy { it.value }
 
+        /** Returns the [CursorKind] for [value], or [Unknown] for any unrecognised integer. Never throws. */
         @JvmStatic
-        fun valueOf(value: Int): CursorKind =
-            lookup[value] ?: throw NoSuchElementException("Invalid Cursor kind value: $value")
+        fun valueOf(value: Int): CursorKind = lookup[value] ?: Unknown
 
-        /** Like [valueOf] but returns null for unknown cursor kind integers instead of throwing. */
+        /** Like [valueOf] but returns null for unknown cursor kind integers instead of [Unknown]. */
         @JvmStatic
         fun valueOfOrNull(value: Int): CursorKind? = lookup[value]
     }

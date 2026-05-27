@@ -49,7 +49,7 @@ class KotlinEnumBuilder(
         }
 
         val entries = constants.joinToString(", ") { c ->
-            "${toplevel.javaName(c.name())}(${c.value().toLongValue()}L)"
+            "${toplevel.javaName(c.name())}(${c.value().toLongValue().toKotlinLongLiteral()})"
         }
 
         builder.appendLine("enum class ${name}(val value: Long) {")
@@ -87,7 +87,7 @@ class KotlinEnumBuilder(
             builder.indent()
             for (c in constants) {
                 val constName = toplevel.javaName(c.name())
-                builder.appendLine("val ${constName} = ${name}(${c.value().toLongValue()}L)")
+                builder.appendLine("val ${constName} = ${name}(${c.value().toLongValue().toKotlinLongLiteral()})")
             }
             builder.unindent()
             builder.appendLine("}")
@@ -117,4 +117,14 @@ class KotlinEnumBuilder(
         is Int  -> this.toLong()
         else    -> toString().toLongOrNull() ?: 0L
     }
+
+    /**
+     * Renders a [Long] as a valid Kotlin literal.
+     *
+     * [Long.MIN_VALUE] (-9223372036854775808) cannot be written as `-9223372036854775808L` in
+     * Kotlin source because the compiler parses the magnitude first and overflows before applying
+     * the unary minus. Emit `Long.MIN_VALUE` for that special case.
+     */
+    private fun Long.toKotlinLongLiteral(): String =
+        if (this == Long.MIN_VALUE) "Long.MIN_VALUE" else "${this}L"
 }
