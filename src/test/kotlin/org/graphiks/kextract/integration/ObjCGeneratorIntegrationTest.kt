@@ -400,6 +400,10 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
         "class method uses getClass, instance method uses ptr" {
             src shouldContain """ObjCRuntime.getClass("KxMixed")"""
             src shouldContain "ptr"
+        }
+    }
+
+    // ── NS_ENUM / NS_OPTIONS ─────────────────────────────────────────────────
 
     "NS_ENUM generates Kotlin enum class" - {
         // Use a typed C enum (typedef enum : long { ... }) which is exactly what NS_ENUM expands
