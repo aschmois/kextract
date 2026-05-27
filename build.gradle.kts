@@ -170,6 +170,13 @@ tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     systemProperty("java.library.path", "$llvm_home/$os_lib_dir")
+    // Help the OS dynamic linker resolve transitive libclang dependencies
+    // (libclang.so → libLLVM.so.22) when System.load() opens libclang under RTLD_LAZY.
+    // java.library.path only feeds System.loadLibrary(); the inner dlopen() chain still
+    // uses LD_LIBRARY_PATH / DYLD_LIBRARY_PATH / PATH.
+    environment("LD_LIBRARY_PATH",   "$llvm_home/$os_lib_dir")
+    environment("DYLD_LIBRARY_PATH", "$llvm_home/$os_lib_dir")
+    environment("PATH",              "$llvm_home/$os_lib_dir${File.pathSeparator}${System.getenv("PATH") ?: ""}")
 }
 
 // All Java compilation uses the configured JDK and targets Java 25
