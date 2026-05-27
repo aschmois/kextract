@@ -188,8 +188,9 @@ interface Declaration {
         // Objective-C factory methods
         fun objcClass(
             pos: Position, name: String, superClass: String?,
-            protocols: List<String>, methods: List<ObjCMethod>, properties: List<ObjCProperty>
-        ): ObjCClass = DeclarationImpl.ObjCClassImpl(superClass, protocols, methods, properties, name, pos)
+            protocols: List<String>, methods: List<ObjCMethod>, properties: List<ObjCProperty>,
+            ivars: List<Variable> = emptyList()
+        ): ObjCClass = DeclarationImpl.ObjCClassImpl(superClass, protocols, methods, properties, ivars, name, pos)
 
         fun objcProtocol(
             pos: Position, name: String,
@@ -381,6 +382,7 @@ internal abstract class DeclarationImpl(
         private val protocols: List<String>,
         private val methods: List<Declaration.ObjCMethod>,
         private val properties: List<Declaration.ObjCProperty>,
+        private val _ivars: List<Declaration.Variable>,
         name: String, pos: Position
     ) : DeclarationImpl(name, pos), Declaration.ObjCClass {
         override fun <R> accept(v: Declaration.Visitor<R>): R = v.visitObjCClass(this)
@@ -388,7 +390,7 @@ internal abstract class DeclarationImpl(
         override fun protocols(): List<String> = protocols
         override fun methods(): List<Declaration.ObjCMethod> = methods
         override fun properties(): List<Declaration.ObjCProperty> = properties
-        override fun ivars(): List<Declaration.Variable> = emptyList()
+        override fun ivars(): List<Declaration.Variable> = _ivars
     }
 
     class ObjCProtocolImpl(
@@ -402,6 +404,7 @@ internal abstract class DeclarationImpl(
         override fun methods(): List<Declaration.ObjCMethod> = methods
         override fun properties(): List<Declaration.ObjCProperty> = properties
     }
+
 
     class ObjCCategoryImpl(
         private val extendedClass: String,

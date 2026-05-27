@@ -423,6 +423,7 @@ internal class TreeMaker {
         val protocols = mutableListOf<String>()
         val methods = mutableListOf<Declaration.ObjCMethod>()
         val properties = mutableListOf<Declaration.ObjCProperty>()
+        val ivars = mutableListOf<Declaration.Variable>()
         c.forEach { child ->
             when (child.kindOrNull()) {
                 CursorKind.ObjCSuperClassRef    -> superClass = child.spelling()
@@ -430,10 +431,14 @@ internal class TreeMaker {
                 CursorKind.ObjCInstanceMethodDecl -> createObjCMethod(child, false)?.let { methods.add(it) }
                 CursorKind.ObjCClassMethodDecl  -> createObjCMethod(child, true)?.let { methods.add(it) }
                 CursorKind.ObjCPropertyDecl     -> createObjCProperty(child)?.let { properties.add(it) }
-                else -> {} // Unknown cursor kinds (e.g. OverloadedDeclRef) or ObjCIvarDecl — skip
+                CursorKind.ObjCIvarDecl         -> {
+                    val ivarType = toType(child.type())
+                    ivars.add(Declaration.`var`(Declaration.Variable.Kind.FIELD, CursorPosition.of(child), child.spelling(), ivarType))
+                }
+                else -> {} // Unknown cursor kinds (e.g. OverloadedDeclRef) — skip
             }
         }
-        return Declaration.objcClass(CursorPosition.of(c), c.spelling(), superClass, protocols, methods, properties)
+        return Declaration.objcClass(CursorPosition.of(c), c.spelling(), superClass, protocols, methods, properties, ivars)
     }
 
     /** Build Declaration.ObjCProtocol from an ObjCProtocolDecl cursor. */
