@@ -220,6 +220,23 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    // ── ObjC block pointer parameters ───────────────────────────────────────
+
+    "ObjC block parameter maps to MemorySegment" - {
+        // `void (^completion)(long)` is a BlockPointer type in libclang (TypeKind 113).
+        // It must not fall through to `Any` — it should map to MemorySegment.
+        val src = generate("""
+            @interface KxAsync
+            - (void)fetchWithCompletion:(void (^)(long result))completion;
+            @end
+        """.trimIndent())
+
+        "block parameter type is MemorySegment, not Any" {
+            src shouldContain "completion: MemorySegment"
+            src shouldNotContain "completion: Any"
+        }
+    }
+
     // ── Selector → Kotlin name mapping ───────────────────────────────────────
 
     "selector name conversion" - {

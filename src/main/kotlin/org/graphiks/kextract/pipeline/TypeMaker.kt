@@ -83,7 +83,11 @@ internal object TypeMaker {
                 val d = treeMaker.createTree(t.getDeclarationCursor())
                 if (d != null) Type.declared(d as Declaration.Scoped) else Type.error(t.spelling())
             }
-            TypeKind.BlockPointer,
+            TypeKind.BlockPointer -> {
+                // ObjC block type (e.g. `void (^completion)(NSError *)`).
+                // Blocks are opaque callable objects; map to void* → MemorySegment on the Kotlin side.
+                Type.pointer(Type.void_())
+            }
             TypeKind.Pointer -> {
                 val pointee = t.getPointeeType()
                 if (pointee.kind() == TypeKind.FunctionProto ||
