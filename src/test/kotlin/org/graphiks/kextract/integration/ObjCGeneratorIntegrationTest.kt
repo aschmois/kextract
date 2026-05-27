@@ -400,6 +400,82 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
         "class method uses getClass, instance method uses ptr" {
             src shouldContain """ObjCRuntime.getClass("KxMixed")"""
             src shouldContain "ptr"
+
+    "NS_ENUM generates Kotlin enum class" - {
+        // Use a typed C enum (typedef enum : long { ... }) which is exactly what NS_ENUM expands
+        // to after macro expansion.
+        val src = generate("""
+            typedef enum : long {
+                KxOrderAscending  = -1,
+                KxOrderSame       = 0,
+                KxOrderDescending = 1
+            } KxComparisonResult;
+        """.trimIndent())
+
+        "enum class is emitted instead of typealias" {
+            src shouldContain "enum class KxComparisonResult"
+            src shouldNotContain "typealias KxComparisonResult"
+        }
+
+        "enum entries carry Long values" {
+            src shouldContain "KxOrderAscending(-1L)"
+            src shouldContain "KxOrderSame(0L)"
+            src shouldContain "KxOrderDescending(1L)"
+        }
+
+        "companion object with fromValue factory" {
+            src shouldContain "companion object"
+            src shouldContain "fun fromValue(v: Long): KxComparisonResult"
+        }
+
+        "enum constants not emitted as standalone top-level functions" {
+            src shouldNotContain "fun KxOrderAscending()"
+        }
+    }
+
+    "NS_OPTIONS generates @JvmInline value class" - {
+        val src = generate("""
+            typedef enum : long {
+                KxNone              = 0,
+                KxCaseInsensitive   = 1,
+                KxLiteral           = 2,
+                KxBackwards         = 4
+            } KxStringCompareOptions;
+        """.trimIndent())
+
+        "value class with rawValue is emitted" {
+            src shouldContain "@JvmInline"
+            src shouldContain "value class KxStringCompareOptions(val rawValue: Long)"
+        }
+
+        "constants are in companion object" {
+            src shouldContain "companion object"
+            src shouldContain "val KxNone = KxStringCompareOptions(0L)"
+            src shouldContain "val KxCaseInsensitive = KxStringCompareOptions(1L)"
+        }
+
+        "bit-ops are emitted" {
+            src shouldContain "operator fun plus(o: KxStringCompareOptions)"
+            src shouldContain "operator fun contains(o: KxStringCompareOptions)"
+        }
+
+        "no typealias for options type" {
+            src shouldNotContain "typealias KxStringCompareOptions"
+        }
+    }
+
+    "Enum typedef with Flags suffix generates value class" - {
+        val src = generate("""
+            typedef enum : long {
+                KxEventNone  = 0,
+                KxEventClick = 1,
+                KxEventHover = 2
+            } KxEventFlags;
+        """.trimIndent())
+
+        "value class emitted for Flags suffix" {
+            src shouldContain "@JvmInline"
+            src shouldContain "value class KxEventFlags(val rawValue: Long)"
         }
     }
 })

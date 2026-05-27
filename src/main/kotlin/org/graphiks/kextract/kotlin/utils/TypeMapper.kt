@@ -1,6 +1,7 @@
 // src/main/kotlin/org/openjdk/kextract/kotlin/utils/TypeMapper.kt
 package org.graphiks.kextract.kotlin.utils
 
+import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.Type
 
 /**
@@ -33,12 +34,15 @@ object TypeMapper {
 
         type is Type.Declared -> {
             val tree = type.tree()
-            if (tree is org.graphiks.kextract.Declaration.Scoped &&
-                (tree.kind() == org.graphiks.kextract.Declaration.Scoped.Kind.STRUCT ||
-                 tree.kind() == org.graphiks.kextract.Declaration.Scoped.Kind.UNION)) {
-                "MemorySegment"
-            } else {
-                "Int"   // enums are int-backed in C
+            when (tree.kind()) {
+                Declaration.Scoped.Kind.STRUCT,
+                Declaration.Scoped.Kind.UNION -> "MemorySegment"
+                Declaration.Scoped.Kind.ENUM ->
+                    // Named enums map to the generated Kotlin enum class.
+                    // Anonymous enums are accessed via a typedef name (handled by the TYPEDEF
+                    // branch above), so we fall back to the raw Long type here.
+                    if (tree.name().isNotEmpty()) tree.name() else "Long"
+                else -> "Long"
             }
         }
         type is Type.Function -> mapFunctionType(type)

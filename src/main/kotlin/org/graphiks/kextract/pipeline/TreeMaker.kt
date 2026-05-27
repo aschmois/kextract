@@ -23,6 +23,7 @@ import org.graphiks.kextract.DeclarationImpl.ClangOffsetOf
 import org.graphiks.kextract.DeclarationImpl.ClangSizeOf
 import org.graphiks.kextract.DeclarationImpl.NestedDeclarations
 import org.graphiks.kextract.DeclarationImpl.DeclarationString
+import org.graphiks.kextract.DeclarationImpl.TypedefEnumScoped
 
 import java.nio.file.Path
 
@@ -307,7 +308,35 @@ internal class TreeMaker {
                 }
             }
         }
-        return withNestedTypesNew(Declaration.typedef(CursorPosition.of(c), c.spelling(), canonicalType), c, false)
+        val typedef = withNestedTypesNew(Declaration.typedef(CursorPosition.of(c), c.spelling(), canonicalType), c, false)
+
+        // Detect typedef-wrapped enums including ObjC fixed-underlying-type enums
+        // (typedef enum : long { … } Foo) whose canonical type is a primitive, not Declared.
+        // For those, scan cursor children for an EnumDecl to attach the enum scoped.
+        if (TypedefEnumScoped.get(typedef) == null) {
+            val enumScopedFromType = when (canonicalType) {
+                is Type.Declared -> {
+                    val tree = canonicalType.tree()
+                    if (tree.kind() == Declaration.Scoped.Kind.ENUM) tree else null
+                }
+                else -> null
+            }
+            if (enumScopedFromType != null) {
+                TypedefEnumScoped.with(typedef, enumScopedFromType)
+            } else {
+                // Fallback: inspect cursor children for an EnumDecl
+                c.forEach { child ->
+                    if (child.kind() == CursorKind.EnumDecl && child.isDefinition()) {
+                        val enumDecl = createTree(child)
+                        if (enumDecl is Declaration.Scoped &&
+                            enumDecl.kind() == Declaration.Scoped.Kind.ENUM) {
+                            TypedefEnumScoped.with(typedef, enumDecl)
+                        }
+                    }
+                }
+            }
+        }
+        return typedef
     }
 
     private fun canonicalTypeNew(t: Type): Type {

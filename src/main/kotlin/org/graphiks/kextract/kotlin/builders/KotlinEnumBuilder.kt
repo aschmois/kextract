@@ -1,0 +1,117 @@
+// src/main/kotlin/org/openjdk/kextract/kotlin/builders/KotlinEnumBuilder.kt
+package org.graphiks.kextract.kotlin.builders
+
+import org.graphiks.kextract.Declaration
+
+/**
+ * Generates Kotlin code for named C/ObjC enumerations.
+ *
+ * Two output styles are supported:
+ * - **NS_ENUM style** — `enum class Foo(val value: Long)` with a `companion object { fun fromValue(v: Long) }`
+ * - **NS_OPTIONS style** — `@JvmInline value class Foo(val rawValue: Long)` with bit operators.
+ *   Triggered when the enum name ends with "Options", "Flags", or "Mask".
+ *
+ * This builder is invoked from [KotlinToplevelBuilder] when it encounters a
+ * [Declaration.Scoped] of kind [Declaration.Scoped.Kind.ENUM] with a non-empty name.
+ * For ObjC fixed-underlying-type enums (`typedef enum : long { … } Foo`) clang creates a
+ * *named* ENUM scoped (the typedef is redundant and filtered), so this is the correct hook.
+ */
+class KotlinEnumBuilder(
+    private val builder: SourceBuilder,
+    private val toplevel: KotlinToplevelBuilder
+) {
+
+    fun visitEnum(decl: Declaration.Scoped) {
+        require(decl.kind() == Declaration.Scoped.Kind.ENUM)
+        require(decl.name().isNotEmpty())
+
+        val constants = decl.members().filterIsInstance<Declaration.Constant>()
+        if (isOptionsStyle(decl.name())) {
+            emitValueClass(decl, constants)
+        } else {
+            emitEnumClass(decl, constants)
+        }
+    }
+
+    // ── NS_ENUM ───────────────────────────────────────────────────────────────
+
+    private fun emitEnumClass(decl: Declaration.Scoped, constants: List<Declaration.Constant>) {
+        val name = toplevel.javaName(decl.name())
+
+        builder.appendLine("/**")
+        builder.appendLine(" * NS_ENUM: {@snippet lang=c : enum ${decl.name()}}")
+        builder.appendLine(" */")
+
+        if (constants.isEmpty()) {
+            builder.appendLine("enum class ${name}(val value: Long)")
+            builder.appendLine()
+            return
+        }
+
+        val entries = constants.joinToString(", ") { c ->
+            "${toplevel.javaName(c.name())}(${c.value().toLongValue()}L)"
+        }
+
+        builder.appendLine("enum class ${name}(val value: Long) {")
+        builder.indent()
+        builder.appendLine("${entries};")
+        builder.appendLine()
+        builder.appendLine("companion object {")
+        builder.indent()
+        builder.appendLine("fun fromValue(v: Long): ${name} = entries.first { it.value == v }")
+        builder.unindent()
+        builder.appendLine("}")
+        builder.unindent()
+        builder.appendLine("}")
+        builder.appendLine()
+    }
+
+    // ── NS_OPTIONS ────────────────────────────────────────────────────────────
+
+    private fun emitValueClass(decl: Declaration.Scoped, constants: List<Declaration.Constant>) {
+        val name = toplevel.javaName(decl.name())
+
+        builder.appendLine("/**")
+        builder.appendLine(" * NS_OPTIONS: {@snippet lang=c : enum ${decl.name()}}")
+        builder.appendLine(" */")
+
+        builder.appendLine("@JvmInline")
+        builder.appendLine("value class ${name}(val rawValue: Long) {")
+        builder.indent()
+
+        if (constants.isNotEmpty()) {
+            builder.appendLine("companion object {")
+            builder.indent()
+            for (c in constants) {
+                val constName = toplevel.javaName(c.name())
+                builder.appendLine("val ${constName} = ${name}(${c.value().toLongValue()}L)")
+            }
+            builder.unindent()
+            builder.appendLine("}")
+            builder.appendLine()
+        }
+
+        builder.appendLine("operator fun plus(o: ${name}) = ${name}(rawValue or o.rawValue)")
+        builder.appendLine("operator fun contains(o: ${name}) = (rawValue and o.rawValue) != 0L")
+
+        builder.unindent()
+        builder.appendLine("}")
+        builder.appendLine()
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Heuristic: generate NS_OPTIONS-style (`@JvmInline value class`) when the
+     * enum name ends with "Options", "Flags", or "Mask".
+     */
+    private fun isOptionsStyle(name: String): Boolean =
+        name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
+
+    /** Coerce an enum constant value (Any, typically Long or Int) to a Long for Kotlin literals. */
+    private fun Any.toLongValue(): Long = when (this) {
+        is Long -> this
+        is Int  -> this.toLong()
+        else    -> toString().toLongOrNull() ?: 0L
+    }
+}

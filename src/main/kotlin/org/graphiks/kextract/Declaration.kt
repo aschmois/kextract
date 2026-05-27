@@ -480,6 +480,21 @@ internal abstract class DeclarationImpl(
         }
     }
 
+    /**
+     * Attribute attached to a [Declaration.Typedef] when it wraps an enum (including ObjC
+     * fixed-underlying-type enums where the canonical type is a primitive rather than the enum).
+     * Stores the [Declaration.Scoped] of kind ENUM so code generators can produce proper
+     * `enum class` or `@JvmInline value class` output.
+     */
+    data class TypedefEnumScoped(val enumScoped: Declaration.Scoped) : Declaration.Attribute {
+        companion object {
+            fun with(typedef: Declaration.Typedef, enumScoped: Declaration.Scoped) =
+                typedef.addAttribute(TypedefEnumScoped(enumScoped))
+            fun get(typedef: Declaration.Typedef): Declaration.Scoped? =
+                typedef.getAttribute<TypedefEnumScoped>()?.enumScoped
+        }
+    }
+
     /** Marker attribute: no code should be generated for this declaration. */
     object Skip : Declaration.Attribute {
         fun with(declaration: Declaration) = declaration.addAttribute(this)

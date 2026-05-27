@@ -46,10 +46,12 @@ class KotlinObjCClassBuilder(
         // run (i.e. it is not Skip-marked and therefore present in generatedClassNames).
         // System-framework root classes such as NSObject are typically not generated, so we
         // fall back to a standalone wrapper in that case.
+        // Root classes declare `val ptr` as a property; derived classes just pass it through
+        // so they don't re-declare a property that is already inherited.
         val superExpr = if (superClass != null && superClass in generatedClassNames)
             " : $superClass(ptr)" else ""
-        val ctorParam = if (superExpr.isEmpty()) "val ptr: MemorySegment" else "ptr: MemorySegment"
-        builder.appendLine("open class $className($ctorParam)$superExpr {")
+        val ptrParam = if (superExpr.isNotEmpty()) "ptr: MemorySegment" else "val ptr: MemorySegment"
+        builder.appendLine("open class $className($ptrParam)$superExpr {")
         builder.indent()
 
         // Companion object for class-level methods and the Class reference
