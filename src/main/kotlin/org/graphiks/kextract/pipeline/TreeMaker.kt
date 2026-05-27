@@ -499,10 +499,12 @@ internal class TreeMaker {
             params.add(Declaration.parameter(CursorPosition.of(argCursor), argName, argType))
         }
         // Return type — use clang_getCursorResultType (c.type() returns Invalid for ObjC methods)
-        val returnType = toType(c.resultType())
+        val resultClangType = c.resultType()
+        val returnType = toType(resultClangType)
+        val returnTypeSpelling = resultClangType.spelling()
         return Declaration.objcMethod(
             CursorPosition.of(c), selector, selector, isClassMethod,
-            returnType, params, c.isObjCOptional()
+            returnType, returnTypeSpelling, params, c.isObjCOptional()
         )
     }
 
@@ -510,13 +512,15 @@ internal class TreeMaker {
     private fun createObjCProperty(c: Cursor): Declaration.ObjCProperty? {
         val attrs = c.getObjCPropertyAttributes()
         val isReadOnly = (attrs and 1) != 0   // CXObjCPropertyAttr_readonly = 1
-        val type = toType(c.type())
+        val propClangType = c.type()
+        val type = toType(propClangType)
+        val typeSpelling = propClangType.spelling()
         val propName = c.spelling()
         val getter = c.getObjCPropertyGetterName().ifEmpty { propName }
         val setter = if (isReadOnly) "" else
             c.getObjCPropertySetterName().ifEmpty {
                 "set${propName.replaceFirstChar { it.uppercaseChar() }}:"
             }
-        return Declaration.objcProperty(CursorPosition.of(c), propName, type, isReadOnly, getter, setter)
+        return Declaration.objcProperty(CursorPosition.of(c), propName, type, typeSpelling, isReadOnly, getter, setter)
     }
 }

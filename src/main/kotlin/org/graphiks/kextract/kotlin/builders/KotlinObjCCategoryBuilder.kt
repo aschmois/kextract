@@ -70,6 +70,7 @@ class KotlinObjCCategoryBuilder(
         val params    = method.parameters()
         val retKotlin = returnTypeKotlin(method.returnType())
         val retLayout = returnLayout(method.returnType())
+        val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
             val pName = p.name().ifEmpty { "arg$i" }
@@ -78,9 +79,15 @@ class KotlinObjCCategoryBuilder(
         }.joinToString(", ")
 
         val retDecl  = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
+
         val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
+        // Emit a KDoc comment when the original ObjC return type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (retSpelling.contains('<')) {
+            builder.appendLine("/** @return $retSpelling */")
+        }
         builder.appendLine("fun $extClass.${kotlinName(selector)}($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
@@ -137,8 +144,14 @@ class KotlinObjCCategoryBuilder(
         val retKotlin = returnTypeKotlin(prop.type())
         val retLayout = returnLayout(prop.type())
         val getter    = prop.getterSelector()
+        val propTypeSpelling = prop.typeSpelling()
 
         builder.appendLine("// @property $propName")
+        // Emit a KDoc comment when the original ObjC property type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (propTypeSpelling.contains('<')) {
+            builder.appendLine("/** @return $propTypeSpelling */")
+        }
         builder.appendLine("fun $extClass.${kotlinName(getter)}(): $retKotlin {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")

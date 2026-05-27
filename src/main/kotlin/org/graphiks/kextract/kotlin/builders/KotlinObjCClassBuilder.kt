@@ -116,6 +116,7 @@ class KotlinObjCClassBuilder(
         val retType = method.returnType()
         val retKotlin = returnTypeKotlin(retType)
         val retLayout = returnLayout(retType)
+        val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
             val pName = p.name().ifEmpty { "arg$i" }
@@ -125,6 +126,11 @@ class KotlinObjCClassBuilder(
 
         val retDecl = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
 
+        // Emit a KDoc comment when the original ObjC return type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (retSpelling.contains('<')) {
+            builder.appendLine("/** @return $retSpelling */")
+        }
         builder.appendLine("fun ${kotlinName(selector)}($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
@@ -201,9 +207,15 @@ class KotlinObjCClassBuilder(
         val retKotlin = returnTypeKotlin(prop.type())
         val retLayout = returnLayout(prop.type())
         val getter = prop.getterSelector()
+        val propTypeSpelling = prop.typeSpelling()
 
         val isStructReturn = prop.type() is Type.Declared
         builder.appendLine("// @property $propName")
+        // Emit a KDoc comment when the original ObjC property type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (propTypeSpelling.contains('<')) {
+            builder.appendLine("/** @return $propTypeSpelling */")
+        }
         builder.appendLine("fun ${kotlinName(getter)}(): $retKotlin {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")

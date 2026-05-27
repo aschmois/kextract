@@ -86,6 +86,7 @@ interface Declaration {
         fun protocols(): List<String>                // adopted protocol names
         fun methods(): List<ObjCMethod>
         fun properties(): List<ObjCProperty>
+        fun ivars(): List<Variable>                  // instance variables (@ivar / synthesized)
     }
 
     /** An Objective-C protocol declaration (@protocol). */
@@ -108,6 +109,8 @@ interface Declaration {
         fun isClassMethod(): Boolean                 // true = class (+) method, false = instance (-)
         fun selector(): String                       // full selector, e.g. "stringWithUTF8String:"
         fun returnType(): Type
+        /** Raw clang type spelling of the return type, e.g. "NSArray<NSString *> *". Empty if unavailable. */
+        fun returnTypeSpelling(): String
         fun parameters(): List<Variable>
         fun isOptional(): Boolean                    // true for @optional protocol methods
     }
@@ -115,6 +118,8 @@ interface Declaration {
     /** An Objective-C property declaration (@property). */
     interface ObjCProperty : Declaration {
         fun type(): Type
+        /** Raw clang type spelling of the property type, e.g. "NSArray<NSString *> *". Empty if unavailable. */
+        fun typeSpelling(): String
         fun isReadOnly(): Boolean
         fun getterSelector(): String
         fun setterSelector(): String                 // empty if isReadOnly
@@ -198,13 +203,13 @@ interface Declaration {
 
         fun objcMethod(
             pos: Position, name: String, selector: String, isClassMethod: Boolean,
-            returnType: Type, params: List<Variable>, isOptional: Boolean
-        ): ObjCMethod = DeclarationImpl.ObjCMethodImpl(isClassMethod, selector, returnType, params, isOptional, name, pos)
+            returnType: Type, returnTypeSpelling: String, params: List<Variable>, isOptional: Boolean
+        ): ObjCMethod = DeclarationImpl.ObjCMethodImpl(isClassMethod, selector, returnType, returnTypeSpelling, params, isOptional, name, pos)
 
         fun objcProperty(
-            pos: Position, name: String, type: Type,
+            pos: Position, name: String, type: Type, typeSpelling: String,
             isReadOnly: Boolean, getterSelector: String, setterSelector: String
-        ): ObjCProperty = DeclarationImpl.ObjCPropertyImpl(type, isReadOnly, getterSelector, setterSelector, name, pos)
+        ): ObjCProperty = DeclarationImpl.ObjCPropertyImpl(type, typeSpelling, isReadOnly, getterSelector, setterSelector, name, pos)
     }
 
     /**
@@ -383,6 +388,7 @@ internal abstract class DeclarationImpl(
         override fun protocols(): List<String> = protocols
         override fun methods(): List<Declaration.ObjCMethod> = methods
         override fun properties(): List<Declaration.ObjCProperty> = properties
+        override fun ivars(): List<Declaration.Variable> = emptyList()
     }
 
     class ObjCProtocolImpl(
@@ -415,6 +421,7 @@ internal abstract class DeclarationImpl(
         private val isClassMethod: Boolean,
         private val selector: String,
         private val returnType: Type,
+        private val _returnTypeSpelling: String,
         private val params: List<Declaration.Variable>,
         private val isOptional: Boolean,
         name: String, pos: Position
@@ -423,12 +430,14 @@ internal abstract class DeclarationImpl(
         override fun isClassMethod(): Boolean = isClassMethod
         override fun selector(): String = selector
         override fun returnType(): Type = returnType
+        override fun returnTypeSpelling(): String = _returnTypeSpelling
         override fun parameters(): List<Declaration.Variable> = params
         override fun isOptional(): Boolean = isOptional
     }
 
     class ObjCPropertyImpl(
         private val type: Type,
+        private val _typeSpelling: String,
         private val isReadOnly: Boolean,
         private val getterSelector: String,
         private val setterSelector: String,
@@ -437,6 +446,7 @@ internal abstract class DeclarationImpl(
         override fun <R> accept(v: Declaration.Visitor<R>): R =
             v.visitDeclaration(this)
         override fun type(): Type = type
+        override fun typeSpelling(): String = _typeSpelling
         override fun isReadOnly(): Boolean = isReadOnly
         override fun getterSelector(): String = getterSelector
         override fun setterSelector(): String = setterSelector
