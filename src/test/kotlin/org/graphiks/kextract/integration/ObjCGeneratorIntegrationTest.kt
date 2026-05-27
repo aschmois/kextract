@@ -253,11 +253,21 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
     }
 
     // ── NSString convenience overloads ────────────────────────────────────────
+    // Use a minimal NSString stub instead of #include <Foundation/Foundation.h>
+    // to avoid needing -isysroot / the Xcode SDK at test time.
+    // The stub gives clang enough information to resolve NSString * as an
+    // ObjCObjectPointer type, which is all the TypeMaker / isNSString() check needs.
+    val kNSStringStub = """
+        @interface NSObject
+        @end
+        @interface NSString : NSObject
+        @end
+    """.trimIndent()
 
     "NSString return-type convenience overload" - {
-        // NSString is a system class; use it as a return type on a custom class method
+        // NSString is a system class; use a stub so no SDK headers are needed
         val src = generate("""
-            #include <Foundation/Foundation.h>
+            ${kNSStringStub}
             @interface KxNSStringReturn
             - (NSString *)greeting;
             @end
@@ -274,7 +284,7 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
 
     "NSString parameter convenience overload" - {
         val src = generate("""
-            #include <Foundation/Foundation.h>
+            ${kNSStringStub}
             @interface KxNSStringParam
             - (void)setTitle:(NSString *)title;
             @end
@@ -292,7 +302,7 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
 
     "NSString readwrite property convenience overloads" - {
         val src = generate("""
-            #include <Foundation/Foundation.h>
+            ${kNSStringStub}
             @interface KxNSStringProp
             @property (readwrite) NSString *label;
             @end
@@ -313,7 +323,7 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
 
     "NSString readonly property has only getter overload" - {
         val src = generate("""
-            #include <Foundation/Foundation.h>
+            ${kNSStringStub}
             @interface KxNSStringReadonly
             @property (readonly) NSString *title;
             @end

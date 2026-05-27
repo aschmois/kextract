@@ -261,11 +261,29 @@ class KotlinObjCClassBuilder(
         }
     }
 
-    /** Returns true when [type] is the NSString typedef (a TYPEDEF-kind Delegated whose name is "NSString"). */
-    private fun isNSString(type: Type): Boolean =
-        type is Type.Delegated &&
-        type.kind() == Type.Delegated.Kind.TYPEDEF &&
-        type.name() == "NSString"
+    /**
+     * Returns true when [type] represents NSString or NSString*.
+     *
+     * In practice Foundation headers always use pointer types (`NSString *`), so the
+     * libclang type tree is:
+     *   Type.Delegated(POINTER) → Type.Delegated(TYPEDEF, name="NSString")
+     *
+     * We also handle the bare-typedef case just in case.
+     */
+    private fun isNSString(type: Type): Boolean {
+        if (type is Type.Delegated) {
+            // Direct typedef: NSString (rare)
+            if (type.kind() == Type.Delegated.Kind.TYPEDEF && type.name() == "NSString") return true
+            // Pointer to typedef: NSString * (the common case from Foundation headers)
+            if (type.kind() == Type.Delegated.Kind.POINTER) {
+                val inner = type.type()
+                if (inner is Type.Delegated &&
+                    inner.kind() == Type.Delegated.Kind.TYPEDEF &&
+                    inner.name() == "NSString") return true
+            }
+        }
+        return false
+    }
 
     companion object {
         /** Maps an ObjC return type to the Kotlin type name. */
