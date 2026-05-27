@@ -216,12 +216,15 @@ tasks.register("prepareInputs") {
         val libsDir = file("$kextract_inputs/libs").apply { deleteRecursively(); mkdirs() }
         val confDir = file("$kextract_inputs/conf/kextract").apply { deleteRecursively(); mkdirs() }
 
-        // Native library
+        // Native library — use a glob so we match whichever version filename the LLVM
+        // release actually ships (e.g. libclang.so.22 vs libclang.so.22.1.6 vs the
+        // unversioned symlink). The rename pattern normalises any versioned filename
+        // to the unversioned form so System.loadLibrary("clang") can find it.
         val isAix = Os.isName("AIX") || Os.isName("aix")
         val isUnixNotMac = Os.isFamily(Os.FAMILY_UNIX) && !Os.isFamily(Os.FAMILY_MAC)
-        val clangLib = when {
+        val clangLibPattern = when {
             isAix                          -> "libclang.a"
-            isUnixNotMac                   -> "libclang.so.$clang_version"
+            isUnixNotMac                   -> "libclang.so*"
             Os.isFamily(Os.FAMILY_WINDOWS) -> "libclang.dll"
             else                           -> "libclang.dylib"
         }
@@ -230,11 +233,25 @@ tasks.register("prepareInputs") {
         }
         project.copy {
             from(srcLibDir) {
-                include(clangLib, "libLLVM.*")
+                include(clangLibPattern, "libLLVM.*", "LLVM-C*")
                 exclude("clang.exe")
-                rename("libclang\\.so\\..*", "libclang.so")
+                // Map any versioned libclang.so.X(.Y.Z) → libclang.so
+                rename("libclang\\.so\\..+", "libclang.so")
             }
             into(libsDir)
+        }
+        // Sanity-check that we actually copied libclang. On Linux/macOS the unversioned
+        // file must exist; on Windows it's libclang.dll.
+        val expectedClang = when {
+            Os.isFamily(Os.FAMILY_WINDOWS) -> "libclang.dll"
+            Os.isFamily(Os.FAMILY_MAC)     -> "libclang.dylib"
+            else                           -> "libclang.so"
+        }
+        if (!File(libsDir, expectedClang).exists()) {
+            throw GradleException(
+                "prepareInputs: $expectedClang not produced under $libsDir " +
+                "(source dir contents: ${srcLibDir.list()?.toList()})"
+            )
         }
 
         // Clang builtin headers
