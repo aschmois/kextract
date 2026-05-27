@@ -56,8 +56,12 @@ class KotlinObjCClassBuilder(
         }
         builder.appendLine()
 
-        // Class methods (+)
-        for (method in decl.methods().filter { it.isClassMethod() }) {
+        // Class methods (+) — deduplicate by Kotlin name to avoid colliding function signatures
+        val seenClassMethods = LinkedHashSet<String>()
+        val uniqueClassMethods = decl.methods()
+            .filter { it.isClassMethod() }
+            .filter { seenClassMethods.add(kotlinName(it.selector())) }
+        for (method in uniqueClassMethods) {
             emitMethod(method, receiver = "_class")
         }
 
@@ -65,13 +69,20 @@ class KotlinObjCClassBuilder(
         builder.appendLine("}")
         builder.appendLine()
 
-        // Instance methods (-)
-        for (method in decl.methods().filter { !it.isClassMethod() }) {
+        // Instance methods (-) — deduplicate by Kotlin name to avoid colliding function signatures
+        val seenInstanceMethods = LinkedHashSet<String>()
+        val uniqueInstanceMethods = decl.methods()
+            .filter { !it.isClassMethod() }
+            .filter { seenInstanceMethods.add(kotlinName(it.selector())) }
+        for (method in uniqueInstanceMethods) {
             emitMethod(method, receiver = "ptr")
         }
 
-        // Properties
-        for (prop in decl.properties()) {
+        // Properties — deduplicate by property name to avoid redeclaring the same getter/setter
+        val seenProperties = LinkedHashSet<String>()
+        val uniqueProperties = decl.properties()
+            .filter { seenProperties.add(it.name()) }
+        for (prop in uniqueProperties) {
             emitProperty(prop)
         }
 
