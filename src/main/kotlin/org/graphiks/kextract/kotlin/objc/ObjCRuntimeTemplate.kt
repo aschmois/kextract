@@ -28,6 +28,10 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Use [sel], [getClass] and [msgSend] to call Objective-C methods from Kotlin/JVM.
  * All ObjC object references are represented as [MemorySegment].
+ *
+ * JVM threads have no implicit autorelease pool. Wrap calls to factory methods
+ * (those not starting with alloc/new/copy/mutableCopy) inside [autoreleasePool] to
+ * ensure autoreleased objects are reclaimed correctly.
  */
 object ObjCRuntime {
 
@@ -101,6 +105,44 @@ object ObjCRuntime {
         val handle = linker.downcallHandle(objcMsgSendAddr, desc)
         val allArgs: Array<Any> = arrayOf(receiver, selector, *args)
         return handle.invokeWithArguments(*allArgs)
+    }
+
+    // ── Autorelease pool ──────────────────────────────────────────────────────
+
+    private val autoreleasePoolPushAddr: MemorySegment =
+        objcLib.find("objc_autoreleasePoolPush").orElseThrow { UnsatisfiedLinkError("objc_autoreleasePoolPush not found") }
+
+    private val autoreleasePoolPopAddr: MemorySegment =
+        objcLib.find("objc_autoreleasePoolPop").orElseThrow { UnsatisfiedLinkError("objc_autoreleasePoolPop not found") }
+
+    private val autoreleasePoolPushHandle = linker.downcallHandle(
+        autoreleasePoolPushAddr,
+        FunctionDescriptor.of(ValueLayout.ADDRESS)
+    )
+
+    private val autoreleasePoolPopHandle = linker.downcallHandle(
+        autoreleasePoolPopAddr,
+        FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+    )
+
+    /**
+     * Runs [block] within an ObjC autorelease pool.
+     * Factory methods that return autoreleased objects should be called inside this scope.
+     *
+     * Example:
+     * ```kotlin
+     * val str = ObjCRuntime.autoreleasePool {
+     *     NSString.stringWithUTF8String(cStr)
+     * }
+     * ```
+     */
+    inline fun <T> autoreleasePool(block: () -> T): T {
+        val token = autoreleasePoolPushHandle.invokeExact() as MemorySegment
+        return try {
+            block()
+        } finally {
+            autoreleasePoolPopHandle.invokeExact(token)
+        }
     }
 
     // ── Convenience helpers ───────────────────────────────────────────────────
