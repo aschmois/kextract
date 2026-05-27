@@ -65,6 +65,13 @@ object ObjCRuntime {
     val objcMsgSendAddr: MemorySegment =
         objcLib.find("objc_msgSend").orElseThrow { UnsatisfiedLinkError("objc_msgSend not found in libobjc") }
 
+    private val ARCH: String = System.getProperty("os.arch", "")
+
+    /** Address of objc_msgSend_stret — only valid on x86-64; null on ARM64. */
+    val objcMsgSendStretAddr: MemorySegment? = if (ARCH == "x86_64")
+        objcLib.find("objc_msgSend_stret").orElse(null)
+    else null
+
     private val selRegisterNameHandle = linker.downcallHandle(
         selRegisterNameAddr,
         FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
@@ -112,6 +119,20 @@ object ObjCRuntime {
         else
             FunctionDescriptor.of(returnLayout, *baseLayouts, *argLayouts)
         val handle = linker.downcallHandle(objcMsgSendAddr, desc)
+        val allArgs: Array<Any> = arrayOf(receiver, selector, *args)
+        return handle.invokeWithArguments(*allArgs)
+    }
+
+    /**
+     * Like [msgSend] but uses objc_msgSend_stret on x86-64 for methods returning large structs.
+     * On ARM64, delegates to [msgSend] (stret variant doesn't exist).
+     */
+    fun msgSendStret(returnLayout: MemoryLayout, receiver: MemorySegment, selector: MemorySegment, vararg args: Any): Any? {
+        val addr = objcMsgSendStretAddr ?: objcMsgSendAddr
+        val argLayouts = args.map { layoutFor(it) }.toTypedArray()
+        val baseLayouts = arrayOf(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        val desc = FunctionDescriptor.of(returnLayout, *baseLayouts, *argLayouts)
+        val handle = linker.downcallHandle(addr, desc)
         val allArgs: Array<Any> = arrayOf(receiver, selector, *args)
         return handle.invokeWithArguments(*allArgs)
     }
