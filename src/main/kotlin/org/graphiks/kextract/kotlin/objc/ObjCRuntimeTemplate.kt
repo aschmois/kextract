@@ -36,7 +36,16 @@ import java.util.concurrent.ConcurrentHashMap
 object ObjCRuntime {
 
     private val arena: Arena = Arena.global()
-    private val objcLib: SymbolLookup = SymbolLookup.libraryLookup("/usr/lib/libobjc.dylib", arena)
+    private val objcLib: SymbolLookup = run {
+        // On macOS the JVM links libobjc, so try the process loader first.
+        val loaderSymbol = SymbolLookup.loaderLookup().find("objc_msgSend")
+        if (loaderSymbol.isPresent) {
+            SymbolLookup.loaderLookup()
+        } else {
+            // Fallback: load by absolute path (macOS 12+)
+            SymbolLookup.libraryLookup("/usr/lib/libobjc.dylib", arena)
+        }
+    }
     private val linker: Linker = Linker.nativeLinker()
 
     // ── Caches ────────────────────────────────────────────────────────────────
