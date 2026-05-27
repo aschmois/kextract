@@ -23,6 +23,7 @@ import org.graphiks.kextract.DeclarationImpl.ClangOffsetOf
 import org.graphiks.kextract.DeclarationImpl.ClangSizeOf
 import org.graphiks.kextract.DeclarationImpl.NestedDeclarations
 import org.graphiks.kextract.DeclarationImpl.DeclarationString
+import org.graphiks.kextract.DeclarationImpl.TypedefEnumScoped
 
 import java.nio.file.Path
 
@@ -307,7 +308,35 @@ internal class TreeMaker {
                 }
             }
         }
-        return withNestedTypesNew(Declaration.typedef(CursorPosition.of(c), c.spelling(), canonicalType), c, false)
+        val typedef = withNestedTypesNew(Declaration.typedef(CursorPosition.of(c), c.spelling(), canonicalType), c, false)
+
+        // Detect typedef-wrapped enums including ObjC fixed-underlying-type enums
+        // (typedef enum : long { … } Foo) whose canonical type is a primitive, not Declared.
+        // For those, scan cursor children for an EnumDecl to attach the enum scoped.
+        if (TypedefEnumScoped.get(typedef) == null) {
+            val enumScopedFromType = when (canonicalType) {
+                is Type.Declared -> {
+                    val tree = canonicalType.tree()
+                    if (tree.kind() == Declaration.Scoped.Kind.ENUM) tree else null
+                }
+                else -> null
+            }
+            if (enumScopedFromType != null) {
+                TypedefEnumScoped.with(typedef, enumScopedFromType)
+            } else {
+                // Fallback: inspect cursor children for an EnumDecl
+                c.forEach { child ->
+                    if (child.kind() == CursorKind.EnumDecl && child.isDefinition()) {
+                        val enumDecl = createTree(child)
+                        if (enumDecl is Declaration.Scoped &&
+                            enumDecl.kind() == Declaration.Scoped.Kind.ENUM) {
+                            TypedefEnumScoped.with(typedef, enumDecl)
+                        }
+                    }
+                }
+            }
+        }
+        return typedef
     }
 
     private fun canonicalTypeNew(t: Type): Type {
@@ -423,6 +452,7 @@ internal class TreeMaker {
         val protocols = mutableListOf<String>()
         val methods = mutableListOf<Declaration.ObjCMethod>()
         val properties = mutableListOf<Declaration.ObjCProperty>()
+        val ivars = mutableListOf<Declaration.Variable>()
         c.forEach { child ->
             when (child.kindOrNull()) {
                 CursorKind.ObjCSuperClassRef    -> superClass = child.spelling()
@@ -430,10 +460,14 @@ internal class TreeMaker {
                 CursorKind.ObjCInstanceMethodDecl -> createObjCMethod(child, false)?.let { methods.add(it) }
                 CursorKind.ObjCClassMethodDecl  -> createObjCMethod(child, true)?.let { methods.add(it) }
                 CursorKind.ObjCPropertyDecl     -> createObjCProperty(child)?.let { properties.add(it) }
-                else -> {} // Unknown cursor kinds (e.g. OverloadedDeclRef) or ObjCIvarDecl — skip
+                CursorKind.ObjCIvarDecl         -> {
+                    val ivarType = toType(child.type())
+                    ivars.add(Declaration.`var`(Declaration.Variable.Kind.FIELD, CursorPosition.of(child), child.spelling(), ivarType))
+                }
+                else -> {} // Unknown cursor kinds (e.g. OverloadedDeclRef) — skip
             }
         }
-        return Declaration.objcClass(CursorPosition.of(c), c.spelling(), superClass, protocols, methods, properties)
+        return Declaration.objcClass(CursorPosition.of(c), c.spelling(), superClass, protocols, methods, properties, ivars)
     }
 
     /** Build Declaration.ObjCProtocol from an ObjCProtocolDecl cursor. */
@@ -460,19 +494,23 @@ internal class TreeMaker {
 
     /**
      * Build Declaration.ObjCCategory from an ObjCCategoryDecl cursor.
-     * For a category "@interface ClassName (CatName)", c.spelling() = "ClassName"
-     * and c.displayName() = "ClassName(CatName)".
+     *
+     * For "@interface ClassName (CatName)":
+     *  - c.spelling()     returns the **category name** ("CatName"), not the class name.
+     *  - The extended class name is carried by the first ObjCClassRef child cursor.
+     *  - c.displayName()  is not reliable across all libclang versions.
+     *
+     * We scan child cursors for ObjCClassRef to find the extended class, and use c.spelling()
+     * as the category name (may be empty for anonymous/unnamed categories).
      */
     private fun createObjCCategory(c: Cursor): Declaration.ObjCCategory? {
-        val extendedClass = c.spelling()
-        val displayName = c.displayName()
-        val catName = if (displayName.contains('(') && displayName.contains(')')) {
-            displayName.substringAfter('(').substringBefore(')')
-        } else ""
+        val catName = c.spelling()   // libclang returns the category name here
+        var extendedClass = catName  // fallback if no ObjCClassRef child is found
         val methods = mutableListOf<Declaration.ObjCMethod>()
         val properties = mutableListOf<Declaration.ObjCProperty>()
         c.forEach { child ->
             when (child.kindOrNull()) {
+                CursorKind.ObjCClassRef           -> extendedClass = child.spelling()
                 CursorKind.ObjCInstanceMethodDecl -> createObjCMethod(child, false)?.let { methods.add(it) }
                 CursorKind.ObjCClassMethodDecl    -> createObjCMethod(child, true)?.let { methods.add(it) }
                 CursorKind.ObjCPropertyDecl       -> createObjCProperty(child)?.let { properties.add(it) }
@@ -495,10 +533,12 @@ internal class TreeMaker {
             params.add(Declaration.parameter(CursorPosition.of(argCursor), argName, argType))
         }
         // Return type — use clang_getCursorResultType (c.type() returns Invalid for ObjC methods)
-        val returnType = toType(c.resultType())
+        val resultClangType = c.resultType()
+        val returnType = toType(resultClangType)
+        val returnTypeSpelling = resultClangType.spelling()
         return Declaration.objcMethod(
             CursorPosition.of(c), selector, selector, isClassMethod,
-            returnType, params, c.isObjCOptional()
+            returnType, returnTypeSpelling, params, c.isObjCOptional()
         )
     }
 
@@ -506,13 +546,15 @@ internal class TreeMaker {
     private fun createObjCProperty(c: Cursor): Declaration.ObjCProperty? {
         val attrs = c.getObjCPropertyAttributes()
         val isReadOnly = (attrs and 1) != 0   // CXObjCPropertyAttr_readonly = 1
-        val type = toType(c.type())
+        val propClangType = c.type()
+        val type = toType(propClangType)
+        val typeSpelling = propClangType.spelling()
         val propName = c.spelling()
         val getter = c.getObjCPropertyGetterName().ifEmpty { propName }
         val setter = if (isReadOnly) "" else
             c.getObjCPropertySetterName().ifEmpty {
                 "set${propName.replaceFirstChar { it.uppercaseChar() }}:"
             }
-        return Declaration.objcProperty(CursorPosition.of(c), propName, type, isReadOnly, getter, setter)
+        return Declaration.objcProperty(CursorPosition.of(c), propName, type, typeSpelling, isReadOnly, getter, setter)
     }
 }

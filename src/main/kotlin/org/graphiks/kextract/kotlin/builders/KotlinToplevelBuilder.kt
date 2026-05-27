@@ -23,9 +23,11 @@ class KotlinToplevelBuilder(
     private val headerBuilder = KotlinHeaderBuilder(builder, this)
     private val structBuilder = KotlinStructBuilder(builder, this)
     private val typedefBuilder = KotlinTypedefBuilder(builder, this)
-    private val objcClassBuilder = KotlinObjCClassBuilder(builder, this)
+    // objcClassBuilder is initialised lazily after generatedObjCClassNames is populated
+    private var objcClassBuilder = KotlinObjCClassBuilder(builder, this)
     private val objcProtocolBuilder = KotlinObjCProtocolBuilder(builder, this)
     private val objcCategoryBuilder = KotlinObjCCategoryBuilder(builder, this)
+    private val enumBuilder = KotlinEnumBuilder(builder, this)
 
     /** True if any ObjC declaration was encountered — triggers ObjCRuntime.kt emission. */
     var needsObjCRuntime: Boolean = false
@@ -92,11 +94,60 @@ class KotlinToplevelBuilder(
     }
 
     override fun visitScoped(decl: Declaration.Scoped) {
+        if (Skip.isPresent(decl)) return
         when (decl.kind()) {
-            Declaration.Scoped.Kind.STRUCT -> { if (!Skip.isPresent(decl)) structBuilder.visitStruct(decl) }
-            Declaration.Scoped.Kind.UNION  -> { if (!Skip.isPresent(decl)) structBuilder.visitUnion(decl) }
+            Declaration.Scoped.Kind.STRUCT -> structBuilder.visitStruct(decl)
+            Declaration.Scoped.Kind.UNION  -> structBuilder.visitUnion(decl)
+            Declaration.Scoped.Kind.ENUM   -> {
+                // Only generate for named enums with constants.
+                // Anonymous enums (name == "") appear only as typedef targets and are never
+                // emitted here since the typedef path handles them via typealias.
+                // For ObjC fixed-underlying-type enums (typedef enum : long { … } Foo),
+                // clang creates a named ENUM scoped with the typedef name, and the redundant
+                // typedef is filtered — so this is the only place we emit the enum class.
+                if (decl.name().isNotEmpty()) {
+                    enumBuilder.visitEnum(decl)
+                }
+            }
             else -> {
-                // For TOPLEVEL, process all members
+                // TOPLEVEL: pre-scan before generating code.
+                if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
+                    // Collect the names of all enum constants from named ENUMs inside TOPLEVEL.
+                    // Mark those named-ENUM scopeds and their constants as Skip so they are not
+                    // re-visited as standalone items.
+                    // Also mark any top-level macro Declaration.Constant whose name matches an
+                    // enum constant (clang synthesises these for each ObjC enum member).
+                    val enumConstantNames = mutableSetOf<String>()
+                    decl.members()
+                        .filterIsInstance<Declaration.Scoped>()
+                        .filter { it.kind() == Declaration.Scoped.Kind.ENUM && it.name().isNotEmpty() && !Skip.isPresent(it) }
+                        .forEach { enumScoped ->
+                            enumScoped.members()
+                                .filterIsInstance<Declaration.Constant>()
+                                .forEach { constant ->
+                                    enumConstantNames.add(constant.name())
+                                    // The constants themselves will be emitted inside the enum
+                                    // class; mark them so they are not re-emitted as globals.
+                                    Skip.with(constant)
+                                }
+                        }
+                    // Suppress macro-synthesised constants that shadow enum member names
+                    if (enumConstantNames.isNotEmpty()) {
+                        decl.members()
+                            .filterIsInstance<Declaration.Constant>()
+                            .filter { it.name() in enumConstantNames && !Skip.isPresent(it) }
+                            .forEach { constant -> Skip.with(constant) }
+                    }
+                    // Collect generated ObjCClass names so the class builder can emit superclass
+                    // clauses only for classes that will actually be generated (GRA-79).
+                    val generatedObjCClassNames = decl.members()
+                        .filterIsInstance<Declaration.ObjCClass>()
+                        .filter { !Skip.isPresent(it) }
+                        .map { it.name() }
+                        .toSet()
+                    objcClassBuilder = KotlinObjCClassBuilder(builder, this, generatedObjCClassNames)
+                }
+                // Process all members
                 for (d in decl.members()) {
                     d.accept(this)
                 }

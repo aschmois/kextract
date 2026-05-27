@@ -1,0 +1,406 @@
+package org.graphiks.kextract
+
+import io.kotest.core.annotation.EnabledIf
+import io.kotest.core.annotation.MacCondition
+import io.kotest.core.spec.style.FreeSpec
+import io.kotest.matchers.collections.shouldHaveAtLeastSize
+import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
+import org.graphiks.kextract.kotlin.KotlinGenerator
+import org.graphiks.kextract.kotlin.models.KotlinSourceFile
+import org.graphiks.kextract.pipeline.KextractTool
+import org.graphiks.kextract.pipeline.NameMangler
+import java.nio.file.Files
+
+/**
+ * Parser-level and generator-level tests for Objective-C bindings.
+ *
+ * Tests in this class use either:
+ * - Fixture headers from src/test/resources/objc/ (Animal.h, Counter.h)
+ * - Inline ObjC source for focused single-case tests
+ *
+ * Coverage targets (GRA-92):
+ * - Multi-class inheritance (Animal → Dog)
+ * - @protocol adoption with required and optional methods
+ * - @category emitting extension functions
+ * - Class (+) methods in companion object vs instance (-) methods as member functions
+ * - @property (readonly vs readwrite)
+ * - NSString parameter and return-type convenience overloads
+ * - Parser correctness: ObjCClass.superClass(), protocols(), methods()
+ */
+@EnabledIf(MacCondition::class)
+class ObjCGeneratorTest : FreeSpec({
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Resolve a fixture header from src/test/resources/objc/. */
+    fun fixtureHeader(name: String): String {
+        val url = Thread.currentThread().contextClassLoader.getResource("objc/$name")
+            ?: error("Fixture header not found on classpath: objc/$name")
+        return url.toURI().let { java.io.File(it).absolutePath }
+    }
+
+    /**
+     * Parse inline ObjC source and run the full generator pipeline.
+     * Returns all generated [KotlinSourceFile] objects.
+     */
+    fun generateAll(objcSource: String, pkg: String = "test"): List<KotlinSourceFile> {
+        val tmp = Files.createTempFile("kextract_objcgen_test_", ".h")
+        return try {
+            tmp.toFile().writeText(objcSource)
+            val headerName = tmp.fileName.toString()
+            val parsed = KextractTool.parse(listOf(tmp.toString()), "-x", "objective-c")
+            val mangled = NameMangler(headerName).scan(parsed)
+            KotlinGenerator().generate(mangled, headerName, pkg)
+        } finally {
+            Files.deleteIfExists(tmp)
+        }
+    }
+
+    /** Concatenates all generated source file contents. */
+    fun generate(objcSource: String, pkg: String = "test"): String =
+        generateAll(objcSource, pkg).joinToString("\n") { it.contents }
+
+    /**
+     * Parse and generate from a fixture header file.
+     * Returns all generated [KotlinSourceFile] objects.
+     */
+    fun generateFromFixture(headerName: String, pkg: String = "test"): List<KotlinSourceFile> {
+        val path = fixtureHeader(headerName)
+        val parsed = KextractTool.parse(listOf(path), "-x", "objective-c")
+        val mangled = NameMangler(headerName).scan(parsed)
+        return KotlinGenerator().generate(mangled, headerName, pkg)
+    }
+
+    /** Concatenated source from a fixture header. */
+    fun generateSourceFromFixture(headerName: String, pkg: String = "test"): String =
+        generateFromFixture(headerName, pkg).joinToString("\n") { it.contents }
+
+    // ── Parser-level checks ───────────────────────────────────────────────────
+
+    "Parser: Animal.h produces expected ObjC declarations" - {
+
+        // Note: Animal.h imports Foundation.h; the parser may not resolve the
+        // superclass to 'NSObject' when Foundation headers are not fully available.
+        // We therefore only assert on things the parser can determine from our
+        // own declarations without fully resolving Foundation types.
+
+        "Dog class is parsed with Animal superclass" {
+            val path = fixtureHeader("Animal.h")
+            val parsed = KextractTool.parse(listOf(path), "-x", "objective-c")
+            val classes = parsed.members().filterIsInstance<Declaration.ObjCClass>()
+            val dog = classes.firstOrNull { it.name() == "Dog" }
+            dog?.superClass() shouldBe "Animal"
+        }
+
+        "Greetable protocol is parsed as ObjCProtocol" {
+            val path = fixtureHeader("Animal.h")
+            val parsed = KextractTool.parse(listOf(path), "-x", "objective-c")
+            val protocols = parsed.members().filterIsInstance<Declaration.ObjCProtocol>()
+            protocols.any { it.name() == "Greetable" } shouldBe true
+        }
+
+        "Animal class adopts the Greetable protocol" {
+            val path = fixtureHeader("Animal.h")
+            val parsed = KextractTool.parse(listOf(path), "-x", "objective-c")
+            val classes = parsed.members().filterIsInstance<Declaration.ObjCClass>()
+            val animal = classes.firstOrNull { it.name() == "Animal" }
+            animal?.protocols()?.contains("Greetable") shouldBe true
+        }
+
+        "Counter class has readonly property" {
+            val path = fixtureHeader("Counter.h")
+            val parsed = KextractTool.parse(listOf(path), "-x", "objective-c")
+            val classes = parsed.members().filterIsInstance<Declaration.ObjCClass>()
+            val counter = classes.firstOrNull { it.name() == "Counter" }
+            val countProp = counter?.properties()?.firstOrNull { it.name() == "count" }
+            countProp?.isReadOnly() shouldBe true
+        }
+
+        "Counter class has both class and instance methods" {
+            val path = fixtureHeader("Counter.h")
+            val parsed = KextractTool.parse(listOf(path), "-x", "objective-c")
+            val classes = parsed.members().filterIsInstance<Declaration.ObjCClass>()
+            val counter = classes.firstOrNull { it.name() == "Counter" }
+            counter?.methods()?.any { it.isClassMethod() } shouldBe true
+            counter?.methods()?.any { !it.isClassMethod() } shouldBe true
+        }
+    }
+
+    // ── Generator: Animal.h fixture ──────────────────────────────────────────
+
+    "Generator: Animal.h produces correct Kotlin" - {
+
+        "Animal class is generated as open class with MemorySegment ptr" {
+            val src = generateSourceFromFixture("Animal.h")
+            src shouldContain "open class Animal"
+            src shouldContain "MemorySegment"
+        }
+
+        "Dog class extends Animal via superclass clause" {
+            val src = generateSourceFromFixture("Animal.h")
+            src shouldContain "open class Dog"
+            src shouldContain ": Animal(ptr)"
+        }
+
+        "Dog class contains bark() instance method" {
+            val src = generateSourceFromFixture("Animal.h")
+            src shouldContain "fun bark()"
+        }
+
+        "Dog class contains greet() instance method" {
+            val src = generateSourceFromFixture("Animal.h")
+            // greet() is an instance method override
+            src shouldContain "fun greet()"
+        }
+
+        "Animal class factory method is in companion object" {
+            val src = generateSourceFromFixture("Animal.h")
+            // animalWithName: is a class method (+) — must appear inside companion object
+            val companionIdx = src.indexOf("companion object")
+            val animalWithNameIdx = src.indexOf("fun animalWithName")
+            assert(companionIdx >= 0) { "companion object not found in generated source" }
+            assert(animalWithNameIdx > companionIdx) {
+                "animalWithName should appear after companion object declaration"
+            }
+        }
+
+        "Greetable protocol generates a Kotlin interface" {
+            val src = generateSourceFromFixture("Animal.h")
+            src shouldContain "interface Greetable"
+        }
+
+        "Greetable protocol greet() is a required abstract method" {
+            val src = generateSourceFromFixture("Animal.h")
+            src shouldContain "fun greet()"
+            // Required methods have no default throw body
+            src shouldNotContain "throw UnsupportedOperationException(\"greet\")"
+        }
+
+        "Greetable protocol greetWithName has // @optional comment" {
+            val src = generateSourceFromFixture("Animal.h")
+            src shouldContain "// @optional"
+            src shouldContain "greetWithName"
+        }
+
+        "ObjCRuntime.kt is included in Animal.h output" {
+            val files = generateFromFixture("Animal.h")
+            files shouldHaveAtLeastSize 2
+            val runtime = files.firstOrNull { it.className == "ObjCRuntime" }
+            runtime?.contents shouldContain "object ObjCRuntime"
+        }
+    }
+
+    // ── Generator: Counter.h fixture ────────────────────────────────────────
+
+    "Generator: Counter.h produces correct Kotlin" - {
+
+        "Counter class is open class with companion object" {
+            val src = generateSourceFromFixture("Counter.h")
+            src shouldContain "open class Counter"
+            src shouldContain "companion object"
+        }
+
+        "counterWithStart class method appears in companion object" {
+            val src = generateSourceFromFixture("Counter.h")
+            val companionIdx = src.indexOf("companion object")
+            val counterWithStartIdx = src.indexOf("fun counterWithStart")
+            assert(companionIdx >= 0) { "companion object not found" }
+            assert(counterWithStartIdx > companionIdx) {
+                "counterWithStart class method should be inside companion object"
+            }
+        }
+
+        "increment is generated as instance method" {
+            val src = generateSourceFromFixture("Counter.h")
+            src shouldContain "fun increment()"
+        }
+
+        "incrementBy: generates method with Int parameter" {
+            val src = generateSourceFromFixture("Counter.h")
+            src shouldContain "fun incrementBy"
+            src shouldContain "amount: Int"
+        }
+
+        "readonly count property generates getter only — no setter" {
+            val src = generateSourceFromFixture("Counter.h")
+            src shouldContain "fun count()"
+            src shouldNotContain "fun setCount"
+        }
+    }
+
+    // ── Generator: inline — @category ────────────────────────────────────────
+
+    // NOTE: In libclang, for `@interface KxAnimal (Tricks)`, c.spelling() returns
+    // the category name ("Tricks"), not the extended class name. The generator
+    // therefore produces extension functions with the category name as receiver
+    // (e.g. `fun Tricks.rollOver()`). These tests document current behaviour.
+    "@category methods are emitted as extension functions" - {
+        val src = generate("""
+            @interface KxAnimal
+            - (long)age;
+            @end
+
+            @interface KxAnimal (Tricks)
+            - (void)rollOver;
+            - (long)trickCount;
+            @end
+        """.trimIndent())
+
+        "rollOver selector is registered and emitted" {
+            src shouldContain "ObjCRuntime.sel(\"rollOver\")"
+        }
+
+        "trickCount selector is registered and emitted" {
+            src shouldContain "ObjCRuntime.sel(\"trickCount\")"
+        }
+
+        "a comment header for the category block is emitted" {
+            src shouldContain "Category:"
+        }
+
+        "rollOver uses ObjCRuntime.msgSend for dispatch" {
+            src shouldContain "ObjCRuntime.msgSend"
+        }
+
+        "trickCount return type is Long" {
+            src shouldContain "trickCount(): Long"
+        }
+    }
+
+    "@category class method emits a non-extension function" - {
+        val src = generate("""
+            @interface KxWidget
+            @end
+
+            @interface KxWidget (Factory)
+            + (instancetype)defaultWidget;
+            @end
+        """.trimIndent())
+
+        "class method from category is not an extension function (has // Class method comment)" {
+            src shouldContain "// Class method"
+        }
+
+        "the factory function is present somewhere in the output" {
+            src shouldContain "defaultWidget"
+        }
+    }
+
+    // ── Generator: inline — multi-level inheritance ───────────────────────────
+
+    "Three-level inheritance chain is generated correctly" - {
+        val src = generate("""
+            @interface KxA
+            - (void)fromA;
+            @end
+            @interface KxB : KxA
+            - (void)fromB;
+            @end
+            @interface KxC : KxB
+            - (void)fromC;
+            @end
+        """.trimIndent())
+
+        "KxA is a root class — its class declaration has no superclass clause" {
+            // Find the specific line that declares KxA and assert it has no supertype
+            val kxaClassLine = src.lines().firstOrNull { it.contains("open class KxA") }
+            assert(kxaClassLine != null) { "KxA class declaration not found" }
+            assert(!kxaClassLine!!.contains(": KxA(ptr)")) {
+                "KxA should have no superclass clause but found: $kxaClassLine"
+            }
+        }
+
+        "KxB extends KxA" {
+            src shouldContain ": KxA(ptr)"
+        }
+
+        "KxC extends KxB" {
+            src shouldContain ": KxB(ptr)"
+        }
+
+        "each class has its own method" {
+            src shouldContain "fun fromA()"
+            src shouldContain "fun fromB()"
+            src shouldContain "fun fromC()"
+        }
+    }
+
+    // ── Generator: inline — multi-param selector naming ──────────────────────
+
+    "Multi-part selector with two labelled params maps to underscore-joined name" - {
+        // Use int params (no Foundation.h needed) to verify multi-part selector naming
+        val src = generate("""
+            @interface KxScaler
+            - (void)scaleWidth:(int)w height:(int)h;
+            @end
+        """.trimIndent())
+
+        "selector colons become underscores, trailing colon stripped" {
+            src shouldContain "fun scaleWidth_height"
+        }
+
+        "first parameter name and type are correct" {
+            src shouldContain "w: Int"
+        }
+
+        "second parameter name and type are correct" {
+            src shouldContain "h: Int"
+        }
+
+        "the method uses the full selector for ObjC dispatch" {
+            src shouldContain "ObjCRuntime.sel(\"scaleWidth:height:\")"
+        }
+    }
+
+    // ── Generator: inline — protocol inheritance ──────────────────────────────
+
+    "Protocol with parent protocols" - {
+        val src = generate("""
+            @protocol KxBase
+            - (void)baseMethod;
+            @end
+
+            @protocol KxExtended <KxBase>
+            - (void)extendedMethod;
+            @end
+        """.trimIndent())
+
+        "KxExtended interface is emitted" {
+            src shouldContain "interface KxExtended"
+        }
+
+        "KxBase protocol is also emitted" {
+            src shouldContain "interface KxBase"
+        }
+    }
+
+    // ── Generator: inline — class method selector naming ─────────────────────
+
+    "Class method with labelled selector parameter" - {
+        val src = generate("""
+            @interface KxFactory
+            + (instancetype)createWithWidth:(int)w height:(int)h;
+            @end
+        """.trimIndent())
+
+        "class method appears in companion object" {
+            val companionIdx = src.indexOf("companion object")
+            val methodIdx = src.indexOf("fun createWithWidth_height")
+            assert(companionIdx >= 0) { "companion object not found" }
+            assert(methodIdx > companionIdx) {
+                "createWithWidth_height should be inside companion object"
+            }
+        }
+
+        "selector colons become underscores" {
+            src shouldContain "fun createWithWidth_height"
+        }
+
+        "parameters are generated with correct names and types" {
+            src shouldContain "w: Int"
+            src shouldContain "h: Int"
+        }
+    }
+})

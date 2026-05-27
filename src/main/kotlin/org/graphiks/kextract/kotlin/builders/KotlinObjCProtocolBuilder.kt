@@ -64,6 +64,7 @@ class KotlinObjCProtocolBuilder(
         val selector = method.selector()
         val params   = method.parameters()
         val retKotlin = returnTypeKotlin(method.returnType())
+        val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
             val pName = p.name().ifEmpty { "arg$i" }
@@ -73,6 +74,11 @@ class KotlinObjCProtocolBuilder(
 
         val retDecl = if (retKotlin == "Unit") "" else ": $retKotlin"
 
+        // Emit a KDoc comment when the original ObjC return type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (retSpelling.contains('<')) {
+            builder.appendLine("/** @return $retSpelling */")
+        }
         if (method.isOptional()) {
             // Default implementation: throw UnsupportedOperationException
             builder.appendLine("// @optional")
@@ -91,8 +97,14 @@ class KotlinObjCProtocolBuilder(
         val propName  = prop.name()
         val retKotlin = returnTypeKotlin(prop.type())
         val getter    = prop.getterSelector()
+        val propTypeSpelling = prop.typeSpelling()
 
         builder.appendLine("// @property $propName")
+        // Emit a KDoc comment when the original ObjC property type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (propTypeSpelling.contains('<')) {
+            builder.appendLine("/** @return $propTypeSpelling */")
+        }
         builder.appendLine("fun ${kotlinName(getter)}(): $retKotlin")
 
         if (!prop.isReadOnly()) {

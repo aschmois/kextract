@@ -101,8 +101,20 @@ fun inflate(strm: MemorySegment, flush: Int): Int = ...
 Pass `--objc` to enable ObjC parsing. `@interface`, `@protocol`, and categories are mapped to Kotlin classes / interfaces / extension functions that call the ObjC runtime via `objc_msgSend` (Panama FFI, no Kotlin/Native required).
 
 ```sh
-kextract --objc -t org.example.foundation /usr/include/Foundation/NSString.h
+kextract \
+  --objc \
+  --include-objc-class NSString \
+  -t org.example.foundation \
+  /usr/include/Foundation/NSString.h
 ```
+
+> **Important — always use `--include-objc-class` with system headers.**  
+> Foundation, UIKit, and AppKit headers pull in the entire framework tree.  
+> Without `--include-objc-class`, kextract will attempt to generate bindings for  
+> every class in the framework (thousands of declarations), which is almost  
+> certainly not what you want.  
+> Repeat the flag to include multiple classes:  
+> `--include-objc-class NSString --include-objc-class NSArray`
 
 ---
 

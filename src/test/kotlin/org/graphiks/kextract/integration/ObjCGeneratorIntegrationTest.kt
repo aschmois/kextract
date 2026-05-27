@@ -220,6 +220,23 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    // ── ObjC block pointer parameters ───────────────────────────────────────
+
+    "ObjC block parameter maps to MemorySegment" - {
+        // `void (^completion)(long)` is a BlockPointer type in libclang (TypeKind 113).
+        // It must not fall through to `Any` — it should map to MemorySegment.
+        val src = generate("""
+            @interface KxAsync
+            - (void)fetchWithCompletion:(void (^)(long result))completion;
+            @end
+        """.trimIndent())
+
+        "block parameter type is MemorySegment, not Any" {
+            src shouldContain "completion: MemorySegment"
+            src shouldNotContain "completion: Any"
+        }
+    }
+
     // ── Selector → Kotlin name mapping ───────────────────────────────────────
 
     "selector name conversion" - {
@@ -232,6 +249,320 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
         "colons in selector become underscores, trailing stripped" {
             // selector "withArg:andArg:" → kotlin name "withArg_andArg"
             src shouldContain "fun withArg_andArg"
+        }
+    }
+
+    // ── NSString convenience overloads ────────────────────────────────────────
+    // Use a minimal NSString stub instead of #include <Foundation/Foundation.h>
+    // to avoid needing -isysroot / the Xcode SDK at test time.
+    // The stub gives clang enough information to resolve NSString * as an
+    // ObjCObjectPointer type, which is all the TypeMaker / isNSString() check needs.
+    val kNSStringStub = """
+        @interface NSObject
+        @end
+        @interface NSString : NSObject
+        @end
+    """.trimIndent()
+
+    "NSString return-type convenience overload" - {
+        // NSString is a system class; use a stub so no SDK headers are needed
+        val src = generate("""
+            ${kNSStringStub}
+            @interface KxNSStringReturn
+            - (NSString *)greeting;
+            @end
+        """.trimIndent())
+
+        "raw MemorySegment method is emitted" {
+            src shouldContain "fun greeting(): MemorySegment"
+        }
+
+        "String convenience overload is emitted" {
+            src shouldContain "fun greetingAsString(): String = ObjCRuntime.toJavaString(greeting())"
+        }
+    }
+
+    "NSString parameter convenience overload" - {
+        val src = generate("""
+            ${kNSStringStub}
+            @interface KxNSStringParam
+            - (void)setTitle:(NSString *)title;
+            @end
+        """.trimIndent())
+
+        "raw MemorySegment overload is present" {
+            src shouldContain "fun setTitle(title: MemorySegment)"
+        }
+
+        "String convenience overload is emitted" {
+            src shouldContain "fun setTitle(title: String)"
+            src shouldContain "ObjCRuntime.newNSString(Arena.global(), title)"
+        }
+    }
+
+    "NSString readwrite property convenience overloads" - {
+        val src = generate("""
+            ${kNSStringStub}
+            @interface KxNSStringProp
+            @property (readwrite) NSString *label;
+            @end
+        """.trimIndent())
+
+        "raw getter is emitted" {
+            src shouldContain "fun label(): MemorySegment"
+        }
+
+        "String getter overload is emitted" {
+            src shouldContain "fun labelAsString(): String = ObjCRuntime.toJavaString(label())"
+        }
+
+        "String setter overload is emitted" {
+            src shouldContain "fun setLabel(value: String) = setLabel(ObjCRuntime.newNSString(Arena.global(), value))"
+        }
+    }
+
+    "NSString readonly property has only getter overload" - {
+        val src = generate("""
+            ${kNSStringStub}
+            @interface KxNSStringReadonly
+            @property (readonly) NSString *title;
+            @end
+        """.trimIndent())
+
+        "getter overload is emitted" {
+            src shouldContain "fun titleAsString(): String = ObjCRuntime.toJavaString(title())"
+        }
+
+        "no setter overload emitted" {
+            src shouldNotContain "fun setTitle(value: String)"
+        }
+    }
+
+    // ── @category ────────────────────────────────────────────────────────────
+
+    "ObjC category instance method becomes extension function" - {
+        val src = generate("""
+            @interface KxBase
+            @end
+            @interface KxBase (KxExtras)
+            - (long)computedValue;
+            @end
+        """.trimIndent())
+
+        "extension function on the extended class" {
+            src shouldContain "fun KxBase.computedValue()"
+        }
+
+        "message sent to ptr" {
+            src shouldContain "ObjCRuntime.msgSend"
+            src shouldContain "ptr"
+        }
+
+        "no top-level function emitted for instance method" {
+            src shouldNotContain "fun KxBase_computedValue"
+        }
+    }
+
+    "ObjC category class method becomes top-level function" - {
+        val src = generate("""
+            @interface KxFactory
+            @end
+            @interface KxFactory (KxCreation)
+            + (instancetype)createWithValue:(long)v;
+            @end
+        """.trimIndent())
+
+        "top-level function named <Class>_<method>" {
+            src shouldContain "fun KxFactory_createWithValue("
+        }
+
+        "function calls ObjCRuntime.getClass directly" {
+            src shouldContain """ObjCRuntime.getClass("KxFactory")"""
+        }
+
+        "no extension function on the class for class method" {
+            src shouldNotContain "fun KxFactory.createWithValue"
+        }
+
+        "comment identifies it as a class method" {
+            src shouldContain "// Class method: +[KxFactory createWithValue:]"
+        }
+    }
+
+    "ObjC category with both instance and class methods" - {
+        val src = generate("""
+            @interface KxMixed
+            @end
+            @interface KxMixed (KxBoth)
+            - (void)doWork;
+            + (instancetype)make;
+            @end
+        """.trimIndent())
+
+        "instance method is extension function" {
+            src shouldContain "fun KxMixed.doWork()"
+        }
+
+        "class method is top-level function" {
+            src shouldContain "fun KxMixed_make()"
+        }
+
+        "class method uses getClass, instance method uses ptr" {
+            src shouldContain """ObjCRuntime.getClass("KxMixed")"""
+            src shouldContain "ptr"
+        }
+    }
+
+    // ── NS_ENUM / NS_OPTIONS ─────────────────────────────────────────────────
+
+    "NS_ENUM generates Kotlin enum class" - {
+        // Use a typed C enum (typedef enum : long { ... }) which is exactly what NS_ENUM expands
+        // to after macro expansion.
+        val src = generate("""
+            typedef enum : long {
+                KxOrderAscending  = -1,
+                KxOrderSame       = 0,
+                KxOrderDescending = 1
+            } KxComparisonResult;
+        """.trimIndent())
+
+        "enum class is emitted instead of typealias" {
+            src shouldContain "enum class KxComparisonResult"
+            src shouldNotContain "typealias KxComparisonResult"
+        }
+
+        "enum entries carry Long values" {
+            src shouldContain "KxOrderAscending(-1L)"
+            src shouldContain "KxOrderSame(0L)"
+            src shouldContain "KxOrderDescending(1L)"
+        }
+
+        "companion object with fromValue factory" {
+            src shouldContain "companion object"
+            src shouldContain "fun fromValue(v: Long): KxComparisonResult"
+        }
+
+        "enum constants not emitted as standalone top-level functions" {
+            src shouldNotContain "fun KxOrderAscending()"
+        }
+    }
+
+    "NS_OPTIONS generates @JvmInline value class" - {
+        val src = generate("""
+            typedef enum : long {
+                KxNone              = 0,
+                KxCaseInsensitive   = 1,
+                KxLiteral           = 2,
+                KxBackwards         = 4
+            } KxStringCompareOptions;
+        """.trimIndent())
+
+        "value class with rawValue is emitted" {
+            src shouldContain "@JvmInline"
+            src shouldContain "value class KxStringCompareOptions(val rawValue: Long)"
+        }
+
+        "constants are in companion object" {
+            src shouldContain "companion object"
+            src shouldContain "val KxNone = KxStringCompareOptions(0L)"
+            src shouldContain "val KxCaseInsensitive = KxStringCompareOptions(1L)"
+        }
+
+        "bit-ops are emitted" {
+            src shouldContain "operator fun plus(o: KxStringCompareOptions)"
+            src shouldContain "operator fun contains(o: KxStringCompareOptions)"
+        }
+
+        "no typealias for options type" {
+            src shouldNotContain "typealias KxStringCompareOptions"
+        }
+    }
+
+    "Enum typedef with Flags suffix generates value class" - {
+        val src = generate("""
+            typedef enum : long {
+                KxEventNone  = 0,
+                KxEventClick = 1,
+                KxEventHover = 2
+            } KxEventFlags;
+        """.trimIndent())
+
+        "value class emitted for Flags suffix" {
+            src shouldContain "@JvmInline"
+            src shouldContain "value class KxEventFlags(val rawValue: Long)"
+        }
+    }
+
+    // ── NSString combined overloads (return + param) ──────────────────────────
+
+    "NSString method with both NSString return and NSString param" - {
+        // Regression: previously the AsString overload called the base method
+        // with zero args, causing a Kotlin compile error.
+        val src = generate("""
+            ${kNSStringStub}
+            @interface KxNSStringCombo
+            - (NSString *)transform:(NSString *)input;
+            @end
+        """.trimIndent())
+
+        "raw base method is emitted (MemorySegment params and return)" {
+            src shouldContain "fun transform(input: MemorySegment): MemorySegment"
+        }
+
+        "AsString overload with raw MemorySegment param is emitted" {
+            // Overload 1: raw param, String return
+            src shouldContain "fun transformAsString(input: MemorySegment): String = ObjCRuntime.toJavaString(transform(input))"
+        }
+
+        "String param overload returning MemorySegment is emitted" {
+            // Overload 2: String param, raw return
+            src shouldContain "fun transform(input: String): MemorySegment = transform(ObjCRuntime.newNSString(Arena.global(), input))"
+        }
+
+        "combined overload with String param and String return is emitted" {
+            // Overload 3: combined
+            src shouldContain "fun transformAsString(input: String): String = ObjCRuntime.toJavaString(transform(ObjCRuntime.newNSString(Arena.global(), input)))"
+        }
+    }
+
+    // ── Enum fromValue safe fallback ──────────────────────────────────────────
+
+    "NS_ENUM fromValue handles unknown values gracefully" - {
+        val src = generate("""
+            typedef enum : long {
+                KxStatusOk    = 0,
+                KxStatusError = 1
+            } KxStatus;
+        """.trimIndent())
+
+        "fromValue uses firstOrNull instead of first" {
+            src shouldContain "firstOrNull"
+            src shouldNotContain "entries.first {"
+        }
+
+        "fromValue emits descriptive error for unknown values" {
+            src shouldContain "error("
+            src shouldContain "Unknown KxStatus value"
+        }
+    }
+
+    // ── ObjCRuntime toJavaString null safety ──────────────────────────────────
+
+    "ObjCRuntime toJavaString is null-safe" - {
+        val files = generateAll("""
+            @interface KxDummy
+            - (long)count;
+            @end
+        """.trimIndent())
+
+        "toJavaString checks for NULL nsString" {
+            val runtime = getRuntime(files)
+            runtime shouldContain "if (nsString == MemorySegment.NULL) return"
+        }
+
+        "toJavaString checks for NULL utf8Ptr" {
+            val runtime = getRuntime(files)
+            runtime shouldContain "if (utf8Ptr == MemorySegment.NULL) return"
         }
     }
 })

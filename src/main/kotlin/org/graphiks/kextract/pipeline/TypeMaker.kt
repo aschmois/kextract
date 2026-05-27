@@ -83,7 +83,11 @@ internal object TypeMaker {
                 val d = treeMaker.createTree(t.getDeclarationCursor())
                 if (d != null) Type.declared(d as Declaration.Scoped) else Type.error(t.spelling())
             }
-            TypeKind.BlockPointer,
+            TypeKind.BlockPointer -> {
+                // ObjC block type (e.g. `void (^completion)(NSError *)`).
+                // Blocks are opaque callable objects; map to void* → MemorySegment on the Kotlin side.
+                Type.pointer(Type.void_())
+            }
             TypeKind.Pointer -> {
                 val pointee = t.getPointeeType()
                 if (pointee.kind() == TypeKind.FunctionProto ||
@@ -133,11 +137,26 @@ internal object TypeMaker {
                 val aType = makeType(t.getValueType(), treeMaker)
                 Type.qualified(Delegated.Kind.ATOMIC, aType)
             }
-            // Objective-C types — all map to opaque pointer (MemorySegment in Kotlin)
+            // Objective-C types — all map to opaque pointer (MemorySegment in Kotlin).
+            // For ObjCObjectPointer we preserve the interface name as a typedef wrapper so that
+            // post-processing code (e.g. NSString convenience-overload detection) can identify
+            // the concrete ObjC class.  TypeMapper still maps any typedef-over-pointer to
+            // MemorySegment, so the Kotlin surface is unchanged.
+            // Example: `NSString *` → Type.typedef("NSString", Type.pointer(void))
             TypeKind.ObjCId,
             TypeKind.ObjCClass,
-            TypeKind.ObjCSel,
-            TypeKind.ObjCObjectPointer,
+            TypeKind.ObjCSel -> Type.pointer(Type.void_())
+            TypeKind.ObjCObjectPointer -> {
+                // t.spelling() is e.g. "NSString *" or "NSArray<NSString *> *" or "id"
+                val spelling = t.spelling()
+                val className = spelling.removeSuffix(" *").trim()
+                // Only wrap simple (non-generic, non-id) interface names
+                if (className.isNotEmpty() && !className.contains(" ") && !className.contains("<") && className != "id") {
+                    Type.typedef(className, Type.pointer(Type.void_()))
+                } else {
+                    Type.pointer(Type.void_())
+                }
+            }
             TypeKind.ObjCInterface,
             TypeKind.ObjCObject,
             TypeKind.ObjCTypeParam -> Type.pointer(Type.void_())

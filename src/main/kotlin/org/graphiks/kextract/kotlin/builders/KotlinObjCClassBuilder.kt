@@ -18,10 +18,14 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
  *     fun length(): Long { ... }
  * }
  * ```
+ *
+ * When a superclass is also being generated in the same run its name will appear in
+ * [generatedClassNames] and the Kotlin class will extend it, passing `ptr` to `super`.
  */
 class KotlinObjCClassBuilder(
     private val builder: SourceBuilder,
-    private val toplevel: KotlinToplevelBuilder
+    private val toplevel: KotlinToplevelBuilder,
+    private val generatedClassNames: Set<String> = emptySet()
 ) {
 
     fun visitClass(decl: Declaration.ObjCClass) {
@@ -38,10 +42,16 @@ class KotlinObjCClassBuilder(
             builder.appendLine(" * Protocols: ${decl.protocols().joinToString()}")
         builder.appendLine(" */")
 
-        // Class declaration — ObjC objects are opaque MemorySegment wrappers.
-        // We don't extend the superclass because it may not be in the generated set.
-        // ObjC inheritance is enforced on the native side; the Kotlin wrapper is standalone.
-        builder.appendLine("open class $className(val ptr: MemorySegment) {")
+        // Emit the superclass clause only when the superclass is also being generated in this
+        // run (i.e. it is not Skip-marked and therefore present in generatedClassNames).
+        // System-framework root classes such as NSObject are typically not generated, so we
+        // fall back to a standalone wrapper in that case.
+        // Root classes declare `val ptr` as a property; derived classes just pass it through
+        // so they don't re-declare a property that is already inherited.
+        val superExpr = if (superClass != null && superClass in generatedClassNames)
+            " : $superClass(ptr)" else ""
+        val ptrParam = if (superExpr.isNotEmpty()) "ptr: MemorySegment" else "val ptr: MemorySegment"
+        builder.appendLine("open class $className($ptrParam)$superExpr {")
         builder.indent()
 
         // Companion object for class-level methods and the Class reference
@@ -56,8 +66,12 @@ class KotlinObjCClassBuilder(
         }
         builder.appendLine()
 
-        // Class methods (+)
-        for (method in decl.methods().filter { it.isClassMethod() }) {
+        // Class methods (+) — deduplicate by Kotlin name to avoid colliding function signatures
+        val seenClassMethods = LinkedHashSet<String>()
+        val uniqueClassMethods = decl.methods()
+            .filter { it.isClassMethod() }
+            .filter { seenClassMethods.add(kotlinName(it.selector())) }
+        for (method in uniqueClassMethods) {
             emitMethod(method, receiver = "_class")
         }
 
@@ -65,14 +79,46 @@ class KotlinObjCClassBuilder(
         builder.appendLine("}")
         builder.appendLine()
 
-        // Instance methods (-)
-        for (method in decl.methods().filter { !it.isClassMethod() }) {
+        // Collect all selectors already covered by property getter/setter synthesis so that
+        // we don't emit a plain method AND a property accessor with the same signature.
+        // ObjC synthesises a getter (and optional setter) method for every @property, so
+        // the same selector appears in both decl.methods() and decl.properties().
+        val propertySelectors: Set<String> = decl.properties()
+            .flatMapTo(mutableSetOf()) { prop ->
+                buildList {
+                    add(prop.getterSelector())
+                    if (!prop.isReadOnly()) add(prop.setterSelector())
+                }
+            }
+
+        // Instance methods (-) — deduplicate by Kotlin name; skip any selector already emitted
+        // as a property accessor to avoid "conflicting overloads" in the generated source.
+        val seenInstanceMethods = LinkedHashSet<String>()
+        val uniqueInstanceMethods = decl.methods()
+            .filter { !it.isClassMethod() }
+            .filter { it.selector() !in propertySelectors }
+            .filter { seenInstanceMethods.add(kotlinName(it.selector())) }
+        for (method in uniqueInstanceMethods) {
             emitMethod(method, receiver = "ptr")
         }
 
-        // Properties
-        for (prop in decl.properties()) {
+        // Properties — deduplicate by property name to avoid redeclaring the same getter/setter
+        val seenProperties = LinkedHashSet<String>()
+        val uniqueProperties = decl.properties()
+            .filter { seenProperties.add(it.name()) }
+        for (prop in uniqueProperties) {
             emitProperty(prop)
+        }
+
+        // Instance variables — emitted as comments since direct field access is not
+        // supported via the Panama FFI (ObjC ivars are not part of the stable ABI).
+        val ivars = decl.ivars()
+        if (ivars.isNotEmpty()) {
+            builder.appendLine()
+            builder.appendLine("// ── Instance variables (direct field access not supported via Panama) ──")
+            for (ivar in ivars) {
+                builder.appendLine("// ivar: ${ivar.name()}: ${TypeMapper.map(ivar.type())}")
+            }
         }
 
         builder.unindent()
@@ -86,6 +132,7 @@ class KotlinObjCClassBuilder(
         val retType = method.returnType()
         val retKotlin = returnTypeKotlin(retType)
         val retLayout = returnLayout(retType)
+        val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
             val pName = p.name().ifEmpty { "arg$i" }
@@ -95,6 +142,11 @@ class KotlinObjCClassBuilder(
 
         val retDecl = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
 
+        // Emit a KDoc comment when the original ObjC return type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (retSpelling.contains('<')) {
+            builder.appendLine("/** @return $retSpelling */")
+        }
         builder.appendLine("fun ${kotlinName(selector)}($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
@@ -102,14 +154,91 @@ class KotlinObjCClassBuilder(
         val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
+        val isStructReturn = retType is Type.Declared
         if (retKotlin == "Unit") {
             builder.appendLine("ObjCRuntime.msgSend(null, $receiver, sel$argsExpr)")
+        } else if (isStructReturn) {
+            // Note: uses msgSendStret on x86-64 for large struct returns
+            builder.appendLine("return ObjCRuntime.msgSendStret($retLayout, $receiver, sel$argsExpr) as $retKotlin")
         } else {
             builder.appendLine("return ObjCRuntime.msgSend($retLayout, $receiver, sel$argsExpr) as $retKotlin")
         }
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
+
+        // Emit String convenience overloads for NSString parameters / return type
+        emitNSStringMethodOverloads(method, receiver)
+    }
+
+    /**
+     * Emits convenience overloads when a method has NSString parameters or returns NSString.
+     *
+     * Up to three overloads may be generated (in addition to the raw base method):
+     *
+     * 1. **Return-type overload** (`AsString` suffix) — forwards all params as-is (MemorySegment)
+     *    and wraps the NSString return value:
+     *    `fun fooAsString(p: MemorySegment): String = ObjCRuntime.toJavaString(foo(p))`
+     *
+     * 2. **Parameter overload** — replaces each NSString param with `String` and wraps it:
+     *    `fun foo(p: String): MemorySegment = foo(ObjCRuntime.newNSString(Arena.global(), p))`
+     *
+     * 3. **Combined overload** (only when both conditions hold) — String params + String return:
+     *    `fun fooAsString(p: String): String = ObjCRuntime.toJavaString(foo(ObjCRuntime.newNSString(...)))`
+     *
+     * All overloads are skipped when neither condition applies.
+     */
+    private fun emitNSStringMethodOverloads(method: Declaration.ObjCMethod, receiver: String) {
+        val params = method.parameters()
+        val retType = method.returnType()
+        val fnName = kotlinName(method.selector())
+        val nsStringReturnType = isNSString(retType)
+        val nsStringParams = params.map { isNSString(it.type()) }
+        val hasNSStringParam = nsStringParams.any { it }
+
+        if (!nsStringReturnType && !hasNSStringParam) return
+
+        // Raw param list — MemorySegment for NSString params (same as base method)
+        val rawParamList = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            "$pName: ${TypeMapper.map(p.type())}"
+        }.joinToString(", ")
+        val rawArgs = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+
+        // String param list — String for NSString params, MemorySegment for the rest
+        val stringParamList = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            val pType = if (nsStringParams[i]) "String" else TypeMapper.map(p.type())
+            "$pName: $pType"
+        }.joinToString(", ")
+        val wrappedArgs = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            if (nsStringParams[i]) "ObjCRuntime.newNSString(Arena.global(), $pName)" else pName
+        }.joinToString(", ")
+
+        val retKotlin = returnTypeKotlin(retType)
+        val retDecl = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
+
+        // Overload 1: NSString return → AsString suffix, raw (MemorySegment) params
+        if (nsStringReturnType) {
+            builder.appendLine("/** Convenience overload — returns Kotlin [String] by converting the NSString via UTF8String. */")
+            builder.appendLine("fun ${fnName}AsString($rawParamList): String = ObjCRuntime.toJavaString($fnName($rawArgs))")
+            builder.appendLine()
+        }
+
+        // Overload 2: NSString param(s) → String params, original return type
+        if (hasNSStringParam) {
+            builder.appendLine("/** Convenience overload — accepts Kotlin [String] for NSString parameters. */")
+            builder.appendLine("fun $fnName($stringParamList)$retDecl = $fnName($wrappedArgs)")
+            builder.appendLine()
+
+            // Overload 3 (combined): String params + String return — only when return is also NSString
+            if (nsStringReturnType) {
+                builder.appendLine("/** Convenience overload — [String] parameters and [String] return type. */")
+                builder.appendLine("fun ${fnName}AsString($stringParamList): String = ObjCRuntime.toJavaString($fnName($wrappedArgs))")
+                builder.appendLine()
+            }
+        }
     }
 
     private fun emitProperty(prop: Declaration.ObjCProperty) {
@@ -117,13 +246,23 @@ class KotlinObjCClassBuilder(
         val retKotlin = returnTypeKotlin(prop.type())
         val retLayout = returnLayout(prop.type())
         val getter = prop.getterSelector()
+        val propTypeSpelling = prop.typeSpelling()
 
+        val isStructReturn = prop.type() is Type.Declared
         builder.appendLine("// @property $propName")
+        // Emit a KDoc comment when the original ObjC property type carries generic information
+        // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.
+        if (propTypeSpelling.contains('<')) {
+            builder.appendLine("/** @return $propTypeSpelling */")
+        }
         builder.appendLine("fun ${kotlinName(getter)}(): $retKotlin {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")
         if (retKotlin == "Unit") {
             builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel)")
+        } else if (isStructReturn) {
+            // Note: uses msgSendStret on x86-64 for large struct returns
+            builder.appendLine("return ObjCRuntime.msgSendStret($retLayout, ptr, sel) as $retKotlin")
         } else {
             builder.appendLine("return ObjCRuntime.msgSend($retLayout, ptr, sel) as $retKotlin")
         }
@@ -141,6 +280,46 @@ class KotlinObjCClassBuilder(
             builder.appendLine("}")
         }
         builder.appendLine()
+
+        // NSString convenience overloads for properties
+        if (isNSString(prop.type())) {
+            val getterFn = kotlinName(getter)
+            // Getter: String overload
+            builder.appendLine("/** Convenience overload — returns Kotlin [String] by converting the NSString via UTF8String. */")
+            builder.appendLine("fun ${getterFn}AsString(): String = ObjCRuntime.toJavaString($getterFn())")
+            builder.appendLine()
+            // Setter: String overload (only for readwrite properties)
+            if (!prop.isReadOnly()) {
+                val setterFn = kotlinName(prop.setterSelector().removeSuffix(":"))
+                builder.appendLine("/** Convenience overload — accepts Kotlin [String] for the NSString property. */")
+                builder.appendLine("fun $setterFn(value: String) = $setterFn(ObjCRuntime.newNSString(Arena.global(), value))")
+                builder.appendLine()
+            }
+        }
+    }
+
+    /**
+     * Returns true when [type] represents NSString or NSString*.
+     *
+     * In practice Foundation headers always use pointer types (`NSString *`), so the
+     * libclang type tree is:
+     *   Type.Delegated(POINTER) → Type.Delegated(TYPEDEF, name="NSString")
+     *
+     * We also handle the bare-typedef case just in case.
+     */
+    private fun isNSString(type: Type): Boolean {
+        if (type is Type.Delegated) {
+            // Direct typedef: NSString (rare)
+            if (type.kind() == Type.Delegated.Kind.TYPEDEF && type.name() == "NSString") return true
+            // Pointer to typedef: NSString * (the common case from Foundation headers)
+            if (type.kind() == Type.Delegated.Kind.POINTER) {
+                val inner = type.type()
+                if (inner is Type.Delegated &&
+                    inner.kind() == Type.Delegated.Kind.TYPEDEF &&
+                    inner.name() == "NSString") return true
+            }
+        }
+        return false
     }
 
     companion object {

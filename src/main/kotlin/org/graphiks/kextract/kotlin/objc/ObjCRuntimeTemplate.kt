@@ -28,11 +28,24 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Use [sel], [getClass] and [msgSend] to call Objective-C methods from Kotlin/JVM.
  * All ObjC object references are represented as [MemorySegment].
+ *
+ * JVM threads have no implicit autorelease pool. Wrap calls to factory methods
+ * (those not starting with alloc/new/copy/mutableCopy) inside [autoreleasePool] to
+ * ensure autoreleased objects are reclaimed correctly.
  */
 object ObjCRuntime {
 
     private val arena: Arena = Arena.global()
-    private val objcLib: SymbolLookup = SymbolLookup.libraryLookup("/usr/lib/libobjc.dylib", arena)
+    private val objcLib: SymbolLookup = run {
+        // On macOS the JVM links libobjc, so try the process loader first.
+        val loaderSymbol = SymbolLookup.loaderLookup().find("objc_msgSend")
+        if (loaderSymbol.isPresent) {
+            SymbolLookup.loaderLookup()
+        } else {
+            // Fallback: load by absolute path (macOS 12+)
+            SymbolLookup.libraryLookup("/usr/lib/libobjc.dylib", arena)
+        }
+    }
     private val linker: Linker = Linker.nativeLinker()
 
     // ── Caches ────────────────────────────────────────────────────────────────
@@ -51,6 +64,13 @@ object ObjCRuntime {
     /** Address of objc_msgSend — exposed so generated code can build typed handles. */
     val objcMsgSendAddr: MemorySegment =
         objcLib.find("objc_msgSend").orElseThrow { UnsatisfiedLinkError("objc_msgSend not found in libobjc") }
+
+    private val ARCH: String = System.getProperty("os.arch", "")
+
+    /** Address of objc_msgSend_stret — only valid on x86-64; null on ARM64. */
+    val objcMsgSendStretAddr: MemorySegment? = if (ARCH == "x86_64")
+        objcLib.find("objc_msgSend_stret").orElse(null)
+    else null
 
     private val selRegisterNameHandle = linker.downcallHandle(
         selRegisterNameAddr,
@@ -103,6 +123,58 @@ object ObjCRuntime {
         return handle.invokeWithArguments(*allArgs)
     }
 
+    /**
+     * Like [msgSend] but uses objc_msgSend_stret on x86-64 for methods returning large structs.
+     * On ARM64, delegates to [msgSend] (stret variant doesn't exist).
+     */
+    fun msgSendStret(returnLayout: MemoryLayout, receiver: MemorySegment, selector: MemorySegment, vararg args: Any): Any? {
+        val addr = objcMsgSendStretAddr ?: objcMsgSendAddr
+        val argLayouts = args.map { layoutFor(it) }.toTypedArray()
+        val baseLayouts = arrayOf(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        val desc = FunctionDescriptor.of(returnLayout, *baseLayouts, *argLayouts)
+        val handle = linker.downcallHandle(addr, desc)
+        val allArgs: Array<Any> = arrayOf(receiver, selector, *args)
+        return handle.invokeWithArguments(*allArgs)
+    }
+
+    // ── Autorelease pool ──────────────────────────────────────────────────────
+
+    private val autoreleasePoolPushAddr: MemorySegment =
+        objcLib.find("objc_autoreleasePoolPush").orElseThrow { UnsatisfiedLinkError("objc_autoreleasePoolPush not found") }
+
+    private val autoreleasePoolPopAddr: MemorySegment =
+        objcLib.find("objc_autoreleasePoolPop").orElseThrow { UnsatisfiedLinkError("objc_autoreleasePoolPop not found") }
+
+    @PublishedApi internal val autoreleasePoolPushHandle = linker.downcallHandle(
+        autoreleasePoolPushAddr,
+        FunctionDescriptor.of(ValueLayout.ADDRESS)
+    )
+
+    @PublishedApi internal val autoreleasePoolPopHandle = linker.downcallHandle(
+        autoreleasePoolPopAddr,
+        FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+    )
+
+    /**
+     * Runs [block] within an ObjC autorelease pool.
+     * Factory methods that return autoreleased objects should be called inside this scope.
+     *
+     * Example:
+     * ```kotlin
+     * val str = ObjCRuntime.autoreleasePool {
+     *     NSString.stringWithUTF8String(cStr)
+     * }
+     * ```
+     */
+    inline fun <T> autoreleasePool(block: () -> T): T {
+        val token = autoreleasePoolPushHandle.invokeExact() as MemorySegment
+        return try {
+            block()
+        } finally {
+            autoreleasePoolPopHandle.invokeExact(token)
+        }
+    }
+
     // ── Convenience helpers ───────────────────────────────────────────────────
 
     /**
@@ -122,10 +194,15 @@ object ObjCRuntime {
      * The raw pointer returned from native code has byteSize=0 in Panama's
      * safety model. We reinterpret it with Long.MAX_VALUE so [getString] can
      * scan for the null terminator.
+     *
+     * Returns an empty string if [nsString] is NULL or if [UTF8String] returns NULL
+     * (e.g. deallocated object, encoding error).
      */
     fun toJavaString(nsString: MemorySegment): String {
+        if (nsString == MemorySegment.NULL) return ""
         val utf8Ptr = (msgSend(ValueLayout.ADDRESS, nsString, sel("UTF8String")) as MemorySegment)
             .reinterpret(Long.MAX_VALUE)
+        if (utf8Ptr == MemorySegment.NULL) return ""
         return utf8Ptr.getString(0)
     }
 

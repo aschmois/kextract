@@ -150,7 +150,9 @@ class UnsupportedFilter(private val logger: Logger) : Declaration.Visitor<Unit> 
     }
 
     private fun warnSkip(pos: Position, treeName: String, message: String) {
-        logger.warn("kextract.skip.unsupported", treeName, message, pos = pos)
+        if (KextractConfig.verbose) {
+            logger.warn("kextract.skip.unsupported", treeName, message, pos = pos)
+        }
     }
 
     private fun unsupportedType(type: Type): String = logger.format("unsupported.type", type)

@@ -66,7 +66,13 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
     val inclStructs   by option("--include-struct",        metavar = "NAME", help = "Include struct").multiple()
     val inclUnions    by option("--include-union",         metavar = "NAME", help = "Include union").multiple()
     val inclTypedefs  by option("--include-typedef",       metavar = "NAME", help = "Include typedef").multiple()
-    val inclObjcClass by option("--include-objc-class",    metavar = "NAME", help = "Include ObjC class").multiple()
+    val inclObjcClass by option("--include-objc-class", metavar = "NAME",
+        help = """Only generate bindings for the named ObjC class (repeatable).
+                 |Strongly recommended when the input header imports system frameworks
+                 |(Foundation, UIKit, AppKit) — without this flag kextract will attempt
+                 |to generate bindings for the entire framework, which produces thousands
+                 |of files and likely fails. Example: --include-objc-class NSString""".trimMargin()
+    ).multiple()
     val inclObjcProto by option("--include-objc-protocol", metavar = "NAME", help = "Include ObjC protocol").multiple()
     val inclObjcCat   by option("--include-objc-category", metavar = "NAME", help = "Include ObjC category").multiple()
 
@@ -80,6 +86,10 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Enable Objective-C parsing mode (-x objective-c -fobjc-arc); macOS only"
     ).flag()
 
+    val verbose by option("--verbose",
+        help = "Show warnings for skipped system declarations (default: suppressed)"
+    ).flag()
+
     // ── Positional ───────────────────────────────────────────────────────────
 
     val headers by argument("headers", help = "C/ObjC header files to process").multiple(required = true)
@@ -87,7 +97,22 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
     // ── Run ──────────────────────────────────────────────────────────────────
 
     override fun run() {
+        KextractConfig.verbose = verbose
+
         if (objc && !isMacOSX) logger.warn("kextract.objc.non.macos.warning")
+
+        if (objc && inclObjcClass.isEmpty()) {
+            val systemSdkMarkers = listOf("MacOSX", "/usr/include", "/SDK", ".sdk/")
+            val hasSystemHeader = headers.any { h -> systemSdkMarkers.any { marker -> h.contains(marker) } }
+                || extraClangArgs.any { a -> systemSdkMarkers.any { marker -> a.contains(marker) } }
+            if (hasSystemHeader) {
+                System.err.println(
+                    "Warning: --objc used without --include-objc-class. " +
+                    "This may generate thousands of bindings from system headers. " +
+                    "Use --include-objc-class <ClassName> to restrict output."
+                )
+            }
+        }
 
         val includeHelper = IncludeHelper().also { h ->
             dumpIncludes?.let { h.dumpIncludesFile = it }

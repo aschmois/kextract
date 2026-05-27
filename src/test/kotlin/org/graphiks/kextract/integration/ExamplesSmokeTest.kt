@@ -71,6 +71,38 @@ class ExamplesSmokeTest : FreeSpec({
             output shouldContain "Hello, World!"
         }
     }
+
+    "objc-comprehensive" - {
+        """covers inheritance, protocol, category, NS_ENUM and NS_OPTIONS in one run""" {
+            assumeTrue(System.getProperty("os.name") == "Mac OS X",
+                "ObjC example requires macOS")
+            assumeTrue(kextractBinary.exists(),
+                "kextract binary not found — run ./gradlew createKextractImage")
+            assumeTrue(findOnPath("kotlinc") != null,
+                "kotlinc not on PATH — install via 'brew install kotlin'")
+
+            val (exitCode, output) = runExample("objc-comprehensive", timeoutSeconds = 180)
+            println(output)
+            assert(exitCode == 0) { "run.sh exited with $exitCode:\n$output" }
+
+            // NS_OPTIONS: filling two flags gives raw value 3; shadow flag absent
+            output shouldContain "bitflags: combined=3"
+            output shouldContain "has-shadow: false"
+            // NS_ENUM: rectangle discriminant value
+            output shouldContain "enum: kind=1"
+            output shouldContain "enum: fromValue=ShapeKindUnknown"
+            // Base class: area + describe (NSString convenience overload)
+            output shouldContain "area: 15.0"
+            output shouldContain "describe: Shape(5.0 x 3.0)"
+            // Category: perimeter extension on Shape
+            output shouldContain "perimeter: 16.0"
+            // Inheritance: Rectangle.area() delegated to Shape, draw() own impl
+            output shouldContain "rect-area: 24.0"
+            output shouldContain "draw: Rectangle(4.0 x 6.0)"
+            // Category extension also reachable through subtype
+            output shouldContain "rect-perimeter: 20.0"
+        }
+    }
 })
 
 private fun findOnPath(name: String): String? =
