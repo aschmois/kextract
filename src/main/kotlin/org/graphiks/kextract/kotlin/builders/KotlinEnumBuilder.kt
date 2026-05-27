@@ -58,7 +58,10 @@ class KotlinEnumBuilder(
         builder.appendLine()
         builder.appendLine("companion object {")
         builder.indent()
-        builder.appendLine("fun fromValue(v: Long): ${name} = entries.first { it.value == v }")
+        // Use firstOrNull so unknown values (e.g. future SDK additions) produce a clear error
+        // instead of an unhelpful NoSuchElementException.
+        builder.appendLine("fun fromValue(v: Long): ${name} = entries.firstOrNull { it.value == v }")
+        builder.appendLine("    ?: error(\"Unknown ${name} value: \$v\")")
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()

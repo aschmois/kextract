@@ -492,4 +492,77 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
             src shouldContain "value class KxEventFlags(val rawValue: Long)"
         }
     }
+
+    // ── NSString combined overloads (return + param) ──────────────────────────
+
+    "NSString method with both NSString return and NSString param" - {
+        // Regression: previously the AsString overload called the base method
+        // with zero args, causing a Kotlin compile error.
+        val src = generate("""
+            ${kNSStringStub}
+            @interface KxNSStringCombo
+            - (NSString *)transform:(NSString *)input;
+            @end
+        """.trimIndent())
+
+        "raw base method is emitted (MemorySegment params and return)" {
+            src shouldContain "fun transform(input: MemorySegment): MemorySegment"
+        }
+
+        "AsString overload with raw MemorySegment param is emitted" {
+            // Overload 1: raw param, String return
+            src shouldContain "fun transformAsString(input: MemorySegment): String = ObjCRuntime.toJavaString(transform(input))"
+        }
+
+        "String param overload returning MemorySegment is emitted" {
+            // Overload 2: String param, raw return
+            src shouldContain "fun transform(input: String): MemorySegment = transform(ObjCRuntime.newNSString(Arena.global(), input))"
+        }
+
+        "combined overload with String param and String return is emitted" {
+            // Overload 3: combined
+            src shouldContain "fun transformAsString(input: String): String = ObjCRuntime.toJavaString(transform(ObjCRuntime.newNSString(Arena.global(), input)))"
+        }
+    }
+
+    // ── Enum fromValue safe fallback ──────────────────────────────────────────
+
+    "NS_ENUM fromValue handles unknown values gracefully" - {
+        val src = generate("""
+            typedef enum : long {
+                KxStatusOk    = 0,
+                KxStatusError = 1
+            } KxStatus;
+        """.trimIndent())
+
+        "fromValue uses firstOrNull instead of first" {
+            src shouldContain "firstOrNull"
+            src shouldNotContain "entries.first {"
+        }
+
+        "fromValue emits descriptive error for unknown values" {
+            src shouldContain "error("
+            src shouldContain "Unknown KxStatus value"
+        }
+    }
+
+    // ── ObjCRuntime toJavaString null safety ──────────────────────────────────
+
+    "ObjCRuntime toJavaString is null-safe" - {
+        val files = generateAll("""
+            @interface KxDummy
+            - (long)count;
+            @end
+        """.trimIndent())
+
+        "toJavaString checks for NULL nsString" {
+            val runtime = getRuntime(files)
+            runtime shouldContain "if (nsString == MemorySegment.NULL) return"
+        }
+
+        "toJavaString checks for NULL utf8Ptr" {
+            val runtime = getRuntime(files)
+            runtime shouldContain "if (utf8Ptr == MemorySegment.NULL) return"
+        }
+    }
 })

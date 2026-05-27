@@ -194,10 +194,15 @@ object ObjCRuntime {
      * The raw pointer returned from native code has byteSize=0 in Panama's
      * safety model. We reinterpret it with Long.MAX_VALUE so [getString] can
      * scan for the null terminator.
+     *
+     * Returns an empty string if [nsString] is NULL or if [UTF8String] returns NULL
+     * (e.g. deallocated object, encoding error).
      */
     fun toJavaString(nsString: MemorySegment): String {
+        if (nsString == MemorySegment.NULL) return ""
         val utf8Ptr = (msgSend(ValueLayout.ADDRESS, nsString, sel("UTF8String")) as MemorySegment)
             .reinterpret(Long.MAX_VALUE)
+        if (utf8Ptr == MemorySegment.NULL) return ""
         return utf8Ptr.getString(0)
     }
 

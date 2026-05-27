@@ -160,47 +160,70 @@ class KotlinObjCClassBuilder(
     /**
      * Emits convenience overloads when a method has NSString parameters or returns NSString.
      *
-     * - NSString **return**: emits `fun methodNameAsString(): String = ObjCRuntime.toJavaString(methodName())`
-     * - NSString **parameter(s)**: emits an overload where each NSString parameter accepts `String`
-     *   and is wrapped with `ObjCRuntime.newNSString(Arena.global(), value)` before forwarding.
+     * Up to three overloads may be generated (in addition to the raw base method):
      *
-     * Both kinds of overload are skipped when neither case applies.
+     * 1. **Return-type overload** (`AsString` suffix) — forwards all params as-is (MemorySegment)
+     *    and wraps the NSString return value:
+     *    `fun fooAsString(p: MemorySegment): String = ObjCRuntime.toJavaString(foo(p))`
+     *
+     * 2. **Parameter overload** — replaces each NSString param with `String` and wraps it:
+     *    `fun foo(p: String): MemorySegment = foo(ObjCRuntime.newNSString(Arena.global(), p))`
+     *
+     * 3. **Combined overload** (only when both conditions hold) — String params + String return:
+     *    `fun fooAsString(p: String): String = ObjCRuntime.toJavaString(foo(ObjCRuntime.newNSString(...)))`
+     *
+     * All overloads are skipped when neither condition applies.
      */
     private fun emitNSStringMethodOverloads(method: Declaration.ObjCMethod, receiver: String) {
-        val selector = method.selector()
         val params = method.parameters()
         val retType = method.returnType()
-        val fnName = kotlinName(selector)
+        val fnName = kotlinName(method.selector())
         val nsStringReturnType = isNSString(retType)
         val nsStringParams = params.map { isNSString(it.type()) }
         val hasNSStringParam = nsStringParams.any { it }
 
-        // Return-type overload: fun methodNameAsString(): String
+        if (!nsStringReturnType && !hasNSStringParam) return
+
+        // Raw param list — MemorySegment for NSString params (same as base method)
+        val rawParamList = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            "$pName: ${TypeMapper.map(p.type())}"
+        }.joinToString(", ")
+        val rawArgs = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+
+        // String param list — String for NSString params, MemorySegment for the rest
+        val stringParamList = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            val pType = if (nsStringParams[i]) "String" else TypeMapper.map(p.type())
+            "$pName: $pType"
+        }.joinToString(", ")
+        val wrappedArgs = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            if (nsStringParams[i]) "ObjCRuntime.newNSString(Arena.global(), $pName)" else pName
+        }.joinToString(", ")
+
+        val retKotlin = returnTypeKotlin(retType)
+        val retDecl = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
+
+        // Overload 1: NSString return → AsString suffix, raw (MemorySegment) params
         if (nsStringReturnType) {
             builder.appendLine("/** Convenience overload — returns Kotlin [String] by converting the NSString via UTF8String. */")
-            builder.appendLine("fun ${fnName}AsString(): String = ObjCRuntime.toJavaString($fnName())")
+            builder.appendLine("fun ${fnName}AsString($rawParamList): String = ObjCRuntime.toJavaString($fnName($rawArgs))")
             builder.appendLine()
         }
 
-        // Parameter overload: replace NSString params with String
+        // Overload 2: NSString param(s) → String params, original return type
         if (hasNSStringParam) {
-            val stringParamList = params.mapIndexed { i, p ->
-                val pName = p.name().ifEmpty { "arg$i" }
-                val pType = if (nsStringParams[i]) "String" else TypeMapper.map(p.type())
-                "$pName: $pType"
-            }.joinToString(", ")
-
-            val forwardArgs = params.mapIndexed { i, p ->
-                val pName = p.name().ifEmpty { "arg$i" }
-                if (nsStringParams[i]) "ObjCRuntime.newNSString(Arena.global(), $pName)" else pName
-            }.joinToString(", ")
-
-            val retKotlin = returnTypeKotlin(retType)
-            val retDecl = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
-
             builder.appendLine("/** Convenience overload — accepts Kotlin [String] for NSString parameters. */")
-            builder.appendLine("fun $fnName($stringParamList)$retDecl = $fnName($forwardArgs)")
+            builder.appendLine("fun $fnName($stringParamList)$retDecl = $fnName($wrappedArgs)")
             builder.appendLine()
+
+            // Overload 3 (combined): String params + String return — only when return is also NSString
+            if (nsStringReturnType) {
+                builder.appendLine("/** Convenience overload — [String] parameters and [String] return type. */")
+                builder.appendLine("fun ${fnName}AsString($stringParamList): String = ObjCRuntime.toJavaString($fnName($wrappedArgs))")
+                builder.appendLine()
+            }
         }
     }
 

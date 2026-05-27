@@ -77,10 +77,10 @@ class MissingDepChecker(private val logger: Logger) : Declaration.Visitor<Unit> 
         when {
             type is Type.Declared -> {
                 if (Skip.isPresent(type.tree())) {
-                    if (KextractConfig.verbose) {
-                        logger.err("kextract.bad.include", decl.name(), type.tree().name(),
-                            pos = decl.pos())
-                    }
+                    // Always emit the error regardless of verbose mode — a missing dependency
+                    // would produce corrupt bindings and must abort generation.
+                    logger.err("kextract.bad.include", decl.name(), type.tree().name(),
+                        pos = decl.pos())
                 }
             }
             type is Delegated && type.kind() == Delegated.Kind.TYPEDEF ->
