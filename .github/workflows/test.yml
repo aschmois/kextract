@@ -75,6 +75,11 @@ jobs:
 
       - name: 'Unit tests'
         shell: bash
+        # Point JAVA_HOME at JDK 25 (the toolchain JDK) so that kotlinc, when invoked
+        # by ExamplesSmokeTest's run.sh scripts, compiles the generated bindings with a
+        # Panama-aware compiler. Gradle itself still uses -Pjdk_home for the test toolchain.
+        env:
+          JAVA_HOME: ${{ steps.setup.outputs.toolchain-path }}
         run: |
           ./gradlew \
             -Pjdk_home="${{ steps.setup.outputs.toolchain-path }}" \
@@ -84,6 +89,8 @@ jobs:
       - name: 'Examples smoke test'
         if: matrix.run-examples
         shell: bash
+        env:
+          JAVA_HOME: ${{ steps.setup.outputs.toolchain-path }}
         run: |
           ./gradlew \
             -Pjdk_home="${{ steps.setup.outputs.toolchain-path }}" \
