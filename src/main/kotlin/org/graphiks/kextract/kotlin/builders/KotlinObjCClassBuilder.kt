@@ -94,6 +94,17 @@ class KotlinObjCClassBuilder(
             emitProperty(prop)
         }
 
+        // Instance variables — emitted as comments since direct field access is not
+        // supported via the Panama FFI (ObjC ivars are not part of the stable ABI).
+        val ivars = decl.ivars()
+        if (ivars.isNotEmpty()) {
+            builder.appendLine()
+            builder.appendLine("// ── Instance variables (direct field access not supported via Panama) ──")
+            for (ivar in ivars) {
+                builder.appendLine("// ivar: ${ivar.name()}: ${TypeMapper.map(ivar.type())}")
+            }
+        }
+
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
@@ -218,7 +229,29 @@ class KotlinObjCClassBuilder(
             builder.appendLine("}")
         }
         builder.appendLine()
+
+        // NSString convenience overloads for properties
+        if (isNSString(prop.type())) {
+            val getterFn = kotlinName(getter)
+            // Getter: String overload
+            builder.appendLine("/** Convenience overload — returns Kotlin [String] by converting the NSString via UTF8String. */")
+            builder.appendLine("fun ${getterFn}AsString(): String = ObjCRuntime.toJavaString($getterFn())")
+            builder.appendLine()
+            // Setter: String overload (only for readwrite properties)
+            if (!prop.isReadOnly()) {
+                val setterFn = kotlinName(prop.setterSelector().removeSuffix(":"))
+                builder.appendLine("/** Convenience overload — accepts Kotlin [String] for the NSString property. */")
+                builder.appendLine("fun $setterFn(value: String) = $setterFn(ObjCRuntime.newNSString(Arena.global(), value))")
+                builder.appendLine()
+            }
+        }
     }
+
+    /** Returns true when [type] is the NSString typedef (a TYPEDEF-kind Delegated whose name is "NSString"). */
+    private fun isNSString(type: Type): Boolean =
+        type is Type.Delegated &&
+        type.kind() == Type.Delegated.Kind.TYPEDEF &&
+        type.name() == "NSString"
 
     companion object {
         /** Maps an ObjC return type to the Kotlin type name. */

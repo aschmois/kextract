@@ -251,4 +251,80 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
             src shouldContain "fun withArg_andArg"
         }
     }
+
+    // ── NSString convenience overloads ────────────────────────────────────────
+
+    "NSString return-type convenience overload" - {
+        // NSString is a system class; use it as a return type on a custom class method
+        val src = generate("""
+            #include <Foundation/Foundation.h>
+            @interface KxNSStringReturn
+            - (NSString *)greeting;
+            @end
+        """.trimIndent())
+
+        "raw MemorySegment method is emitted" {
+            src shouldContain "fun greeting(): MemorySegment"
+        }
+
+        "String convenience overload is emitted" {
+            src shouldContain "fun greetingAsString(): String = ObjCRuntime.toJavaString(greeting())"
+        }
+    }
+
+    "NSString parameter convenience overload" - {
+        val src = generate("""
+            #include <Foundation/Foundation.h>
+            @interface KxNSStringParam
+            - (void)setTitle:(NSString *)title;
+            @end
+        """.trimIndent())
+
+        "raw MemorySegment overload is present" {
+            src shouldContain "fun setTitle(title: MemorySegment)"
+        }
+
+        "String convenience overload is emitted" {
+            src shouldContain "fun setTitle(title: String)"
+            src shouldContain "ObjCRuntime.newNSString(Arena.global(), title)"
+        }
+    }
+
+    "NSString readwrite property convenience overloads" - {
+        val src = generate("""
+            #include <Foundation/Foundation.h>
+            @interface KxNSStringProp
+            @property (readwrite) NSString *label;
+            @end
+        """.trimIndent())
+
+        "raw getter is emitted" {
+            src shouldContain "fun label(): MemorySegment"
+        }
+
+        "String getter overload is emitted" {
+            src shouldContain "fun labelAsString(): String = ObjCRuntime.toJavaString(label())"
+        }
+
+        "String setter overload is emitted" {
+            src shouldContain "fun setLabel(value: String) = setLabel(ObjCRuntime.newNSString(Arena.global(), value))"
+        }
+    }
+
+    "NSString readonly property has only getter overload" - {
+        val src = generate("""
+            #include <Foundation/Foundation.h>
+            @interface KxNSStringReadonly
+            @property (readonly) NSString *title;
+            @end
+        """.trimIndent())
+
+        "getter overload is emitted" {
+            src shouldContain "fun titleAsString(): String = ObjCRuntime.toJavaString(title())"
+        }
+
+        "no setter overload emitted" {
+            src shouldNotContain "fun setTitle(value: String)"
+        }
+    }
 })
