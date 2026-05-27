@@ -18,10 +18,14 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
  *     fun length(): Long { ... }
  * }
  * ```
+ *
+ * When a superclass is also being generated in the same run its name will appear in
+ * [generatedClassNames] and the Kotlin class will extend it, passing `ptr` to `super`.
  */
 class KotlinObjCClassBuilder(
     private val builder: SourceBuilder,
-    private val toplevel: KotlinToplevelBuilder
+    private val toplevel: KotlinToplevelBuilder,
+    private val generatedClassNames: Set<String> = emptySet()
 ) {
 
     fun visitClass(decl: Declaration.ObjCClass) {
@@ -38,10 +42,14 @@ class KotlinObjCClassBuilder(
             builder.appendLine(" * Protocols: ${decl.protocols().joinToString()}")
         builder.appendLine(" */")
 
-        // Class declaration — ObjC objects are opaque MemorySegment wrappers.
-        // We don't extend the superclass because it may not be in the generated set.
-        // ObjC inheritance is enforced on the native side; the Kotlin wrapper is standalone.
-        builder.appendLine("open class $className(val ptr: MemorySegment) {")
+        // Emit the superclass clause only when the superclass is also being generated in this
+        // run (i.e. it is not Skip-marked and therefore present in generatedClassNames).
+        // System-framework root classes such as NSObject are typically not generated, so we
+        // fall back to a standalone wrapper in that case.
+        val superExpr = if (superClass != null && superClass in generatedClassNames)
+            " : $superClass(ptr)" else ""
+        val ctorParam = if (superExpr.isEmpty()) "val ptr: MemorySegment" else "ptr: MemorySegment"
+        builder.appendLine("open class $className($ctorParam)$superExpr {")
         builder.indent()
 
         // Companion object for class-level methods and the Class reference
@@ -113,14 +121,68 @@ class KotlinObjCClassBuilder(
         val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
+        val isStructReturn = retType is Type.Declared
         if (retKotlin == "Unit") {
             builder.appendLine("ObjCRuntime.msgSend(null, $receiver, sel$argsExpr)")
+        } else if (isStructReturn) {
+            // Note: uses msgSendStret on x86-64 for large struct returns
+            builder.appendLine("return ObjCRuntime.msgSendStret($retLayout, $receiver, sel$argsExpr) as $retKotlin")
         } else {
             builder.appendLine("return ObjCRuntime.msgSend($retLayout, $receiver, sel$argsExpr) as $retKotlin")
         }
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
+
+        // Emit String convenience overloads for NSString parameters / return type
+        emitNSStringMethodOverloads(method, receiver)
+    }
+
+    /**
+     * Emits convenience overloads when a method has NSString parameters or returns NSString.
+     *
+     * - NSString **return**: emits `fun methodNameAsString(): String = ObjCRuntime.toJavaString(methodName())`
+     * - NSString **parameter(s)**: emits an overload where each NSString parameter accepts `String`
+     *   and is wrapped with `ObjCRuntime.newNSString(Arena.global(), value)` before forwarding.
+     *
+     * Both kinds of overload are skipped when neither case applies.
+     */
+    private fun emitNSStringMethodOverloads(method: Declaration.ObjCMethod, receiver: String) {
+        val selector = method.selector()
+        val params = method.parameters()
+        val retType = method.returnType()
+        val fnName = kotlinName(selector)
+        val nsStringReturnType = isNSString(retType)
+        val nsStringParams = params.map { isNSString(it.type()) }
+        val hasNSStringParam = nsStringParams.any { it }
+
+        // Return-type overload: fun methodNameAsString(): String
+        if (nsStringReturnType) {
+            builder.appendLine("/** Convenience overload — returns Kotlin [String] by converting the NSString via UTF8String. */")
+            builder.appendLine("fun ${fnName}AsString(): String = ObjCRuntime.toJavaString($fnName())")
+            builder.appendLine()
+        }
+
+        // Parameter overload: replace NSString params with String
+        if (hasNSStringParam) {
+            val stringParamList = params.mapIndexed { i, p ->
+                val pName = p.name().ifEmpty { "arg$i" }
+                val pType = if (nsStringParams[i]) "String" else TypeMapper.map(p.type())
+                "$pName: $pType"
+            }.joinToString(", ")
+
+            val forwardArgs = params.mapIndexed { i, p ->
+                val pName = p.name().ifEmpty { "arg$i" }
+                if (nsStringParams[i]) "ObjCRuntime.newNSString(Arena.global(), $pName)" else pName
+            }.joinToString(", ")
+
+            val retKotlin = returnTypeKotlin(retType)
+            val retDecl = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
+
+            builder.appendLine("/** Convenience overload — accepts Kotlin [String] for NSString parameters. */")
+            builder.appendLine("fun $fnName($stringParamList)$retDecl = $fnName($forwardArgs)")
+            builder.appendLine()
+        }
     }
 
     private fun emitProperty(prop: Declaration.ObjCProperty) {
@@ -129,12 +191,16 @@ class KotlinObjCClassBuilder(
         val retLayout = returnLayout(prop.type())
         val getter = prop.getterSelector()
 
+        val isStructReturn = prop.type() is Type.Declared
         builder.appendLine("// @property $propName")
         builder.appendLine("fun ${kotlinName(getter)}(): $retKotlin {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")
         if (retKotlin == "Unit") {
             builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel)")
+        } else if (isStructReturn) {
+            // Note: uses msgSendStret on x86-64 for large struct returns
+            builder.appendLine("return ObjCRuntime.msgSendStret($retLayout, ptr, sel) as $retKotlin")
         } else {
             builder.appendLine("return ObjCRuntime.msgSend($retLayout, ptr, sel) as $retKotlin")
         }

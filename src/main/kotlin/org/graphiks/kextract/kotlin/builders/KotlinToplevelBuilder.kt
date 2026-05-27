@@ -23,7 +23,8 @@ class KotlinToplevelBuilder(
     private val headerBuilder = KotlinHeaderBuilder(builder, this)
     private val structBuilder = KotlinStructBuilder(builder, this)
     private val typedefBuilder = KotlinTypedefBuilder(builder, this)
-    private val objcClassBuilder = KotlinObjCClassBuilder(builder, this)
+    // objcClassBuilder is initialised lazily after generatedObjCClassNames is populated
+    private var objcClassBuilder = KotlinObjCClassBuilder(builder, this)
     private val objcProtocolBuilder = KotlinObjCProtocolBuilder(builder, this)
     private val objcCategoryBuilder = KotlinObjCCategoryBuilder(builder, this)
 
@@ -96,7 +97,17 @@ class KotlinToplevelBuilder(
             Declaration.Scoped.Kind.STRUCT -> { if (!Skip.isPresent(decl)) structBuilder.visitStruct(decl) }
             Declaration.Scoped.Kind.UNION  -> { if (!Skip.isPresent(decl)) structBuilder.visitUnion(decl) }
             else -> {
-                // For TOPLEVEL, process all members
+                // For TOPLEVEL: collect generated ObjCClass names first so the class builder
+                // can emit superclass clauses only for classes that will actually be generated.
+                if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
+                    val generatedObjCClassNames = decl.members()
+                        .filterIsInstance<Declaration.ObjCClass>()
+                        .filter { !Skip.isPresent(it) }
+                        .map { it.name() }
+                        .toSet()
+                    objcClassBuilder = KotlinObjCClassBuilder(builder, this, generatedObjCClassNames)
+                }
+                // Process all members
                 for (d in decl.members()) {
                     d.accept(this)
                 }
