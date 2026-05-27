@@ -75,6 +75,7 @@ enum class CursorKind(val value: Int) {
     // ObjC reference kinds (used as children during traversal)
     ObjCSuperClassRef(CXCursor_ObjCSuperClassRef()),
     ObjCProtocolRef(CXCursor_ObjCProtocolRef()),
+    ObjCClassRef(CXCursor_ObjCClassRef()),
     // Preprocessor
     MacroDefinition(CXCursor_MacroDefinition()),
     MacroExpansion(CXCursor_MacroExpansion()),

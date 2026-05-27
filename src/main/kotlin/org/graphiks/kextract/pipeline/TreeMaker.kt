@@ -460,19 +460,23 @@ internal class TreeMaker {
 
     /**
      * Build Declaration.ObjCCategory from an ObjCCategoryDecl cursor.
-     * For a category "@interface ClassName (CatName)", c.spelling() = "ClassName"
-     * and c.displayName() = "ClassName(CatName)".
+     *
+     * For "@interface ClassName (CatName)":
+     *  - c.spelling()     returns the **category name** ("CatName"), not the class name.
+     *  - The extended class name is carried by the first ObjCClassRef child cursor.
+     *  - c.displayName()  is not reliable across all libclang versions.
+     *
+     * We scan child cursors for ObjCClassRef to find the extended class, and use c.spelling()
+     * as the category name (may be empty for anonymous/unnamed categories).
      */
     private fun createObjCCategory(c: Cursor): Declaration.ObjCCategory? {
-        val extendedClass = c.spelling()
-        val displayName = c.displayName()
-        val catName = if (displayName.contains('(') && displayName.contains(')')) {
-            displayName.substringAfter('(').substringBefore(')')
-        } else ""
+        val catName = c.spelling()   // libclang returns the category name here
+        var extendedClass = catName  // fallback if no ObjCClassRef child is found
         val methods = mutableListOf<Declaration.ObjCMethod>()
         val properties = mutableListOf<Declaration.ObjCProperty>()
         c.forEach { child ->
             when (child.kindOrNull()) {
+                CursorKind.ObjCClassRef           -> extendedClass = child.spelling()
                 CursorKind.ObjCInstanceMethodDecl -> createObjCMethod(child, false)?.let { methods.add(it) }
                 CursorKind.ObjCClassMethodDecl    -> createObjCMethod(child, true)?.let { methods.add(it) }
                 CursorKind.ObjCPropertyDecl       -> createObjCProperty(child)?.let { properties.add(it) }

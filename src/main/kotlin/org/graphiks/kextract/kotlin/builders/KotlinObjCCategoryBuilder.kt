@@ -10,15 +10,25 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
 /**
  * Generates Kotlin extension functions for an Objective-C @category declaration.
  *
- * Each method in the category becomes an extension function on the extended class.
+ * Instance methods (-) become extension functions on the extended class.
+ * Class methods (+) become top-level functions named `<ClassName>_<methodName>` that
+ * call `ObjCRuntime.getClass("ClassName")` directly — extension functions on the
+ * companion object cannot access its private `_class` lazy property.
  * Properties become extension getter (and optional setter) functions.
  *
  * Example output for `@interface NSString (MyCategory)`:
  * ```kotlin
  * // Category: MyCategory on NSString
+ * // Instance method: -[NSString myMethod:]
  * fun NSString.myMethod(arg: MemorySegment): MemorySegment {
  *     val sel = ObjCRuntime.sel("myMethod:")
  *     return ObjCRuntime.msgSend(ValueLayout.ADDRESS, ptr, sel, arg) as MemorySegment
+ * }
+ * // Class method: +[NSString stringFromInt:]
+ * fun NSString_stringFromInt(value: Int): MemorySegment {
+ *     val sel = ObjCRuntime.sel("stringFromInt:")
+ *     val cls = ObjCRuntime.getClass("NSString")
+ *     return ObjCRuntime.msgSend(ValueLayout.ADDRESS, cls, sel, value) as MemorySegment
  * }
  * ```
  */
@@ -30,14 +40,20 @@ class KotlinObjCCategoryBuilder(
     fun visitCategory(decl: Declaration.ObjCCategory) {
         if (Skip.isPresent(decl)) return
 
-        val extClass    = decl.extendedClass()
-        val catName     = decl.categoryName()
+        val extClass = decl.extendedClass()
+        val catName  = decl.categoryName()
 
         builder.appendLine("// ── Category: $catName on $extClass ─────────────────────────────────────────")
         builder.appendLine()
 
-        for (method in decl.methods()) {
-            emitMethod(extClass, method)
+        val (classMethods, instanceMethods) = decl.methods().partition { it.isClassMethod() }
+
+        for (method in instanceMethods) {
+            emitInstanceMethod(extClass, method)
+        }
+
+        for (method in classMethods) {
+            emitClassMethod(extClass, method)
         }
 
         for (prop in decl.properties()) {
@@ -45,7 +61,11 @@ class KotlinObjCCategoryBuilder(
         }
     }
 
-    private fun emitMethod(extClass: String, method: Declaration.ObjCMethod) {
+    /**
+     * Emits an instance (-) method as an extension function on [extClass].
+     * The ObjC message is sent to `ptr` (the wrapped MemorySegment).
+     */
+    private fun emitInstanceMethod(extClass: String, method: Declaration.ObjCMethod) {
         val selector  = method.selector()
         val params    = method.parameters()
         val retKotlin = returnTypeKotlin(method.returnType())
@@ -57,34 +77,55 @@ class KotlinObjCCategoryBuilder(
             "$pName: $pType"
         }.joinToString(", ")
 
-        val retDecl = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
-
-        // Class methods on a category get a plain function (not extension) since we
-        // don't have the class object. Use a companion-like top-level function instead.
-        val receiver = if (method.isClassMethod()) {
-            builder.appendLine("// Class method +[$extClass $selector]")
-            null
-        } else {
-            extClass
-        }
-
-        if (receiver != null) {
-            builder.appendLine("fun $receiver.${kotlinName(selector)}($paramList)$retDecl {")
-        } else {
-            builder.appendLine("fun ${extClass}_${kotlinName(selector)}($paramList)$retDecl {")
-        }
-        builder.indent()
-        builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
-
+        val retDecl  = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
         val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
-        val receiverExpr = if (method.isClassMethod()) "ObjCRuntime.getClass(\"$extClass\")" else "ptr"
-
+        builder.appendLine("fun $extClass.${kotlinName(selector)}($paramList)$retDecl {")
+        builder.indent()
+        builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
         if (retKotlin == "Unit") {
-            builder.appendLine("ObjCRuntime.msgSend(null, $receiverExpr, sel$argsExpr)")
+            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel$argsExpr)")
         } else {
-            builder.appendLine("return ObjCRuntime.msgSend($retLayout, $receiverExpr, sel$argsExpr) as $retKotlin")
+            builder.appendLine("return ObjCRuntime.msgSend($retLayout, ptr, sel$argsExpr) as $retKotlin")
+        }
+        builder.unindent()
+        builder.appendLine("}")
+        builder.appendLine()
+    }
+
+    /**
+     * Emits a class (+) method as a top-level function named `<extClass>_<methodName>`.
+     *
+     * Extension functions on a companion object cannot access its private `_class`
+     * property, so we call `ObjCRuntime.getClass` directly inside the function body
+     * instead of relying on companion state.
+     */
+    private fun emitClassMethod(extClass: String, method: Declaration.ObjCMethod) {
+        val selector  = method.selector()
+        val params    = method.parameters()
+        val retKotlin = returnTypeKotlin(method.returnType())
+        val retLayout = returnLayout(method.returnType())
+
+        val paramList = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            val pType = TypeMapper.map(p.type())
+            "$pName: $pType"
+        }.joinToString(", ")
+
+        val retDecl  = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
+        val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
+
+        builder.appendLine("// Class method: +[$extClass $selector]")
+        builder.appendLine("fun ${extClass}_${kotlinName(selector)}($paramList)$retDecl {")
+        builder.indent()
+        builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
+        builder.appendLine("val cls = ObjCRuntime.getClass(\"$extClass\")")
+        if (retKotlin == "Unit") {
+            builder.appendLine("ObjCRuntime.msgSend(null, cls, sel$argsExpr)")
+        } else {
+            builder.appendLine("return ObjCRuntime.msgSend($retLayout, cls, sel$argsExpr) as $retKotlin")
         }
         builder.unindent()
         builder.appendLine("}")

@@ -327,4 +327,79 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
             src shouldNotContain "fun setTitle(value: String)"
         }
     }
+
+    // ── @category ────────────────────────────────────────────────────────────
+
+    "ObjC category instance method becomes extension function" - {
+        val src = generate("""
+            @interface KxBase
+            @end
+            @interface KxBase (KxExtras)
+            - (long)computedValue;
+            @end
+        """.trimIndent())
+
+        "extension function on the extended class" {
+            src shouldContain "fun KxBase.computedValue()"
+        }
+
+        "message sent to ptr" {
+            src shouldContain "ObjCRuntime.msgSend"
+            src shouldContain "ptr"
+        }
+
+        "no top-level function emitted for instance method" {
+            src shouldNotContain "fun KxBase_computedValue"
+        }
+    }
+
+    "ObjC category class method becomes top-level function" - {
+        val src = generate("""
+            @interface KxFactory
+            @end
+            @interface KxFactory (KxCreation)
+            + (instancetype)createWithValue:(long)v;
+            @end
+        """.trimIndent())
+
+        "top-level function named <Class>_<method>" {
+            src shouldContain "fun KxFactory_createWithValue("
+        }
+
+        "function calls ObjCRuntime.getClass directly" {
+            src shouldContain """ObjCRuntime.getClass("KxFactory")"""
+        }
+
+        "no extension function on the class for class method" {
+            src shouldNotContain "fun KxFactory.createWithValue"
+        }
+
+        "comment identifies it as a class method" {
+            src shouldContain "// Class method: +[KxFactory createWithValue:]"
+        }
+    }
+
+    "ObjC category with both instance and class methods" - {
+        val src = generate("""
+            @interface KxMixed
+            @end
+            @interface KxMixed (KxBoth)
+            - (void)doWork;
+            + (instancetype)make;
+            @end
+        """.trimIndent())
+
+        "instance method is extension function" {
+            src shouldContain "fun KxMixed.doWork()"
+        }
+
+        "class method is top-level function" {
+            src shouldContain "fun KxMixed_make()"
+        }
+
+        "class method uses getClass, instance method uses ptr" {
+            src shouldContain """ObjCRuntime.getClass("KxMixed")"""
+            src shouldContain "ptr"
+        }
+    }
 })
