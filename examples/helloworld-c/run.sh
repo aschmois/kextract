@@ -79,6 +79,11 @@ rm -rf out && mkdir out
 echo "✓ out/app.jar"
 
 # ── 7. Run ──────────────────────────────────────────────────────────────────
+# SymbolLookup.libraryLookup(name, arena) calls dlopen(name) directly on Linux —
+# it does NOT consult -Djava.library.path. Export LD_LIBRARY_PATH (and
+# DYLD_LIBRARY_PATH for macOS dyld) so the loader finds libhello.$LIB_EXT.
+export LD_LIBRARY_PATH="$SCRIPT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export DYLD_LIBRARY_PATH="$SCRIPT_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 echo "▶ Running…"
 echo ""
 "$ROOT/build/kextract/runtime/bin/java" \
