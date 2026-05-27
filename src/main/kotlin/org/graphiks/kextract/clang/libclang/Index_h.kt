@@ -17,6 +17,68 @@ private object kextract_runtime {
     val C_POINTER: ValueLayout = ValueLayout.ADDRESS
 
     init {
+        loadLibclang()
+    }
+
+    /**
+     * Loads libclang with full cross-platform support:
+     *
+     * - **Windows**: [System.loadLibrary] maps "clang" → "clang.dll", but LLVM ships the
+     *   library as "libclang.dll". We search [java.library.path] explicitly for both names.
+     * - **Linux**: libclang.so depends on libLLVM.so at runtime. We preload libLLVM first
+     *   so that [java.lang.foreign.SymbolLookup.loaderLookup] can resolve all symbols after
+     *   libclang is loaded (otherwise dlsym returns null for symbols only visible through
+     *   the transitive dependency chain under RTLD_LAZY).
+     * - **macOS**: [System.loadLibrary]("clang") works as-is; we still prefer an explicit
+     *   path to stay consistent.
+     */
+    private fun loadLibclang() {
+        val libPath = System.getProperty("java.library.path") ?: ""
+        val isWindows = System.getProperty("os.name", "").startsWith("Windows")
+        val dirs = libPath.split(java.io.File.pathSeparatorChar)
+            .map { java.io.File(it) }
+            .filter { it.isDirectory }
+
+        // On Linux, preload libLLVM.so so that dlopen can resolve libclang.so's
+        // transitive symbols when SymbolLookup.loaderLookup().findOrThrow() is called.
+        if (!isWindows) {
+            for (dir in dirs) {
+                val llvm = dir.listFiles { f ->
+                    (f.name.startsWith("libLLVM.so") || f.name.startsWith("libLLVM.dylib") ||
+                        f.name.startsWith("libLLVM-")) && !f.name.endsWith(".a")
+                }?.maxByOrNull { it.length() }
+                if (llvm != null) {
+                    try { System.load(llvm.canonicalPath) } catch (_: UnsatisfiedLinkError) { }
+                    break
+                }
+            }
+        }
+
+        // Find and load libclang by absolute path.
+        // On Windows, LLVM ships "libclang.dll" but System.mapLibraryName("clang") → "clang.dll".
+        val stdName = System.mapLibraryName("clang") // libclang.so / libclang.dylib / clang.dll
+        val candidates = if (isWindows) listOf(stdName, "libclang.dll") else listOf(stdName)
+        for (dir in dirs) {
+            for (name in candidates) {
+                val f = java.io.File(dir, name)
+                if (f.exists()) {
+                    System.load(f.canonicalPath)
+                    return
+                }
+            }
+            // Versioned-name fallback on non-Windows (e.g. libclang.so.22.1.6 without symlink).
+            if (!isWindows) {
+                val versioned = dir.listFiles { f ->
+                    f.name.startsWith("libclang.so.") || f.name.startsWith("libclang-")
+                }?.maxByOrNull { it.length() }
+                if (versioned != null) {
+                    System.load(versioned.canonicalPath)
+                    return
+                }
+            }
+        }
+
+        // Last resort: let the JVM find the library via the standard search path.
         System.loadLibrary("clang")
     }
 }

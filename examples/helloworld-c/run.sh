@@ -23,10 +23,17 @@ if [[ ! -x "$KEXTRACT" ]]; then
 fi
 
 # ── 2. Compile the native library ───────────────────────────────────────────
+# Use the platform-appropriate shared-library extension.
+case "$(uname)" in
+    Darwin) LIB_EXT=dylib ;;
+    *)      LIB_EXT=so ;;
+esac
+LIB_NAME="libhello.$LIB_EXT"
+
 echo "▶ Compiling hello.c…"
 cd "$SCRIPT_DIR"
-cc -shared -fPIC -o libhello.dylib hello.c
-echo "✓ libhello.dylib"
+cc -shared -fPIC -o "$LIB_NAME" hello.c
+echo "✓ $LIB_NAME"
 
 # ── 3. Generate Kotlin bindings ─────────────────────────────────────────────
 echo "▶ Generating Kotlin bindings…"
@@ -34,7 +41,7 @@ rm -rf generated
 "$KEXTRACT" \
     --target-package org.example.hello \
     --output generated \
-    --library :libhello.dylib \
+    --library ":$LIB_NAME" \
     hello.h
 echo "✓ Bindings in generated/"
 
