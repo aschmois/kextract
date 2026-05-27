@@ -39,19 +39,12 @@ private object kextract_runtime {
             .map { java.io.File(it) }
             .filter { it.isDirectory }
 
-        // Preload libLLVM (libclang's runtime dependency on Linux/Windows). Safe to skip
-        // failures — if libclang doesn't actually need it, loading still succeeds below.
-        for (dir in dirs) {
-            val llvm = dir.listFiles { f ->
-                (f.name.startsWith("libLLVM.so") || f.name.startsWith("libLLVM.dylib") ||
-                    f.name.startsWith("libLLVM-") || f.name.startsWith("LLVM-C")) &&
-                    !f.name.endsWith(".a") && !f.name.endsWith(".lib")
-            }?.maxByOrNull { it.length() }
-            if (llvm != null) {
-                try { System.load(llvm.canonicalPath) } catch (_: UnsatisfiedLinkError) { }
-                break
-            }
-        }
+        // We deliberately do NOT preload libLLVM here: SymbolLookup.libraryLookup() opens
+        // libclang via dlopen(), which resolves DT_NEEDED dependencies (libLLVM.so.22 on
+        // Linux) via the OS dynamic linker — provided LD_LIBRARY_PATH points at the lib
+        // dir, which our test task and example launchers arrange. Preloading libLLVM via
+        // System.load() ahead of libclang has been observed to destabilise libclang on
+        // Linux (SIGSEGV in libc syscall during later libclang calls).
 
         // Find libclang itself.
         val stdName = System.mapLibraryName("clang") // libclang.so / libclang.dylib / clang.dll
