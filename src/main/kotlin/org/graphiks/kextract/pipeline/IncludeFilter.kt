@@ -2,6 +2,7 @@ package org.graphiks.kextract.pipeline
 
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
+import org.graphiks.kextract.Type
 
 class IncludeFilter(private val includeHelper: IncludeHelper) : Declaration.Visitor<Unit> {
 
@@ -36,7 +37,26 @@ class IncludeFilter(private val includeHelper: IncludeHelper) : Declaration.Visi
     }
 
     override fun visitTypedef(tree: Declaration.Typedef) {
-        if (!includeHelper.isIncluded(tree)) Skip.with(tree)
+        // Always keep typedefs that alias primitive or struct types, even when filtering is active.
+        // These "foundational" typealiases (BOOL, CGFloat, NSInteger, NSRect, NSPoint, …) are
+        // required by any generated ObjC binding that references them; they must survive
+        // --include-objc-class filtering regardless of whether they were explicitly listed.
+        if (!includeHelper.isIncluded(tree) && !isFoundationalTypealias(tree.type())) {
+            Skip.with(tree)
+        }
+    }
+
+    /**
+     * Returns true when [type] resolves (through typedef/qualifier chains, not pointer
+     * indirections) to a primitive or struct type — i.e. the kind of type whose Kotlin
+     * typealias must always be emitted so that ObjC bindings compile.
+     */
+    private fun isFoundationalTypealias(type: Type): Boolean = when {
+        type is Type.Primitive && type.kind() != Type.Primitive.Kind.Void -> true
+        type is Type.Declared && type.tree().kind() == Declaration.Scoped.Kind.STRUCT -> true
+        type is Type.Delegated && type.kind() != Type.Delegated.Kind.POINTER ->
+            isFoundationalTypealias(type.type())
+        else -> false
     }
 
     override fun visitVariable(tree: Declaration.Variable) {

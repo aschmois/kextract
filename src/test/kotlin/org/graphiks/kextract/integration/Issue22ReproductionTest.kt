@@ -120,6 +120,140 @@ class Issue22ReproductionTest : FreeSpec({
         src shouldNotContain "ObjCRuntime.msgSend(ValueLayout.ADDRESS, ptr, sel) as NSUInteger"
     }
 
+    // ── Bug 2: struct-by-value return type uses GroupLayout ──────────────────
+
+    /**
+     * A method returning a struct by value (e.g. `NSRect`) must be dispatched with
+     * ObjCRuntime.msgSendStret and a MemoryLayout.structLayout(…) expression, NOT
+     * ValueLayout.ADDRESS. Using ADDRESS causes NaN / garbage values on ARM64 (Bug 2).
+     */
+    "Bug 2a — struct-by-value return uses msgSendStret with structLayout" {
+        val src = generate("""
+            typedef double CGFloat;
+            struct KxPoint { CGFloat x; CGFloat y; };
+
+            @interface KxShape
+            - (struct KxPoint)origin;
+            @end
+        """.trimIndent())
+
+        src shouldContain "msgSendStret"
+        src shouldContain "MemoryLayout.structLayout"
+        src shouldNotContain "msgSend(ValueLayout.ADDRESS, ptr, sel)"
+    }
+
+    "Bug 2b — typedef'd struct return (NSRect-style) uses msgSendStret" {
+        val src = generate("""
+            typedef double CGFloat;
+            struct KxRect { CGFloat x; CGFloat y; CGFloat width; CGFloat height; };
+            typedef struct KxRect KxRect;
+
+            @interface KxWindow
+            - (KxRect)frame;
+            @end
+        """.trimIndent())
+
+        src shouldContain "msgSendStret"
+        src shouldContain "MemoryLayout.structLayout"
+    }
+
+    "Bug 2c — struct return layout contains correct field names and types" {
+        val src = generate("""
+            typedef double CGFloat;
+            struct KxPoint { CGFloat x; CGFloat y; };
+
+            @interface KxView
+            - (struct KxPoint)center;
+            @end
+        """.trimIndent())
+
+        src shouldContain "withName(\"x\")"
+        src shouldContain "withName(\"y\")"
+        src shouldContain "JAVA_DOUBLE"
+    }
+
+    // ── Bug 3: struct-by-value argument is wrapped with ObjCStructArg ────────
+
+    /**
+     * A method receiving a struct parameter by value must wrap the MemorySegment in
+     * ObjCStructArg so ObjCRuntime.msgSend uses the correct GroupLayout. Without wrapping,
+     * layoutFor() sees a MemorySegment and uses ValueLayout.ADDRESS, causing garbage geometry.
+     */
+    "Bug 3 — struct-by-value argument is wrapped in ObjCStructArg" {
+        val src = generate("""
+            typedef double CGFloat;
+            struct KxRect { CGFloat x; CGFloat y; CGFloat w; CGFloat h; };
+
+            @interface KxWindow
+            - (void)setFrame:(struct KxRect)frame;
+            @end
+        """.trimIndent())
+
+        src shouldContain "ObjCRuntime.ObjCStructArg"
+        src shouldContain "MemoryLayout.structLayout"
+    }
+
+    // ── Bug 2 runtime: ObjCRuntime.kt contains ObjCStructArg and correct msgSendStret ──
+
+    "Bug 2/3 runtime — ObjCRuntime.kt declares ObjCStructArg and fixed msgSendStret" {
+        val files = run {
+            val tmp = java.nio.file.Files.createTempFile("kextract_rt_", ".h")
+            try {
+                tmp.toFile().writeText("@interface KxDummy\n- (void)noop;\n@end")
+                val parsed = org.graphiks.kextract.pipeline.KextractTool.parse(
+                    listOf(tmp.toString()), "-x", "objective-c")
+                val mangled = org.graphiks.kextract.pipeline.NameMangler(tmp.fileName.toString()).scan(parsed)
+                org.graphiks.kextract.kotlin.KotlinGenerator().generate(mangled, tmp.fileName.toString(), "test")
+            } finally {
+                java.nio.file.Files.deleteIfExists(tmp)
+            }
+        }
+        val runtime = files.firstOrNull { it.className == "ObjCRuntime" }?.contents ?: ""
+
+        runtime shouldContain "data class ObjCStructArg"
+        runtime shouldContain "GroupLayout"
+        runtime shouldContain "SegmentAllocator"
+        // Bug 5 — layout computed before unwrap
+        runtime shouldContain "layouts before unwrap"
+        // unwrap() is present
+        runtime shouldContain "fun unwrap"
+    }
+
+    // ── Enum return types (Bug 1 extension) ───────────────────────────────────
+
+    "Bug 1 extended — NS_ENUM return type uses fromValue() not as-cast" {
+        val src = generate("""
+            typedef enum : long {
+                KxStatusOk    = 0,
+                KxStatusError = 1
+            } KxStatus;
+
+            @interface KxService
+            - (KxStatus)getStatus;
+            @end
+        """.trimIndent())
+
+        src shouldContain "KxStatus.fromValue("
+        src shouldNotContain "ObjCRuntime.msgSend(ValueLayout.ADDRESS"
+    }
+
+    "Bug 1 extended — NS_OPTIONS return type uses value class constructor" {
+        val src = generate("""
+            typedef enum : long {
+                KxNone  = 0,
+                KxRead  = 1,
+                KxWrite = 2
+            } KxPermissions;
+
+            @interface KxFile
+            - (KxPermissions)permissions;
+            @end
+        """.trimIndent())
+
+        src shouldContain "KxPermissions("
+        src shouldNotContain "ObjCRuntime.msgSend(ValueLayout.ADDRESS"
+    }
+
     // ── Bug 4: @JvmInline value class in ObjCRuntime.layoutFor() ─────────────
 
     /**
@@ -146,5 +280,66 @@ class Issue22ReproductionTest : FreeSpec({
         // The setter should pass mask.rawValue (Long) rather than mask (value class)
         // so that ObjCRuntime.layoutFor() sees a Long and doesn't crash.
         src shouldContain "mask.rawValue"
+    }
+
+    "Bug 4 — NS_ENUM (regular enum) argument is unboxed with .value" {
+        val src = generate("""
+            typedef enum : long {
+                KxAlignLeft   = 0,
+                KxAlignCenter = 1,
+                KxAlignRight  = 2
+            } KxTextAlignment;
+
+            @interface KxLabel
+            - (void)setAlignment:(KxTextAlignment)alignment;
+            @end
+        """.trimIndent())
+
+        src shouldContain "alignment.value"
+    }
+
+    // ── Bonus: foundational typealiases survive --include-objc-class filtering ──
+
+    /**
+     * When IncludeFilter is active (simulated by an IncludeHelper with at least one entry),
+     * typedefs backed by primitive types (BOOL, CGFloat, NSInteger) must NOT be Skip-marked.
+     * Without this fix, the generated code references `CGFloat` etc. but has no typealias,
+     * causing a Kotlin compile error in the downstream project.
+     */
+    "Bonus — primitive-backed typedefs survive include filtering" {
+        // Build an IncludeHelper with only ObjC class filtering active
+        val helper = org.graphiks.kextract.pipeline.IncludeHelper().also { h ->
+            h.addSymbol(org.graphiks.kextract.pipeline.IncludeHelper.IncludeKind.OBJC_CLASS, "KxWidget")
+        }
+        val filter = org.graphiks.kextract.pipeline.IncludeFilter(helper)
+
+        val tmp = java.nio.file.Files.createTempFile("kextract_bonus_", ".h")
+        try {
+            tmp.toFile().writeText("""
+                typedef double CGFloat;
+                typedef long NSInteger;
+                typedef signed char BOOL;
+                typedef struct { CGFloat x; CGFloat y; } KxPoint;
+
+                @interface KxWidget
+                - (CGFloat)scale;
+                @end
+            """.trimIndent())
+            val parsed = org.graphiks.kextract.pipeline.KextractTool.parse(
+                listOf(tmp.toString()), "-x", "objective-c")
+            // Apply filter the same way KextractTool does
+            filter.scan(parsed as org.graphiks.kextract.Declaration.Scoped)
+            val mangled = org.graphiks.kextract.pipeline.NameMangler(tmp.fileName.toString()).scan(parsed)
+            val src = org.graphiks.kextract.kotlin.KotlinGenerator()
+                .generate(mangled, tmp.fileName.toString(), "test")
+                .joinToString("\n") { it.contents }
+
+            // Primitive typealiases must be present despite filtering
+            src shouldContain "typealias CGFloat"
+            src shouldContain "typealias NSInteger"
+            src shouldContain "typealias BOOL"
+        } finally {
+            java.nio.file.Files.deleteIfExists(tmp)
+        }
     }
 })

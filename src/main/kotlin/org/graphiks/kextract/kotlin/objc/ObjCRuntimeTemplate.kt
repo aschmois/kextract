@@ -16,9 +16,11 @@ object ObjCRuntimeTemplate {
         val contents = """
 ${pkg}import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
+import java.lang.foreign.GroupLayout
 import java.lang.foreign.Linker
 import java.lang.foreign.MemoryLayout
 import java.lang.foreign.MemorySegment
+import java.lang.foreign.SegmentAllocator
 import java.lang.foreign.SymbolLookup
 import java.lang.foreign.ValueLayout
 import java.util.concurrent.ConcurrentHashMap
@@ -103,38 +105,70 @@ object ObjCRuntime {
     }
 
     /**
+     * Wraps a struct-by-value argument together with its [GroupLayout].
+     *
+     * When an ObjC method accepts a struct parameter by value (e.g. `NSRect`, `NSPoint`),
+     * the argument must be passed as a raw [MemorySegment] containing the struct bytes, but
+     * the [FunctionDescriptor] must use the matching [GroupLayout] (not [ValueLayout.ADDRESS]).
+     * Wrap the segment in [ObjCStructArg] so [msgSend] can apply the correct layout.
+     */
+    data class ObjCStructArg(val segment: MemorySegment, val layout: GroupLayout)
+
+    /**
      * Sends an ObjC message to [receiver] with selector [selector] and [args].
      *
      * - [returnLayout] = null for void-returning methods
-     * - [returnLayout] = ValueLayout.ADDRESS for id/pointer-returning methods
-     * - [returnLayout] = ValueLayout.JAVA_LONG / JAVA_INT / JAVA_DOUBLE etc. for primitives
+     * - [returnLayout] = [ValueLayout.ADDRESS] for id/pointer-returning methods
+     * - [returnLayout] = [ValueLayout.JAVA_LONG] / [ValueLayout.JAVA_DOUBLE] etc. for primitives
      *
-     * Each arg must be a Panama-compatible type: MemorySegment, Long, Int, Double, Float, Byte, Short, Boolean.
+     * Each arg must be: [MemorySegment], [Long], [Int], [Double], [Float], [Byte], [Short],
+     * [Boolean], or [ObjCStructArg] for struct-by-value arguments.
+     *
+     * Layouts are computed from the *original* args (before unwrapping) so that [ObjCStructArg]
+     * contributes its [GroupLayout] rather than [ValueLayout.ADDRESS] — this is the correct order
+     * described in issue #22 Bug 5.
      */
     fun msgSend(returnLayout: MemoryLayout?, receiver: MemorySegment, selector: MemorySegment, vararg args: Any): Any? {
-        val argLayouts = args.map { layoutFor(it) }.toTypedArray()
+        val argLayouts = args.map { layoutFor(it) }.toTypedArray()   // (Bug 5) layouts before unwrap
         val baseLayouts = arrayOf(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         val desc = if (returnLayout == null)
             FunctionDescriptor.ofVoid(*baseLayouts, *argLayouts)
         else
             FunctionDescriptor.of(returnLayout, *baseLayouts, *argLayouts)
         val handle = linker.downcallHandle(objcMsgSendAddr, desc)
-        val allArgs: Array<Any> = arrayOf(receiver, selector, *args)
-        return handle.invokeWithArguments(*allArgs)
+        val unwrapped = args.map { unwrap(it) }.toTypedArray()
+        return handle.invokeWithArguments(receiver, selector, *unwrapped)
     }
 
     /**
-     * Like [msgSend] but uses objc_msgSend_stret on x86-64 for methods returning large structs.
-     * On ARM64, delegates to [msgSend] (stret variant doesn't exist).
+     * Like [msgSend] but for methods returning a struct by value.
+     *
+     * Panama requires a [GroupLayout] in the [FunctionDescriptor] for struct-returning calls and
+     * inserts a [SegmentAllocator] as the first argument to the downcall handle.  The struct bytes
+     * are written into heap-backed storage allocated here and returned as a [MemorySegment].
+     *
+     * On x86-64 [objc_msgSend_stret] is used; on ARM64 the regular [objc_msgSend] entry point
+     * handles struct returns in registers (the stret variant does not exist there).
+     *
+     * Important: the allocator must be backed by a [DoubleArray] (8-byte aligned) rather than a
+     * [ByteArray] to satisfy Panama's alignment constraints for `double`-containing structs such
+     * as [NSRect].
      */
-    fun msgSendStret(returnLayout: MemoryLayout, receiver: MemorySegment, selector: MemorySegment, vararg args: Any): Any? {
+    fun msgSendStret(returnLayout: GroupLayout, receiver: MemorySegment, selector: MemorySegment, vararg args: Any): MemorySegment {
         val addr = objcMsgSendStretAddr ?: objcMsgSendAddr
         val argLayouts = args.map { layoutFor(it) }.toTypedArray()
-        val baseLayouts = arrayOf(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+        val baseLayouts = arrayOf<MemoryLayout>(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
         val desc = FunctionDescriptor.of(returnLayout, *baseLayouts, *argLayouts)
         val handle = linker.downcallHandle(addr, desc)
-        val allArgs: Array<Any> = arrayOf(receiver, selector, *args)
-        return handle.invokeWithArguments(*allArgs)
+        // Allocate struct-return storage. DoubleArray guarantees 8-byte alignment so that
+        // structs containing `double` fields (NSRect, NSPoint, …) pass Panama's alignment check.
+        val byteSize = returnLayout.byteSize().toInt()
+        val heapDoubles = DoubleArray((byteSize + 7) / Double.SIZE_BYTES)
+        val heapSeg = MemorySegment.ofArray(heapDoubles).asSlice(0, byteSize.toLong())
+        val allocator = SegmentAllocator.prefixAllocator(heapSeg)
+        val unwrapped = args.map { unwrap(it) }.toTypedArray()
+        // Panama inserts the allocator as the implicit first argument for GroupLayout returns.
+        return handle.invokeWithArguments(allocator, receiver, selector, *unwrapped) as MemorySegment
     }
 
     // ── Autorelease pool ──────────────────────────────────────────────────────
@@ -209,6 +243,7 @@ object ObjCRuntime {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private fun layoutFor(arg: Any): MemoryLayout = when (arg) {
+        is ObjCStructArg -> arg.layout              // struct-by-value: use the GroupLayout
         is MemorySegment -> ValueLayout.ADDRESS
         is Long          -> ValueLayout.JAVA_LONG
         is Int           -> ValueLayout.JAVA_INT
@@ -218,6 +253,12 @@ object ObjCRuntime {
         is Short         -> ValueLayout.JAVA_SHORT
         is Boolean       -> ValueLayout.JAVA_BOOLEAN
         else             -> throw IllegalArgumentException("Unsupported ObjC argument type: ${'$'}{arg::class.qualifiedName}")
+    }
+
+    /** Extracts the raw Panama-compatible value from [arg], unwrapping [ObjCStructArg]. */
+    private fun unwrap(arg: Any): Any = when (arg) {
+        is ObjCStructArg -> arg.segment
+        else             -> arg
     }
 }
 """.trimIndent()
