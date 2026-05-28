@@ -151,7 +151,12 @@ class KotlinObjCClassBuilder(
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
 
-        val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        // Unbox enum/value-class arguments so ObjCRuntime.layoutFor() sees a primitive.
+        // NS_ENUM → `.value`; NS_OPTIONS (ends with Options/Flags/Mask) → `.rawValue`.
+        val argsList = params.mapIndexed { i, p ->
+            val pName = p.name().ifEmpty { "arg$i" }
+            unboxedArgExpr(p.type(), pName)
+        }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
         val isStructReturn = retType is Type.Declared
@@ -272,10 +277,11 @@ class KotlinObjCClassBuilder(
         if (!prop.isReadOnly()) {
             val setter = prop.setterSelector()
             val paramType = TypeMapper.map(prop.type())
+            val valueExpr = unboxedArgExpr(prop.type(), "value")
             builder.appendLine("fun ${kotlinName(setter.removeSuffix(":"))}(value: $paramType) {")
             builder.indent()
             builder.appendLine("val sel = ObjCRuntime.sel(\"$setter\")")
-            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel, value)")
+            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel, $valueExpr)")
             builder.unindent()
             builder.appendLine("}")
         }
@@ -343,7 +349,11 @@ class KotlinObjCClassBuilder(
                 Type.Primitive.Kind.Double   -> "ValueLayout.JAVA_DOUBLE"
                 else                         -> "ValueLayout.ADDRESS"
             }
-            else -> "ValueLayout.ADDRESS"  // pointers, ObjC objects, structs, etc.
+            // Pointers stay as ADDRESS; all other delegated types (typedef, signed/unsigned
+            // qualifiers) are unwrapped so that e.g. `CGFloat` → JAVA_DOUBLE, `BOOL` → JAVA_BYTE.
+            type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> "ValueLayout.ADDRESS"
+            type is Type.Delegated -> returnLayout(type.type())
+            else -> "ValueLayout.ADDRESS"  // ObjC objects, structs, etc.
         }
 
         /**
@@ -353,5 +363,27 @@ class KotlinObjCClassBuilder(
          */
         fun kotlinName(selector: String): String =
             selector.replace(":", "_").trimEnd('_')
+
+        /**
+         * Returns the expression to pass for [name] when dispatching via ObjCRuntime.msgSend.
+         *
+         * Kotlin enum/value-class arguments must be unboxed to their raw primitive before being
+         * passed through vararg Any, otherwise ObjCRuntime.layoutFor() throws
+         * IllegalArgumentException.  NS_OPTIONS (value class, rawValue: Long) → name.rawValue;
+         * NS_ENUM (enum class, value: Long) → name.value; anything else → name as-is.
+         */
+        fun unboxedArgExpr(type: Type, name: String): String {
+            val enumDecl = resolveEnumDecl(type) ?: return name
+            return if (isOptionsStyle(enumDecl.name())) "$name.rawValue" else "$name.value"
+        }
+
+        private fun resolveEnumDecl(type: Type): Declaration.Scoped? = when {
+            type is Type.Declared && type.tree().kind() == Declaration.Scoped.Kind.ENUM -> type.tree()
+            type is Type.Delegated -> resolveEnumDecl(type.type())
+            else -> null
+        }
+
+        private fun isOptionsStyle(name: String): Boolean =
+            name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
     }
 }
