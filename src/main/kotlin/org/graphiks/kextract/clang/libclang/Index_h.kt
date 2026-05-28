@@ -16,12 +16,64 @@ private object kextract_runtime {
     val C_DOUBLE: ValueLayout = ValueLayout.JAVA_DOUBLE
     val C_POINTER: ValueLayout = ValueLayout.ADDRESS
 
-    init {
+    /**
+     * Direct [SymbolLookup] for libclang. We **do not** use [SymbolLookup.loaderLookup]
+     * because, on Linux and Windows, `loaderLookup()` may return a `SymbolLookup` whose
+     * internal handle lacks the loaded libclang — in particular when `libclang.so` was
+     * opened via `System.load(absolutePath)` rather than `System.loadLibrary(name)`,
+     * or when its runtime dependency on `libLLVM.so` is satisfied lazily.
+     *
+     * Instead, we resolve libclang's absolute path ourselves and call
+     * [SymbolLookup.libraryLookup] which returns a lookup bound to that specific handle.
+     *
+     * On **Windows**, LLVM ships `libclang.dll` but [System.mapLibraryName]("clang") gives
+     * `clang.dll`, so we accept either filename. On **Linux**, we also accept versioned
+     * names like `libclang.so.22.1.6` as a fallback when there's no unversioned symlink.
+     */
+    val lookup: SymbolLookup = createLibclangLookup()
+
+    private fun createLibclangLookup(): SymbolLookup {
+        val libPath = System.getProperty("java.library.path") ?: ""
+        val isWindows = System.getProperty("os.name", "").startsWith("Windows")
+        val dirs = libPath.split(java.io.File.pathSeparatorChar)
+            .map { java.io.File(it) }
+            .filter { it.isDirectory }
+
+        // We deliberately do NOT preload libLLVM here: SymbolLookup.libraryLookup() opens
+        // libclang via dlopen(), which resolves DT_NEEDED dependencies (libLLVM.so.22 on
+        // Linux) via the OS dynamic linker — provided LD_LIBRARY_PATH points at the lib
+        // dir, which our test task and example launchers arrange. Preloading libLLVM via
+        // System.load() ahead of libclang has been observed to destabilise libclang on
+        // Linux (SIGSEGV in libc syscall during later libclang calls).
+
+        // Find libclang itself.
+        val stdName = System.mapLibraryName("clang") // libclang.so / libclang.dylib / clang.dll
+        val candidates = if (isWindows) listOf(stdName, "libclang.dll") else listOf(stdName)
+        for (dir in dirs) {
+            for (name in candidates) {
+                val f = java.io.File(dir, name)
+                if (f.exists()) {
+                    return SymbolLookup.libraryLookup(f.toPath().toAbsolutePath(), Arena.global())
+                }
+            }
+            if (!isWindows) {
+                val versioned = dir.listFiles { f ->
+                    f.name.startsWith("libclang.so.") || f.name.startsWith("libclang-")
+                }?.maxByOrNull { it.length() }
+                if (versioned != null) {
+                    return SymbolLookup.libraryLookup(versioned.toPath().toAbsolutePath(), Arena.global())
+                }
+            }
+        }
+
+        // Fallback: ask the JVM to find it via java.library.path. If that succeeds, the
+        // library is loaded into the process and loaderLookup() should be able to see it.
         System.loadLibrary("clang")
+        return SymbolLookup.loaderLookup()
     }
 }
 
-// Ensure kextract_runtime (and therefore System.loadLibrary("clang")) runs before any SymbolLookup
+// Ensure kextract_runtime (and therefore libclang loading) runs before any other initialization
 private val _init = kextract_runtime
 
 /**
@@ -2303,8 +2355,8 @@ class CXStringSet {
  * {@snippet lang=c : clang_getCString (Char)*(typedef CXString = Declared(CXString))
  */
 private val clang_getCString_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXString.layout)
-private val clang_getCString_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCString")
-private val clang_getCString_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCString_ADDR, clang_getCString_DESC)
+private val clang_getCString_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCString") }
+private val clang_getCString_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCString_ADDR, clang_getCString_DESC) }
 
 fun clang_getCString(arg0: MemorySegment): MemorySegment {
     try {
@@ -2322,8 +2374,8 @@ fun clang_getCString(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_disposeString Void(typedef CXString = Declared(CXString))
  */
 private val clang_disposeString_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXString.layout)
-private val clang_disposeString_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeString")
-private val clang_disposeString_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeString_ADDR, clang_disposeString_DESC)
+private val clang_disposeString_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeString") }
+private val clang_disposeString_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeString_ADDR, clang_disposeString_DESC) }
 
 fun clang_disposeString(arg0: MemorySegment): Unit {
     try {
@@ -2341,8 +2393,8 @@ fun clang_disposeString(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_disposeStringSet Void((typedef CXStringSet = Declared(CXStringSet))*)
  */
 private val clang_disposeStringSet_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeStringSet_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeStringSet")
-private val clang_disposeStringSet_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeStringSet_ADDR, clang_disposeStringSet_DESC)
+private val clang_disposeStringSet_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeStringSet") }
+private val clang_disposeStringSet_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeStringSet_ADDR, clang_disposeStringSet_DESC) }
 
 fun clang_disposeStringSet(arg0: MemorySegment): Unit {
     try {
@@ -2360,8 +2412,8 @@ fun clang_disposeStringSet(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_getBuildSessionTimestamp UNSIGNED = LongLong()
  */
 private val clang_getBuildSessionTimestamp_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG)
-private val clang_getBuildSessionTimestamp_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getBuildSessionTimestamp")
-private val clang_getBuildSessionTimestamp_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getBuildSessionTimestamp_ADDR, clang_getBuildSessionTimestamp_DESC)
+private val clang_getBuildSessionTimestamp_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getBuildSessionTimestamp") }
+private val clang_getBuildSessionTimestamp_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getBuildSessionTimestamp_ADDR, clang_getBuildSessionTimestamp_DESC) }
 
 fun clang_getBuildSessionTimestamp(): Long {
     try {
@@ -2412,8 +2464,8 @@ typealias CXVirtualFileOverlay = MemorySegment?
  * {@snippet lang=c : clang_VirtualFileOverlay_create typedef CXVirtualFileOverlay = (Declared(CXVirtualFileOverlayImpl))*(UNSIGNED = Int)
  */
 private val clang_VirtualFileOverlay_create_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_VirtualFileOverlay_create_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_VirtualFileOverlay_create")
-private val clang_VirtualFileOverlay_create_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_create_ADDR, clang_VirtualFileOverlay_create_DESC)
+private val clang_VirtualFileOverlay_create_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_VirtualFileOverlay_create") }
+private val clang_VirtualFileOverlay_create_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_create_ADDR, clang_VirtualFileOverlay_create_DESC) }
 
 fun clang_VirtualFileOverlay_create(arg0: Int): MemorySegment {
     try {
@@ -2431,8 +2483,8 @@ fun clang_VirtualFileOverlay_create(arg0: Int): MemorySegment {
  * {@snippet lang=c : clang_VirtualFileOverlay_addFileMapping Declared(CXErrorCode)(typedef CXVirtualFileOverlay = (Declared(CXVirtualFileOverlayImpl))*,(Char)*,(Char)*)
  */
 private val clang_VirtualFileOverlay_addFileMapping_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_VirtualFileOverlay_addFileMapping_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_VirtualFileOverlay_addFileMapping")
-private val clang_VirtualFileOverlay_addFileMapping_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_addFileMapping_ADDR, clang_VirtualFileOverlay_addFileMapping_DESC)
+private val clang_VirtualFileOverlay_addFileMapping_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_VirtualFileOverlay_addFileMapping") }
+private val clang_VirtualFileOverlay_addFileMapping_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_addFileMapping_ADDR, clang_VirtualFileOverlay_addFileMapping_DESC) }
 
 fun clang_VirtualFileOverlay_addFileMapping(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -2450,8 +2502,8 @@ fun clang_VirtualFileOverlay_addFileMapping(arg0: MemorySegment, arg1: MemorySeg
  * {@snippet lang=c : clang_VirtualFileOverlay_setCaseSensitivity Declared(CXErrorCode)(typedef CXVirtualFileOverlay = (Declared(CXVirtualFileOverlayImpl))*,Int)
  */
 private val clang_VirtualFileOverlay_setCaseSensitivity_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_VirtualFileOverlay_setCaseSensitivity_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_VirtualFileOverlay_setCaseSensitivity")
-private val clang_VirtualFileOverlay_setCaseSensitivity_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_setCaseSensitivity_ADDR, clang_VirtualFileOverlay_setCaseSensitivity_DESC)
+private val clang_VirtualFileOverlay_setCaseSensitivity_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_VirtualFileOverlay_setCaseSensitivity") }
+private val clang_VirtualFileOverlay_setCaseSensitivity_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_setCaseSensitivity_ADDR, clang_VirtualFileOverlay_setCaseSensitivity_DESC) }
 
 fun clang_VirtualFileOverlay_setCaseSensitivity(arg0: MemorySegment, arg1: Int): Int {
     try {
@@ -2469,8 +2521,8 @@ fun clang_VirtualFileOverlay_setCaseSensitivity(arg0: MemorySegment, arg1: Int):
  * {@snippet lang=c : clang_VirtualFileOverlay_writeToBuffer Declared(CXErrorCode)(typedef CXVirtualFileOverlay = (Declared(CXVirtualFileOverlayImpl))*,UNSIGNED = Int,((Char)*)*,(UNSIGNED = Int)*)
  */
 private val clang_VirtualFileOverlay_writeToBuffer_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_VirtualFileOverlay_writeToBuffer_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_VirtualFileOverlay_writeToBuffer")
-private val clang_VirtualFileOverlay_writeToBuffer_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_writeToBuffer_ADDR, clang_VirtualFileOverlay_writeToBuffer_DESC)
+private val clang_VirtualFileOverlay_writeToBuffer_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_VirtualFileOverlay_writeToBuffer") }
+private val clang_VirtualFileOverlay_writeToBuffer_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_writeToBuffer_ADDR, clang_VirtualFileOverlay_writeToBuffer_DESC) }
 
 fun clang_VirtualFileOverlay_writeToBuffer(arg0: MemorySegment, arg1: Int, arg2: MemorySegment, arg3: MemorySegment): Int {
     try {
@@ -2488,8 +2540,8 @@ fun clang_VirtualFileOverlay_writeToBuffer(arg0: MemorySegment, arg1: Int, arg2:
  * {@snippet lang=c : clang_free Void((Void)*)
  */
 private val clang_free_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_free_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_free")
-private val clang_free_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_free_ADDR, clang_free_DESC)
+private val clang_free_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_free") }
+private val clang_free_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_free_ADDR, clang_free_DESC) }
 
 fun clang_free(arg0: MemorySegment): Unit {
     try {
@@ -2507,8 +2559,8 @@ fun clang_free(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_VirtualFileOverlay_dispose Void(typedef CXVirtualFileOverlay = (Declared(CXVirtualFileOverlayImpl))*)
  */
 private val clang_VirtualFileOverlay_dispose_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_VirtualFileOverlay_dispose_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_VirtualFileOverlay_dispose")
-private val clang_VirtualFileOverlay_dispose_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_dispose_ADDR, clang_VirtualFileOverlay_dispose_DESC)
+private val clang_VirtualFileOverlay_dispose_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_VirtualFileOverlay_dispose") }
+private val clang_VirtualFileOverlay_dispose_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_VirtualFileOverlay_dispose_ADDR, clang_VirtualFileOverlay_dispose_DESC) }
 
 fun clang_VirtualFileOverlay_dispose(arg0: MemorySegment): Unit {
     try {
@@ -2559,8 +2611,8 @@ typealias CXModuleMapDescriptor = MemorySegment?
  * {@snippet lang=c : clang_ModuleMapDescriptor_create typedef CXModuleMapDescriptor = (Declared(CXModuleMapDescriptorImpl))*(UNSIGNED = Int)
  */
 private val clang_ModuleMapDescriptor_create_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_ModuleMapDescriptor_create_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_ModuleMapDescriptor_create")
-private val clang_ModuleMapDescriptor_create_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_create_ADDR, clang_ModuleMapDescriptor_create_DESC)
+private val clang_ModuleMapDescriptor_create_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_ModuleMapDescriptor_create") }
+private val clang_ModuleMapDescriptor_create_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_create_ADDR, clang_ModuleMapDescriptor_create_DESC) }
 
 fun clang_ModuleMapDescriptor_create(arg0: Int): MemorySegment {
     try {
@@ -2578,8 +2630,8 @@ fun clang_ModuleMapDescriptor_create(arg0: Int): MemorySegment {
  * {@snippet lang=c : clang_ModuleMapDescriptor_setFrameworkModuleName Declared(CXErrorCode)(typedef CXModuleMapDescriptor = (Declared(CXModuleMapDescriptorImpl))*,(Char)*)
  */
 private val clang_ModuleMapDescriptor_setFrameworkModuleName_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_ModuleMapDescriptor_setFrameworkModuleName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_ModuleMapDescriptor_setFrameworkModuleName")
-private val clang_ModuleMapDescriptor_setFrameworkModuleName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_setFrameworkModuleName_ADDR, clang_ModuleMapDescriptor_setFrameworkModuleName_DESC)
+private val clang_ModuleMapDescriptor_setFrameworkModuleName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_ModuleMapDescriptor_setFrameworkModuleName") }
+private val clang_ModuleMapDescriptor_setFrameworkModuleName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_setFrameworkModuleName_ADDR, clang_ModuleMapDescriptor_setFrameworkModuleName_DESC) }
 
 fun clang_ModuleMapDescriptor_setFrameworkModuleName(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -2597,8 +2649,8 @@ fun clang_ModuleMapDescriptor_setFrameworkModuleName(arg0: MemorySegment, arg1: 
  * {@snippet lang=c : clang_ModuleMapDescriptor_setUmbrellaHeader Declared(CXErrorCode)(typedef CXModuleMapDescriptor = (Declared(CXModuleMapDescriptorImpl))*,(Char)*)
  */
 private val clang_ModuleMapDescriptor_setUmbrellaHeader_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_ModuleMapDescriptor_setUmbrellaHeader_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_ModuleMapDescriptor_setUmbrellaHeader")
-private val clang_ModuleMapDescriptor_setUmbrellaHeader_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_setUmbrellaHeader_ADDR, clang_ModuleMapDescriptor_setUmbrellaHeader_DESC)
+private val clang_ModuleMapDescriptor_setUmbrellaHeader_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_ModuleMapDescriptor_setUmbrellaHeader") }
+private val clang_ModuleMapDescriptor_setUmbrellaHeader_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_setUmbrellaHeader_ADDR, clang_ModuleMapDescriptor_setUmbrellaHeader_DESC) }
 
 fun clang_ModuleMapDescriptor_setUmbrellaHeader(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -2616,8 +2668,8 @@ fun clang_ModuleMapDescriptor_setUmbrellaHeader(arg0: MemorySegment, arg1: Memor
  * {@snippet lang=c : clang_ModuleMapDescriptor_writeToBuffer Declared(CXErrorCode)(typedef CXModuleMapDescriptor = (Declared(CXModuleMapDescriptorImpl))*,UNSIGNED = Int,((Char)*)*,(UNSIGNED = Int)*)
  */
 private val clang_ModuleMapDescriptor_writeToBuffer_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_ModuleMapDescriptor_writeToBuffer_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_ModuleMapDescriptor_writeToBuffer")
-private val clang_ModuleMapDescriptor_writeToBuffer_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_writeToBuffer_ADDR, clang_ModuleMapDescriptor_writeToBuffer_DESC)
+private val clang_ModuleMapDescriptor_writeToBuffer_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_ModuleMapDescriptor_writeToBuffer") }
+private val clang_ModuleMapDescriptor_writeToBuffer_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_writeToBuffer_ADDR, clang_ModuleMapDescriptor_writeToBuffer_DESC) }
 
 fun clang_ModuleMapDescriptor_writeToBuffer(arg0: MemorySegment, arg1: Int, arg2: MemorySegment, arg3: MemorySegment): Int {
     try {
@@ -2635,8 +2687,8 @@ fun clang_ModuleMapDescriptor_writeToBuffer(arg0: MemorySegment, arg1: Int, arg2
  * {@snippet lang=c : clang_ModuleMapDescriptor_dispose Void(typedef CXModuleMapDescriptor = (Declared(CXModuleMapDescriptorImpl))*)
  */
 private val clang_ModuleMapDescriptor_dispose_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_ModuleMapDescriptor_dispose_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_ModuleMapDescriptor_dispose")
-private val clang_ModuleMapDescriptor_dispose_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_dispose_ADDR, clang_ModuleMapDescriptor_dispose_DESC)
+private val clang_ModuleMapDescriptor_dispose_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_ModuleMapDescriptor_dispose") }
+private val clang_ModuleMapDescriptor_dispose_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_ModuleMapDescriptor_dispose_ADDR, clang_ModuleMapDescriptor_dispose_DESC) }
 
 fun clang_ModuleMapDescriptor_dispose(arg0: MemorySegment): Unit {
     try {
@@ -3727,7 +3779,7 @@ class tm {
  * {@snippet lang=c : tzname (Char)*[]
  */
 // tzname is an array type: use the raw MemorySegment directly
-private val tzname_SEGMENT: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("tzname")
+private val tzname_SEGMENT: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("tzname") }
 
 val tzname: MemorySegment
     get() = tzname_SEGMENT
@@ -3736,7 +3788,7 @@ val tzname: MemorySegment
  * {@snippet lang=c : getdate_err Int
  */
 private val getdate_err_LAYOUT: ValueLayout = ValueLayout.JAVA_INT
-private val getdate_err_SEGMENT: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("getdate_err")
+private val getdate_err_SEGMENT: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("getdate_err") }
 private val getdate_err_VH: VarHandle = getdate_err_LAYOUT.varHandle()
 
 var getdate_err: Int
@@ -3748,7 +3800,7 @@ var getdate_err: Int
  * {@snippet lang=c : timezone Long
  */
 private val timezone_LAYOUT: ValueLayout = ValueLayout.JAVA_LONG
-private val timezone_SEGMENT: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("timezone")
+private val timezone_SEGMENT: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("timezone") }
 private val timezone_VH: VarHandle = timezone_LAYOUT.varHandle()
 
 var timezone: Long
@@ -3760,7 +3812,7 @@ var timezone: Long
  * {@snippet lang=c : daylight Int
  */
 private val daylight_LAYOUT: ValueLayout = ValueLayout.JAVA_INT
-private val daylight_SEGMENT: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("daylight")
+private val daylight_SEGMENT: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("daylight") }
 private val daylight_VH: VarHandle = daylight_LAYOUT.varHandle()
 
 var daylight: Int
@@ -3772,8 +3824,8 @@ var daylight: Int
  * {@snippet lang=c : asctime (Char)*((Declared(tm))*)
  */
 private val asctime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val asctime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("asctime")
-private val asctime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(asctime_ADDR, asctime_DESC)
+private val asctime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("asctime") }
+private val asctime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(asctime_ADDR, asctime_DESC) }
 
 fun asctime(arg0: MemorySegment): MemorySegment {
     try {
@@ -3791,8 +3843,8 @@ fun asctime(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clock typedef clock_t = UNSIGNED = Long()
  */
 private val clock_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG)
-private val clock_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clock")
-private val clock_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clock_ADDR, clock_DESC)
+private val clock_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clock") }
+private val clock_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clock_ADDR, clock_DESC) }
 
 fun clock(): Long {
     try {
@@ -3810,8 +3862,8 @@ fun clock(): Long {
  * {@snippet lang=c : ctime (Char)*((typedef time_t = Long)*)
  */
 private val ctime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val ctime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("ctime")
-private val ctime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(ctime_ADDR, ctime_DESC)
+private val ctime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("ctime") }
+private val ctime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(ctime_ADDR, ctime_DESC) }
 
 fun ctime(arg0: MemorySegment): MemorySegment {
     try {
@@ -3829,8 +3881,8 @@ fun ctime(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : difftime Double(typedef time_t = Long,typedef time_t = Long)
  */
 private val difftime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE, ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
-private val difftime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("difftime")
-private val difftime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(difftime_ADDR, difftime_DESC)
+private val difftime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("difftime") }
+private val difftime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(difftime_ADDR, difftime_DESC) }
 
 fun difftime(arg0: Long, arg1: Long): Double {
     try {
@@ -3848,8 +3900,8 @@ fun difftime(arg0: Long, arg1: Long): Double {
  * {@snippet lang=c : getdate (Declared(tm))*((Char)*)
  */
 private val getdate_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val getdate_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("getdate")
-private val getdate_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(getdate_ADDR, getdate_DESC)
+private val getdate_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("getdate") }
+private val getdate_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(getdate_ADDR, getdate_DESC) }
 
 fun getdate(arg0: MemorySegment): MemorySegment {
     try {
@@ -3867,8 +3919,8 @@ fun getdate(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : gmtime (Declared(tm))*((typedef time_t = Long)*)
  */
 private val gmtime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val gmtime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("gmtime")
-private val gmtime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(gmtime_ADDR, gmtime_DESC)
+private val gmtime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("gmtime") }
+private val gmtime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(gmtime_ADDR, gmtime_DESC) }
 
 fun gmtime(arg0: MemorySegment): MemorySegment {
     try {
@@ -3886,8 +3938,8 @@ fun gmtime(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : localtime (Declared(tm))*((typedef time_t = Long)*)
  */
 private val localtime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val localtime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("localtime")
-private val localtime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(localtime_ADDR, localtime_DESC)
+private val localtime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("localtime") }
+private val localtime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(localtime_ADDR, localtime_DESC) }
 
 fun localtime(arg0: MemorySegment): MemorySegment {
     try {
@@ -3905,8 +3957,8 @@ fun localtime(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : mktime typedef time_t = Long((Declared(tm))*)
  */
 private val mktime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val mktime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("mktime")
-private val mktime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(mktime_ADDR, mktime_DESC)
+private val mktime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("mktime") }
+private val mktime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(mktime_ADDR, mktime_DESC) }
 
 fun mktime(arg0: MemorySegment): Long {
     try {
@@ -3924,8 +3976,8 @@ fun mktime(arg0: MemorySegment): Long {
  * {@snippet lang=c : strftime typedef size_t = UNSIGNED = Long((Char)*,typedef size_t = UNSIGNED = Long,(Char)*,(Declared(tm))*)
  */
 private val strftime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val strftime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("strftime")
-private val strftime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(strftime_ADDR, strftime_DESC)
+private val strftime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("strftime") }
+private val strftime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(strftime_ADDR, strftime_DESC) }
 
 fun strftime(arg0: MemorySegment, arg1: Long, arg2: MemorySegment, arg3: MemorySegment): Long {
     try {
@@ -3943,8 +3995,8 @@ fun strftime(arg0: MemorySegment, arg1: Long, arg2: MemorySegment, arg3: MemoryS
  * {@snippet lang=c : strptime (Char)*((Char)*,(Char)*,(Declared(tm))*)
  */
 private val strptime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val strptime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("strptime")
-private val strptime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(strptime_ADDR, strptime_DESC)
+private val strptime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("strptime") }
+private val strptime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(strptime_ADDR, strptime_DESC) }
 
 fun strptime(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): MemorySegment {
     try {
@@ -3962,8 +4014,8 @@ fun strptime(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Mem
  * {@snippet lang=c : time typedef time_t = Long((typedef time_t = Long)*)
  */
 private val time_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val time_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("time")
-private val time_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(time_ADDR, time_DESC)
+private val time_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("time") }
+private val time_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(time_ADDR, time_DESC) }
 
 fun time(arg0: MemorySegment): Long {
     try {
@@ -3981,8 +4033,8 @@ fun time(arg0: MemorySegment): Long {
  * {@snippet lang=c : tzset Void()
  */
 private val tzset_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid()
-private val tzset_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("tzset")
-private val tzset_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(tzset_ADDR, tzset_DESC)
+private val tzset_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("tzset") }
+private val tzset_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(tzset_ADDR, tzset_DESC) }
 
 fun tzset(): Unit {
     try {
@@ -4000,8 +4052,8 @@ fun tzset(): Unit {
  * {@snippet lang=c : asctime_r (Char)*((Declared(tm))*,(Char)*)
  */
 private val asctime_r_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val asctime_r_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("asctime_r")
-private val asctime_r_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(asctime_r_ADDR, asctime_r_DESC)
+private val asctime_r_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("asctime_r") }
+private val asctime_r_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(asctime_r_ADDR, asctime_r_DESC) }
 
 fun asctime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -4019,8 +4071,8 @@ fun asctime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
  * {@snippet lang=c : ctime_r (Char)*((typedef time_t = Long)*,(Char)*)
  */
 private val ctime_r_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val ctime_r_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("ctime_r")
-private val ctime_r_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(ctime_r_ADDR, ctime_r_DESC)
+private val ctime_r_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("ctime_r") }
+private val ctime_r_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(ctime_r_ADDR, ctime_r_DESC) }
 
 fun ctime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -4038,8 +4090,8 @@ fun ctime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
  * {@snippet lang=c : gmtime_r (Declared(tm))*((typedef time_t = Long)*,(Declared(tm))*)
  */
 private val gmtime_r_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val gmtime_r_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("gmtime_r")
-private val gmtime_r_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(gmtime_r_ADDR, gmtime_r_DESC)
+private val gmtime_r_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("gmtime_r") }
+private val gmtime_r_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(gmtime_r_ADDR, gmtime_r_DESC) }
 
 fun gmtime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -4057,8 +4109,8 @@ fun gmtime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
  * {@snippet lang=c : localtime_r (Declared(tm))*((typedef time_t = Long)*,(Declared(tm))*)
  */
 private val localtime_r_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val localtime_r_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("localtime_r")
-private val localtime_r_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(localtime_r_ADDR, localtime_r_DESC)
+private val localtime_r_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("localtime_r") }
+private val localtime_r_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(localtime_r_ADDR, localtime_r_DESC) }
 
 fun localtime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -4076,8 +4128,8 @@ fun localtime_r(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
  * {@snippet lang=c : posix2time typedef time_t = Long(typedef time_t = Long)
  */
 private val posix2time_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
-private val posix2time_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("posix2time")
-private val posix2time_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(posix2time_ADDR, posix2time_DESC)
+private val posix2time_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("posix2time") }
+private val posix2time_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(posix2time_ADDR, posix2time_DESC) }
 
 fun posix2time(arg0: Long): Long {
     try {
@@ -4095,8 +4147,8 @@ fun posix2time(arg0: Long): Long {
  * {@snippet lang=c : tzsetwall Void()
  */
 private val tzsetwall_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid()
-private val tzsetwall_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("tzsetwall")
-private val tzsetwall_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(tzsetwall_ADDR, tzsetwall_DESC)
+private val tzsetwall_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("tzsetwall") }
+private val tzsetwall_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(tzsetwall_ADDR, tzsetwall_DESC) }
 
 fun tzsetwall(): Unit {
     try {
@@ -4114,8 +4166,8 @@ fun tzsetwall(): Unit {
  * {@snippet lang=c : time2posix typedef time_t = Long(typedef time_t = Long)
  */
 private val time2posix_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG)
-private val time2posix_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("time2posix")
-private val time2posix_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(time2posix_ADDR, time2posix_DESC)
+private val time2posix_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("time2posix") }
+private val time2posix_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(time2posix_ADDR, time2posix_DESC) }
 
 fun time2posix(arg0: Long): Long {
     try {
@@ -4133,8 +4185,8 @@ fun time2posix(arg0: Long): Long {
  * {@snippet lang=c : timelocal typedef time_t = Long((Declared(tm))*)
  */
 private val timelocal_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val timelocal_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("timelocal")
-private val timelocal_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(timelocal_ADDR, timelocal_DESC)
+private val timelocal_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("timelocal") }
+private val timelocal_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(timelocal_ADDR, timelocal_DESC) }
 
 fun timelocal(arg0: MemorySegment): Long {
     try {
@@ -4152,8 +4204,8 @@ fun timelocal(arg0: MemorySegment): Long {
  * {@snippet lang=c : timegm typedef time_t = Long((Declared(tm))*)
  */
 private val timegm_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val timegm_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("timegm")
-private val timegm_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(timegm_ADDR, timegm_DESC)
+private val timegm_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("timegm") }
+private val timegm_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(timegm_ADDR, timegm_DESC) }
 
 fun timegm(arg0: MemorySegment): Long {
     try {
@@ -4171,8 +4223,8 @@ fun timegm(arg0: MemorySegment): Long {
  * {@snippet lang=c : nanosleep Int((Declared(timespec))*,(Declared(timespec))*)
  */
 private val nanosleep_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val nanosleep_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("nanosleep")
-private val nanosleep_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(nanosleep_ADDR, nanosleep_DESC)
+private val nanosleep_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("nanosleep") }
+private val nanosleep_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(nanosleep_ADDR, nanosleep_DESC) }
 
 fun nanosleep(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -4230,8 +4282,8 @@ fun _CLOCK_THREAD_CPUTIME_ID(): Int = 16
  * {@snippet lang=c : clock_getres Int(typedef clockid_t = Declared(clockid_t),(Declared(timespec))*)
  */
 private val clock_getres_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clock_getres_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clock_getres")
-private val clock_getres_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clock_getres_ADDR, clock_getres_DESC)
+private val clock_getres_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clock_getres") }
+private val clock_getres_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clock_getres_ADDR, clock_getres_DESC) }
 
 fun clock_getres(arg0: Int, arg1: MemorySegment): Int {
     try {
@@ -4249,8 +4301,8 @@ fun clock_getres(arg0: Int, arg1: MemorySegment): Int {
  * {@snippet lang=c : clock_gettime Int(typedef clockid_t = Declared(clockid_t),(Declared(timespec))*)
  */
 private val clock_gettime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clock_gettime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clock_gettime")
-private val clock_gettime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clock_gettime_ADDR, clock_gettime_DESC)
+private val clock_gettime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clock_gettime") }
+private val clock_gettime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clock_gettime_ADDR, clock_gettime_DESC) }
 
 fun clock_gettime(arg0: Int, arg1: MemorySegment): Int {
     try {
@@ -4268,8 +4320,8 @@ fun clock_gettime(arg0: Int, arg1: MemorySegment): Int {
  * {@snippet lang=c : clock_gettime_nsec_np typedef __uint64_t = UNSIGNED = LongLong(typedef clockid_t = Declared(clockid_t))
  */
 private val clock_gettime_nsec_np_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT)
-private val clock_gettime_nsec_np_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clock_gettime_nsec_np")
-private val clock_gettime_nsec_np_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clock_gettime_nsec_np_ADDR, clock_gettime_nsec_np_DESC)
+private val clock_gettime_nsec_np_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clock_gettime_nsec_np") }
+private val clock_gettime_nsec_np_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clock_gettime_nsec_np_ADDR, clock_gettime_nsec_np_DESC) }
 
 fun clock_gettime_nsec_np(arg0: Int): Long {
     try {
@@ -4287,8 +4339,8 @@ fun clock_gettime_nsec_np(arg0: Int): Long {
  * {@snippet lang=c : clock_settime Int(typedef clockid_t = Declared(clockid_t),(Declared(timespec))*)
  */
 private val clock_settime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clock_settime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clock_settime")
-private val clock_settime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clock_settime_ADDR, clock_settime_DESC)
+private val clock_settime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clock_settime") }
+private val clock_settime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clock_settime_ADDR, clock_settime_DESC) }
 
 fun clock_settime(arg0: Int, arg1: MemorySegment): Int {
     try {
@@ -4306,8 +4358,8 @@ fun clock_settime(arg0: Int, arg1: MemorySegment): Int {
  * {@snippet lang=c : timespec_get Int((Declared(timespec))*,Int)
  */
 private val timespec_get_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val timespec_get_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("timespec_get")
-private val timespec_get_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(timespec_get_ADDR, timespec_get_DESC)
+private val timespec_get_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("timespec_get") }
+private val timespec_get_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(timespec_get_ADDR, timespec_get_DESC) }
 
 fun timespec_get(arg0: MemorySegment, arg1: Int): Int {
     try {
@@ -4330,8 +4382,8 @@ typealias CXFile = MemorySegment?
  * {@snippet lang=c : clang_getFileName typedef CXString = Declared(CXString)(typedef CXFile = (Void)*)
  */
 private val clang_getFileName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_getFileName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFileName")
-private val clang_getFileName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFileName_ADDR, clang_getFileName_DESC)
+private val clang_getFileName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFileName") }
+private val clang_getFileName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFileName_ADDR, clang_getFileName_DESC) }
 
 fun clang_getFileName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -4349,8 +4401,8 @@ fun clang_getFileName(allocator: SegmentAllocator, arg0: MemorySegment): MemoryS
  * {@snippet lang=c : clang_getFileTime typedef time_t = Long(typedef CXFile = (Void)*)
  */
 private val clang_getFileTime_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val clang_getFileTime_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFileTime")
-private val clang_getFileTime_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFileTime_ADDR, clang_getFileTime_DESC)
+private val clang_getFileTime_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFileTime") }
+private val clang_getFileTime_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFileTime_ADDR, clang_getFileTime_DESC) }
 
 fun clang_getFileTime(arg0: MemorySegment): Long {
     try {
@@ -4401,8 +4453,8 @@ class CXFileUniqueID {
  * {@snippet lang=c : clang_getFileUniqueID Int(typedef CXFile = (Void)*,(typedef CXFileUniqueID = Declared(CXFileUniqueID))*)
  */
 private val clang_getFileUniqueID_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getFileUniqueID_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFileUniqueID")
-private val clang_getFileUniqueID_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFileUniqueID_ADDR, clang_getFileUniqueID_DESC)
+private val clang_getFileUniqueID_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFileUniqueID") }
+private val clang_getFileUniqueID_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFileUniqueID_ADDR, clang_getFileUniqueID_DESC) }
 
 fun clang_getFileUniqueID(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -4420,8 +4472,8 @@ fun clang_getFileUniqueID(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_File_isEqual Int(typedef CXFile = (Void)*,typedef CXFile = (Void)*)
  */
 private val clang_File_isEqual_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_File_isEqual_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_File_isEqual")
-private val clang_File_isEqual_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_File_isEqual_ADDR, clang_File_isEqual_DESC)
+private val clang_File_isEqual_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_File_isEqual") }
+private val clang_File_isEqual_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_File_isEqual_ADDR, clang_File_isEqual_DESC) }
 
 fun clang_File_isEqual(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -4439,8 +4491,8 @@ fun clang_File_isEqual(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_File_tryGetRealPathName typedef CXString = Declared(CXString)(typedef CXFile = (Void)*)
  */
 private val clang_File_tryGetRealPathName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_File_tryGetRealPathName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_File_tryGetRealPathName")
-private val clang_File_tryGetRealPathName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_File_tryGetRealPathName_ADDR, clang_File_tryGetRealPathName_DESC)
+private val clang_File_tryGetRealPathName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_File_tryGetRealPathName") }
+private val clang_File_tryGetRealPathName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_File_tryGetRealPathName_ADDR, clang_File_tryGetRealPathName_DESC) }
 
 fun clang_File_tryGetRealPathName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -4555,8 +4607,8 @@ class CXSourceRange {
  * {@snippet lang=c : clang_getNullLocation typedef CXSourceLocation = Declared(CXSourceLocation)()
  */
 private val clang_getNullLocation_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout)
-private val clang_getNullLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNullLocation")
-private val clang_getNullLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNullLocation_ADDR, clang_getNullLocation_DESC)
+private val clang_getNullLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNullLocation") }
+private val clang_getNullLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNullLocation_ADDR, clang_getNullLocation_DESC) }
 
 fun clang_getNullLocation(allocator: SegmentAllocator): MemorySegment {
     try {
@@ -4574,8 +4626,8 @@ fun clang_getNullLocation(allocator: SegmentAllocator): MemorySegment {
  * {@snippet lang=c : clang_equalLocations UNSIGNED = Int(typedef CXSourceLocation = Declared(CXSourceLocation),typedef CXSourceLocation = Declared(CXSourceLocation))
  */
 private val clang_equalLocations_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXSourceLocation.layout, CXSourceLocation.layout)
-private val clang_equalLocations_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_equalLocations")
-private val clang_equalLocations_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_equalLocations_ADDR, clang_equalLocations_DESC)
+private val clang_equalLocations_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_equalLocations") }
+private val clang_equalLocations_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_equalLocations_ADDR, clang_equalLocations_DESC) }
 
 fun clang_equalLocations(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -4593,8 +4645,8 @@ fun clang_equalLocations(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_isBeforeInTranslationUnit UNSIGNED = Int(typedef CXSourceLocation = Declared(CXSourceLocation),typedef CXSourceLocation = Declared(CXSourceLocation))
  */
 private val clang_isBeforeInTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXSourceLocation.layout, CXSourceLocation.layout)
-private val clang_isBeforeInTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isBeforeInTranslationUnit")
-private val clang_isBeforeInTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isBeforeInTranslationUnit_ADDR, clang_isBeforeInTranslationUnit_DESC)
+private val clang_isBeforeInTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isBeforeInTranslationUnit") }
+private val clang_isBeforeInTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isBeforeInTranslationUnit_ADDR, clang_isBeforeInTranslationUnit_DESC) }
 
 fun clang_isBeforeInTranslationUnit(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -4612,8 +4664,8 @@ fun clang_isBeforeInTranslationUnit(arg0: MemorySegment, arg1: MemorySegment): I
  * {@snippet lang=c : clang_Location_isInSystemHeader Int(typedef CXSourceLocation = Declared(CXSourceLocation))
  */
 private val clang_Location_isInSystemHeader_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXSourceLocation.layout)
-private val clang_Location_isInSystemHeader_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Location_isInSystemHeader")
-private val clang_Location_isInSystemHeader_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Location_isInSystemHeader_ADDR, clang_Location_isInSystemHeader_DESC)
+private val clang_Location_isInSystemHeader_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Location_isInSystemHeader") }
+private val clang_Location_isInSystemHeader_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Location_isInSystemHeader_ADDR, clang_Location_isInSystemHeader_DESC) }
 
 fun clang_Location_isInSystemHeader(arg0: MemorySegment): Int {
     try {
@@ -4631,8 +4683,8 @@ fun clang_Location_isInSystemHeader(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Location_isFromMainFile Int(typedef CXSourceLocation = Declared(CXSourceLocation))
  */
 private val clang_Location_isFromMainFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXSourceLocation.layout)
-private val clang_Location_isFromMainFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Location_isFromMainFile")
-private val clang_Location_isFromMainFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Location_isFromMainFile_ADDR, clang_Location_isFromMainFile_DESC)
+private val clang_Location_isFromMainFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Location_isFromMainFile") }
+private val clang_Location_isFromMainFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Location_isFromMainFile_ADDR, clang_Location_isFromMainFile_DESC) }
 
 fun clang_Location_isFromMainFile(arg0: MemorySegment): Int {
     try {
@@ -4650,8 +4702,8 @@ fun clang_Location_isFromMainFile(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getNullRange typedef CXSourceRange = Declared(CXSourceRange)()
  */
 private val clang_getNullRange_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout)
-private val clang_getNullRange_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNullRange")
-private val clang_getNullRange_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNullRange_ADDR, clang_getNullRange_DESC)
+private val clang_getNullRange_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNullRange") }
+private val clang_getNullRange_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNullRange_ADDR, clang_getNullRange_DESC) }
 
 fun clang_getNullRange(allocator: SegmentAllocator): MemorySegment {
     try {
@@ -4669,8 +4721,8 @@ fun clang_getNullRange(allocator: SegmentAllocator): MemorySegment {
  * {@snippet lang=c : clang_getRange typedef CXSourceRange = Declared(CXSourceRange)(typedef CXSourceLocation = Declared(CXSourceLocation),typedef CXSourceLocation = Declared(CXSourceLocation))
  */
 private val clang_getRange_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout, CXSourceLocation.layout, CXSourceLocation.layout)
-private val clang_getRange_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getRange")
-private val clang_getRange_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getRange_ADDR, clang_getRange_DESC)
+private val clang_getRange_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getRange") }
+private val clang_getRange_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getRange_ADDR, clang_getRange_DESC) }
 
 fun clang_getRange(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -4688,8 +4740,8 @@ fun clang_getRange(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Memor
  * {@snippet lang=c : clang_equalRanges UNSIGNED = Int(typedef CXSourceRange = Declared(CXSourceRange),typedef CXSourceRange = Declared(CXSourceRange))
  */
 private val clang_equalRanges_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXSourceRange.layout, CXSourceRange.layout)
-private val clang_equalRanges_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_equalRanges")
-private val clang_equalRanges_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_equalRanges_ADDR, clang_equalRanges_DESC)
+private val clang_equalRanges_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_equalRanges") }
+private val clang_equalRanges_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_equalRanges_ADDR, clang_equalRanges_DESC) }
 
 fun clang_equalRanges(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -4707,8 +4759,8 @@ fun clang_equalRanges(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_Range_isNull Int(typedef CXSourceRange = Declared(CXSourceRange))
  */
 private val clang_Range_isNull_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXSourceRange.layout)
-private val clang_Range_isNull_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Range_isNull")
-private val clang_Range_isNull_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Range_isNull_ADDR, clang_Range_isNull_DESC)
+private val clang_Range_isNull_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Range_isNull") }
+private val clang_Range_isNull_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Range_isNull_ADDR, clang_Range_isNull_DESC) }
 
 fun clang_Range_isNull(arg0: MemorySegment): Int {
     try {
@@ -4726,8 +4778,8 @@ fun clang_Range_isNull(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getExpansionLocation Void(typedef CXSourceLocation = Declared(CXSourceLocation),(typedef CXFile = (Void)*)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*)
  */
 private val clang_getExpansionLocation_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXSourceLocation.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getExpansionLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getExpansionLocation")
-private val clang_getExpansionLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getExpansionLocation_ADDR, clang_getExpansionLocation_DESC)
+private val clang_getExpansionLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getExpansionLocation") }
+private val clang_getExpansionLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getExpansionLocation_ADDR, clang_getExpansionLocation_DESC) }
 
 fun clang_getExpansionLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment): Unit {
     try {
@@ -4745,8 +4797,8 @@ fun clang_getExpansionLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: M
  * {@snippet lang=c : clang_getPresumedLocation Void(typedef CXSourceLocation = Declared(CXSourceLocation),(typedef CXString = Declared(CXString))*,(UNSIGNED = Int)*,(UNSIGNED = Int)*)
  */
 private val clang_getPresumedLocation_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXSourceLocation.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getPresumedLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getPresumedLocation")
-private val clang_getPresumedLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getPresumedLocation_ADDR, clang_getPresumedLocation_DESC)
+private val clang_getPresumedLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getPresumedLocation") }
+private val clang_getPresumedLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getPresumedLocation_ADDR, clang_getPresumedLocation_DESC) }
 
 fun clang_getPresumedLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment): Unit {
     try {
@@ -4764,8 +4816,8 @@ fun clang_getPresumedLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: Me
  * {@snippet lang=c : clang_getInstantiationLocation Void(typedef CXSourceLocation = Declared(CXSourceLocation),(typedef CXFile = (Void)*)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*)
  */
 private val clang_getInstantiationLocation_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXSourceLocation.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getInstantiationLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getInstantiationLocation")
-private val clang_getInstantiationLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getInstantiationLocation_ADDR, clang_getInstantiationLocation_DESC)
+private val clang_getInstantiationLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getInstantiationLocation") }
+private val clang_getInstantiationLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getInstantiationLocation_ADDR, clang_getInstantiationLocation_DESC) }
 
 fun clang_getInstantiationLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment): Unit {
     try {
@@ -4783,8 +4835,8 @@ fun clang_getInstantiationLocation(arg0: MemorySegment, arg1: MemorySegment, arg
  * {@snippet lang=c : clang_getSpellingLocation Void(typedef CXSourceLocation = Declared(CXSourceLocation),(typedef CXFile = (Void)*)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*)
  */
 private val clang_getSpellingLocation_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXSourceLocation.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getSpellingLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getSpellingLocation")
-private val clang_getSpellingLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getSpellingLocation_ADDR, clang_getSpellingLocation_DESC)
+private val clang_getSpellingLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getSpellingLocation") }
+private val clang_getSpellingLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getSpellingLocation_ADDR, clang_getSpellingLocation_DESC) }
 
 fun clang_getSpellingLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment): Unit {
     try {
@@ -4802,8 +4854,8 @@ fun clang_getSpellingLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: Me
  * {@snippet lang=c : clang_getFileLocation Void(typedef CXSourceLocation = Declared(CXSourceLocation),(typedef CXFile = (Void)*)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*)
  */
 private val clang_getFileLocation_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXSourceLocation.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getFileLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFileLocation")
-private val clang_getFileLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFileLocation_ADDR, clang_getFileLocation_DESC)
+private val clang_getFileLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFileLocation") }
+private val clang_getFileLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFileLocation_ADDR, clang_getFileLocation_DESC) }
 
 fun clang_getFileLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment): Unit {
     try {
@@ -4821,8 +4873,8 @@ fun clang_getFileLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: Memory
  * {@snippet lang=c : clang_getRangeStart typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXSourceRange = Declared(CXSourceRange))
  */
 private val clang_getRangeStart_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, CXSourceRange.layout)
-private val clang_getRangeStart_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getRangeStart")
-private val clang_getRangeStart_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getRangeStart_ADDR, clang_getRangeStart_DESC)
+private val clang_getRangeStart_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getRangeStart") }
+private val clang_getRangeStart_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getRangeStart_ADDR, clang_getRangeStart_DESC) }
 
 fun clang_getRangeStart(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -4840,8 +4892,8 @@ fun clang_getRangeStart(allocator: SegmentAllocator, arg0: MemorySegment): Memor
  * {@snippet lang=c : clang_getRangeEnd typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXSourceRange = Declared(CXSourceRange))
  */
 private val clang_getRangeEnd_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, CXSourceRange.layout)
-private val clang_getRangeEnd_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getRangeEnd")
-private val clang_getRangeEnd_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getRangeEnd_ADDR, clang_getRangeEnd_DESC)
+private val clang_getRangeEnd_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getRangeEnd") }
+private val clang_getRangeEnd_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getRangeEnd_ADDR, clang_getRangeEnd_DESC) }
 
 fun clang_getRangeEnd(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -4908,8 +4960,8 @@ class CXSourceRangeList {
  * {@snippet lang=c : clang_disposeSourceRangeList Void((typedef CXSourceRangeList = Declared(CXSourceRangeList))*)
  */
 private val clang_disposeSourceRangeList_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeSourceRangeList_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeSourceRangeList")
-private val clang_disposeSourceRangeList_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeSourceRangeList_ADDR, clang_disposeSourceRangeList_DESC)
+private val clang_disposeSourceRangeList_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeSourceRangeList") }
+private val clang_disposeSourceRangeList_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeSourceRangeList_ADDR, clang_disposeSourceRangeList_DESC) }
 
 fun clang_disposeSourceRangeList(arg0: MemorySegment): Unit {
     try {
@@ -4962,8 +5014,8 @@ typealias CXDiagnosticSet = MemorySegment?
  * {@snippet lang=c : clang_getNumDiagnosticsInSet UNSIGNED = Int(typedef CXDiagnosticSet = (Void)*)
  */
 private val clang_getNumDiagnosticsInSet_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getNumDiagnosticsInSet_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNumDiagnosticsInSet")
-private val clang_getNumDiagnosticsInSet_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNumDiagnosticsInSet_ADDR, clang_getNumDiagnosticsInSet_DESC)
+private val clang_getNumDiagnosticsInSet_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNumDiagnosticsInSet") }
+private val clang_getNumDiagnosticsInSet_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNumDiagnosticsInSet_ADDR, clang_getNumDiagnosticsInSet_DESC) }
 
 fun clang_getNumDiagnosticsInSet(arg0: MemorySegment): Int {
     try {
@@ -4981,8 +5033,8 @@ fun clang_getNumDiagnosticsInSet(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getDiagnosticInSet typedef CXDiagnostic = (Void)*(typedef CXDiagnosticSet = (Void)*,UNSIGNED = Int)
  */
 private val clang_getDiagnosticInSet_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getDiagnosticInSet_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticInSet")
-private val clang_getDiagnosticInSet_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticInSet_ADDR, clang_getDiagnosticInSet_DESC)
+private val clang_getDiagnosticInSet_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticInSet") }
+private val clang_getDiagnosticInSet_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticInSet_ADDR, clang_getDiagnosticInSet_DESC) }
 
 fun clang_getDiagnosticInSet(arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -5020,8 +5072,8 @@ fun CXLoadDiag_InvalidFile(): Int = 3
  * {@snippet lang=c : clang_loadDiagnostics typedef CXDiagnosticSet = (Void)*((Char)*,(Declared(CXLoadDiag_Error))*,(typedef CXString = Declared(CXString))*)
  */
 private val clang_loadDiagnostics_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_loadDiagnostics_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_loadDiagnostics")
-private val clang_loadDiagnostics_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_loadDiagnostics_ADDR, clang_loadDiagnostics_DESC)
+private val clang_loadDiagnostics_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_loadDiagnostics") }
+private val clang_loadDiagnostics_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_loadDiagnostics_ADDR, clang_loadDiagnostics_DESC) }
 
 fun clang_loadDiagnostics(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): MemorySegment {
     try {
@@ -5039,8 +5091,8 @@ fun clang_loadDiagnostics(arg0: MemorySegment, arg1: MemorySegment, arg2: Memory
  * {@snippet lang=c : clang_disposeDiagnosticSet Void(typedef CXDiagnosticSet = (Void)*)
  */
 private val clang_disposeDiagnosticSet_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeDiagnosticSet_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeDiagnosticSet")
-private val clang_disposeDiagnosticSet_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeDiagnosticSet_ADDR, clang_disposeDiagnosticSet_DESC)
+private val clang_disposeDiagnosticSet_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeDiagnosticSet") }
+private val clang_disposeDiagnosticSet_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeDiagnosticSet_ADDR, clang_disposeDiagnosticSet_DESC) }
 
 fun clang_disposeDiagnosticSet(arg0: MemorySegment): Unit {
     try {
@@ -5058,8 +5110,8 @@ fun clang_disposeDiagnosticSet(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_getChildDiagnostics typedef CXDiagnosticSet = (Void)*(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getChildDiagnostics_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getChildDiagnostics_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getChildDiagnostics")
-private val clang_getChildDiagnostics_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getChildDiagnostics_ADDR, clang_getChildDiagnostics_DESC)
+private val clang_getChildDiagnostics_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getChildDiagnostics") }
+private val clang_getChildDiagnostics_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getChildDiagnostics_ADDR, clang_getChildDiagnostics_DESC) }
 
 fun clang_getChildDiagnostics(arg0: MemorySegment): MemorySegment {
     try {
@@ -5077,8 +5129,8 @@ fun clang_getChildDiagnostics(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_disposeDiagnostic Void(typedef CXDiagnostic = (Void)*)
  */
 private val clang_disposeDiagnostic_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeDiagnostic_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeDiagnostic")
-private val clang_disposeDiagnostic_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeDiagnostic_ADDR, clang_disposeDiagnostic_DESC)
+private val clang_disposeDiagnostic_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeDiagnostic") }
+private val clang_disposeDiagnostic_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeDiagnostic_ADDR, clang_disposeDiagnostic_DESC) }
 
 fun clang_disposeDiagnostic(arg0: MemorySegment): Unit {
     try {
@@ -5126,8 +5178,8 @@ fun CXDiagnostic_DisplayCategoryName(): Int = 32
  * {@snippet lang=c : clang_formatDiagnostic typedef CXString = Declared(CXString)(typedef CXDiagnostic = (Void)*,UNSIGNED = Int)
  */
 private val clang_formatDiagnostic_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_formatDiagnostic_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_formatDiagnostic")
-private val clang_formatDiagnostic_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_formatDiagnostic_ADDR, clang_formatDiagnostic_DESC)
+private val clang_formatDiagnostic_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_formatDiagnostic") }
+private val clang_formatDiagnostic_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_formatDiagnostic_ADDR, clang_formatDiagnostic_DESC) }
 
 fun clang_formatDiagnostic(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -5145,8 +5197,8 @@ fun clang_formatDiagnostic(allocator: SegmentAllocator, arg0: MemorySegment, arg
  * {@snippet lang=c : clang_defaultDiagnosticDisplayOptions UNSIGNED = Int()
  */
 private val clang_defaultDiagnosticDisplayOptions_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT)
-private val clang_defaultDiagnosticDisplayOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_defaultDiagnosticDisplayOptions")
-private val clang_defaultDiagnosticDisplayOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_defaultDiagnosticDisplayOptions_ADDR, clang_defaultDiagnosticDisplayOptions_DESC)
+private val clang_defaultDiagnosticDisplayOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_defaultDiagnosticDisplayOptions") }
+private val clang_defaultDiagnosticDisplayOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_defaultDiagnosticDisplayOptions_ADDR, clang_defaultDiagnosticDisplayOptions_DESC) }
 
 fun clang_defaultDiagnosticDisplayOptions(): Int {
     try {
@@ -5164,8 +5216,8 @@ fun clang_defaultDiagnosticDisplayOptions(): Int {
  * {@snippet lang=c : clang_getDiagnosticSeverity Declared(CXDiagnosticSeverity)(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getDiagnosticSeverity_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getDiagnosticSeverity_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticSeverity")
-private val clang_getDiagnosticSeverity_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticSeverity_ADDR, clang_getDiagnosticSeverity_DESC)
+private val clang_getDiagnosticSeverity_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticSeverity") }
+private val clang_getDiagnosticSeverity_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticSeverity_ADDR, clang_getDiagnosticSeverity_DESC) }
 
 fun clang_getDiagnosticSeverity(arg0: MemorySegment): Int {
     try {
@@ -5183,8 +5235,8 @@ fun clang_getDiagnosticSeverity(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getDiagnosticLocation typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getDiagnosticLocation_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, ValueLayout.ADDRESS)
-private val clang_getDiagnosticLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticLocation")
-private val clang_getDiagnosticLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticLocation_ADDR, clang_getDiagnosticLocation_DESC)
+private val clang_getDiagnosticLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticLocation") }
+private val clang_getDiagnosticLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticLocation_ADDR, clang_getDiagnosticLocation_DESC) }
 
 fun clang_getDiagnosticLocation(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -5202,8 +5254,8 @@ fun clang_getDiagnosticLocation(allocator: SegmentAllocator, arg0: MemorySegment
  * {@snippet lang=c : clang_getDiagnosticSpelling typedef CXString = Declared(CXString)(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getDiagnosticSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_getDiagnosticSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticSpelling")
-private val clang_getDiagnosticSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticSpelling_ADDR, clang_getDiagnosticSpelling_DESC)
+private val clang_getDiagnosticSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticSpelling") }
+private val clang_getDiagnosticSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticSpelling_ADDR, clang_getDiagnosticSpelling_DESC) }
 
 fun clang_getDiagnosticSpelling(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -5221,8 +5273,8 @@ fun clang_getDiagnosticSpelling(allocator: SegmentAllocator, arg0: MemorySegment
  * {@snippet lang=c : clang_getDiagnosticOption typedef CXString = Declared(CXString)(typedef CXDiagnostic = (Void)*,(typedef CXString = Declared(CXString))*)
  */
 private val clang_getDiagnosticOption_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getDiagnosticOption_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticOption")
-private val clang_getDiagnosticOption_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticOption_ADDR, clang_getDiagnosticOption_DESC)
+private val clang_getDiagnosticOption_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticOption") }
+private val clang_getDiagnosticOption_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticOption_ADDR, clang_getDiagnosticOption_DESC) }
 
 fun clang_getDiagnosticOption(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -5240,8 +5292,8 @@ fun clang_getDiagnosticOption(allocator: SegmentAllocator, arg0: MemorySegment, 
  * {@snippet lang=c : clang_getDiagnosticCategory UNSIGNED = Int(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getDiagnosticCategory_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getDiagnosticCategory_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticCategory")
-private val clang_getDiagnosticCategory_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticCategory_ADDR, clang_getDiagnosticCategory_DESC)
+private val clang_getDiagnosticCategory_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticCategory") }
+private val clang_getDiagnosticCategory_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticCategory_ADDR, clang_getDiagnosticCategory_DESC) }
 
 fun clang_getDiagnosticCategory(arg0: MemorySegment): Int {
     try {
@@ -5259,8 +5311,8 @@ fun clang_getDiagnosticCategory(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getDiagnosticCategoryName typedef CXString = Declared(CXString)(UNSIGNED = Int)
  */
 private val clang_getDiagnosticCategoryName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.JAVA_INT)
-private val clang_getDiagnosticCategoryName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticCategoryName")
-private val clang_getDiagnosticCategoryName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticCategoryName_ADDR, clang_getDiagnosticCategoryName_DESC)
+private val clang_getDiagnosticCategoryName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticCategoryName") }
+private val clang_getDiagnosticCategoryName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticCategoryName_ADDR, clang_getDiagnosticCategoryName_DESC) }
 
 fun clang_getDiagnosticCategoryName(allocator: SegmentAllocator, arg0: Int): MemorySegment {
     try {
@@ -5278,8 +5330,8 @@ fun clang_getDiagnosticCategoryName(allocator: SegmentAllocator, arg0: Int): Mem
  * {@snippet lang=c : clang_getDiagnosticCategoryText typedef CXString = Declared(CXString)(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getDiagnosticCategoryText_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_getDiagnosticCategoryText_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticCategoryText")
-private val clang_getDiagnosticCategoryText_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticCategoryText_ADDR, clang_getDiagnosticCategoryText_DESC)
+private val clang_getDiagnosticCategoryText_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticCategoryText") }
+private val clang_getDiagnosticCategoryText_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticCategoryText_ADDR, clang_getDiagnosticCategoryText_DESC) }
 
 fun clang_getDiagnosticCategoryText(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -5297,8 +5349,8 @@ fun clang_getDiagnosticCategoryText(allocator: SegmentAllocator, arg0: MemorySeg
  * {@snippet lang=c : clang_getDiagnosticNumRanges UNSIGNED = Int(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getDiagnosticNumRanges_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getDiagnosticNumRanges_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticNumRanges")
-private val clang_getDiagnosticNumRanges_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticNumRanges_ADDR, clang_getDiagnosticNumRanges_DESC)
+private val clang_getDiagnosticNumRanges_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticNumRanges") }
+private val clang_getDiagnosticNumRanges_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticNumRanges_ADDR, clang_getDiagnosticNumRanges_DESC) }
 
 fun clang_getDiagnosticNumRanges(arg0: MemorySegment): Int {
     try {
@@ -5316,8 +5368,8 @@ fun clang_getDiagnosticNumRanges(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getDiagnosticRange typedef CXSourceRange = Declared(CXSourceRange)(typedef CXDiagnostic = (Void)*,UNSIGNED = Int)
  */
 private val clang_getDiagnosticRange_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getDiagnosticRange_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticRange")
-private val clang_getDiagnosticRange_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticRange_ADDR, clang_getDiagnosticRange_DESC)
+private val clang_getDiagnosticRange_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticRange") }
+private val clang_getDiagnosticRange_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticRange_ADDR, clang_getDiagnosticRange_DESC) }
 
 fun clang_getDiagnosticRange(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -5335,8 +5387,8 @@ fun clang_getDiagnosticRange(allocator: SegmentAllocator, arg0: MemorySegment, a
  * {@snippet lang=c : clang_getDiagnosticNumFixIts UNSIGNED = Int(typedef CXDiagnostic = (Void)*)
  */
 private val clang_getDiagnosticNumFixIts_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getDiagnosticNumFixIts_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticNumFixIts")
-private val clang_getDiagnosticNumFixIts_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticNumFixIts_ADDR, clang_getDiagnosticNumFixIts_DESC)
+private val clang_getDiagnosticNumFixIts_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticNumFixIts") }
+private val clang_getDiagnosticNumFixIts_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticNumFixIts_ADDR, clang_getDiagnosticNumFixIts_DESC) }
 
 fun clang_getDiagnosticNumFixIts(arg0: MemorySegment): Int {
     try {
@@ -5354,8 +5406,8 @@ fun clang_getDiagnosticNumFixIts(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getDiagnosticFixIt typedef CXString = Declared(CXString)(typedef CXDiagnostic = (Void)*,UNSIGNED = Int,(typedef CXSourceRange = Declared(CXSourceRange))*)
  */
 private val clang_getDiagnosticFixIt_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getDiagnosticFixIt_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticFixIt")
-private val clang_getDiagnosticFixIt_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticFixIt_ADDR, clang_getDiagnosticFixIt_DESC)
+private val clang_getDiagnosticFixIt_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticFixIt") }
+private val clang_getDiagnosticFixIt_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticFixIt_ADDR, clang_getDiagnosticFixIt_DESC) }
 
 fun clang_getDiagnosticFixIt(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int, arg2: MemorySegment): MemorySegment {
     try {
@@ -5635,8 +5687,8 @@ fun CXCursor_ExceptionSpecificationKind_NoThrow(): Int = 9
  * {@snippet lang=c : clang_createIndex typedef CXIndex = (Void)*(Int,Int)
  */
 private val clang_createIndex_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_createIndex_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_createIndex")
-private val clang_createIndex_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_createIndex_ADDR, clang_createIndex_DESC)
+private val clang_createIndex_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_createIndex") }
+private val clang_createIndex_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_createIndex_ADDR, clang_createIndex_DESC) }
 
 fun clang_createIndex(arg0: Int, arg1: Int): MemorySegment {
     try {
@@ -5654,8 +5706,8 @@ fun clang_createIndex(arg0: Int, arg1: Int): MemorySegment {
  * {@snippet lang=c : clang_disposeIndex Void(typedef CXIndex = (Void)*)
  */
 private val clang_disposeIndex_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeIndex_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeIndex")
-private val clang_disposeIndex_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeIndex_ADDR, clang_disposeIndex_DESC)
+private val clang_disposeIndex_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeIndex") }
+private val clang_disposeIndex_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeIndex_ADDR, clang_disposeIndex_DESC) }
 
 fun clang_disposeIndex(arg0: MemorySegment): Unit {
     try {
@@ -5787,8 +5839,8 @@ class CXIndexOptions {
  * {@snippet lang=c : clang_createIndexWithOptions typedef CXIndex = (Void)*((typedef CXIndexOptions = Declared(CXIndexOptions))*)
  */
 private val clang_createIndexWithOptions_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_createIndexWithOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_createIndexWithOptions")
-private val clang_createIndexWithOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_createIndexWithOptions_ADDR, clang_createIndexWithOptions_DESC)
+private val clang_createIndexWithOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_createIndexWithOptions") }
+private val clang_createIndexWithOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_createIndexWithOptions_ADDR, clang_createIndexWithOptions_DESC) }
 
 fun clang_createIndexWithOptions(arg0: MemorySegment): MemorySegment {
     try {
@@ -5806,8 +5858,8 @@ fun clang_createIndexWithOptions(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_CXIndex_setGlobalOptions Void(typedef CXIndex = (Void)*,UNSIGNED = Int)
  */
 private val clang_CXIndex_setGlobalOptions_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_CXIndex_setGlobalOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXIndex_setGlobalOptions")
-private val clang_CXIndex_setGlobalOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXIndex_setGlobalOptions_ADDR, clang_CXIndex_setGlobalOptions_DESC)
+private val clang_CXIndex_setGlobalOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXIndex_setGlobalOptions") }
+private val clang_CXIndex_setGlobalOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXIndex_setGlobalOptions_ADDR, clang_CXIndex_setGlobalOptions_DESC) }
 
 fun clang_CXIndex_setGlobalOptions(arg0: MemorySegment, arg1: Int): Unit {
     try {
@@ -5825,8 +5877,8 @@ fun clang_CXIndex_setGlobalOptions(arg0: MemorySegment, arg1: Int): Unit {
  * {@snippet lang=c : clang_CXIndex_getGlobalOptions UNSIGNED = Int(typedef CXIndex = (Void)*)
  */
 private val clang_CXIndex_getGlobalOptions_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_CXIndex_getGlobalOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXIndex_getGlobalOptions")
-private val clang_CXIndex_getGlobalOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXIndex_getGlobalOptions_ADDR, clang_CXIndex_getGlobalOptions_DESC)
+private val clang_CXIndex_getGlobalOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXIndex_getGlobalOptions") }
+private val clang_CXIndex_getGlobalOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXIndex_getGlobalOptions_ADDR, clang_CXIndex_getGlobalOptions_DESC) }
 
 fun clang_CXIndex_getGlobalOptions(arg0: MemorySegment): Int {
     try {
@@ -5844,8 +5896,8 @@ fun clang_CXIndex_getGlobalOptions(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXIndex_setInvocationEmissionPathOption Void(typedef CXIndex = (Void)*,(Char)*)
  */
 private val clang_CXIndex_setInvocationEmissionPathOption_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_CXIndex_setInvocationEmissionPathOption_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXIndex_setInvocationEmissionPathOption")
-private val clang_CXIndex_setInvocationEmissionPathOption_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXIndex_setInvocationEmissionPathOption_ADDR, clang_CXIndex_setInvocationEmissionPathOption_DESC)
+private val clang_CXIndex_setInvocationEmissionPathOption_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXIndex_setInvocationEmissionPathOption") }
+private val clang_CXIndex_setInvocationEmissionPathOption_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXIndex_setInvocationEmissionPathOption_ADDR, clang_CXIndex_setInvocationEmissionPathOption_DESC) }
 
 fun clang_CXIndex_setInvocationEmissionPathOption(arg0: MemorySegment, arg1: MemorySegment): Unit {
     try {
@@ -5863,8 +5915,8 @@ fun clang_CXIndex_setInvocationEmissionPathOption(arg0: MemorySegment, arg1: Mem
  * {@snippet lang=c : clang_isFileMultipleIncludeGuarded UNSIGNED = Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*)
  */
 private val clang_isFileMultipleIncludeGuarded_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_isFileMultipleIncludeGuarded_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isFileMultipleIncludeGuarded")
-private val clang_isFileMultipleIncludeGuarded_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isFileMultipleIncludeGuarded_ADDR, clang_isFileMultipleIncludeGuarded_DESC)
+private val clang_isFileMultipleIncludeGuarded_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isFileMultipleIncludeGuarded") }
+private val clang_isFileMultipleIncludeGuarded_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isFileMultipleIncludeGuarded_ADDR, clang_isFileMultipleIncludeGuarded_DESC) }
 
 fun clang_isFileMultipleIncludeGuarded(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -5882,8 +5934,8 @@ fun clang_isFileMultipleIncludeGuarded(arg0: MemorySegment, arg1: MemorySegment)
  * {@snippet lang=c : clang_getFile typedef CXFile = (Void)*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,(Char)*)
  */
 private val clang_getFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFile")
-private val clang_getFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFile_ADDR, clang_getFile_DESC)
+private val clang_getFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFile") }
+private val clang_getFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFile_ADDR, clang_getFile_DESC) }
 
 fun clang_getFile(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -5901,8 +5953,8 @@ fun clang_getFile(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_getFileContents (Char)*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*,(typedef size_t = UNSIGNED = Long)*)
  */
 private val clang_getFileContents_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getFileContents_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFileContents")
-private val clang_getFileContents_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFileContents_ADDR, clang_getFileContents_DESC)
+private val clang_getFileContents_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFileContents") }
+private val clang_getFileContents_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFileContents_ADDR, clang_getFileContents_DESC) }
 
 fun clang_getFileContents(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): MemorySegment {
     try {
@@ -5920,8 +5972,8 @@ fun clang_getFileContents(arg0: MemorySegment, arg1: MemorySegment, arg2: Memory
  * {@snippet lang=c : clang_getLocation typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*,UNSIGNED = Int,UNSIGNED = Int)
  */
 private val clang_getLocation_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_getLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getLocation")
-private val clang_getLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getLocation_ADDR, clang_getLocation_DESC)
+private val clang_getLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getLocation") }
+private val clang_getLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getLocation_ADDR, clang_getLocation_DESC) }
 
 fun clang_getLocation(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment, arg2: Int, arg3: Int): MemorySegment {
     try {
@@ -5939,8 +5991,8 @@ fun clang_getLocation(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Me
  * {@snippet lang=c : clang_getLocationForOffset typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*,UNSIGNED = Int)
  */
 private val clang_getLocationForOffset_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getLocationForOffset_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getLocationForOffset")
-private val clang_getLocationForOffset_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getLocationForOffset_ADDR, clang_getLocationForOffset_DESC)
+private val clang_getLocationForOffset_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getLocationForOffset") }
+private val clang_getLocationForOffset_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getLocationForOffset_ADDR, clang_getLocationForOffset_DESC) }
 
 fun clang_getLocationForOffset(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment, arg2: Int): MemorySegment {
     try {
@@ -5958,8 +6010,8 @@ fun clang_getLocationForOffset(allocator: SegmentAllocator, arg0: MemorySegment,
  * {@snippet lang=c : clang_getSkippedRanges (typedef CXSourceRangeList = Declared(CXSourceRangeList))*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*)
  */
 private val clang_getSkippedRanges_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getSkippedRanges_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getSkippedRanges")
-private val clang_getSkippedRanges_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getSkippedRanges_ADDR, clang_getSkippedRanges_DESC)
+private val clang_getSkippedRanges_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getSkippedRanges") }
+private val clang_getSkippedRanges_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getSkippedRanges_ADDR, clang_getSkippedRanges_DESC) }
 
 fun clang_getSkippedRanges(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -5977,8 +6029,8 @@ fun clang_getSkippedRanges(arg0: MemorySegment, arg1: MemorySegment): MemorySegm
  * {@snippet lang=c : clang_getAllSkippedRanges (typedef CXSourceRangeList = Declared(CXSourceRangeList))*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_getAllSkippedRanges_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getAllSkippedRanges_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getAllSkippedRanges")
-private val clang_getAllSkippedRanges_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getAllSkippedRanges_ADDR, clang_getAllSkippedRanges_DESC)
+private val clang_getAllSkippedRanges_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getAllSkippedRanges") }
+private val clang_getAllSkippedRanges_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getAllSkippedRanges_ADDR, clang_getAllSkippedRanges_DESC) }
 
 fun clang_getAllSkippedRanges(arg0: MemorySegment): MemorySegment {
     try {
@@ -5996,8 +6048,8 @@ fun clang_getAllSkippedRanges(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_getNumDiagnostics UNSIGNED = Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_getNumDiagnostics_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getNumDiagnostics_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNumDiagnostics")
-private val clang_getNumDiagnostics_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNumDiagnostics_ADDR, clang_getNumDiagnostics_DESC)
+private val clang_getNumDiagnostics_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNumDiagnostics") }
+private val clang_getNumDiagnostics_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNumDiagnostics_ADDR, clang_getNumDiagnostics_DESC) }
 
 fun clang_getNumDiagnostics(arg0: MemorySegment): Int {
     try {
@@ -6015,8 +6067,8 @@ fun clang_getNumDiagnostics(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getDiagnostic typedef CXDiagnostic = (Void)*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,UNSIGNED = Int)
  */
 private val clang_getDiagnostic_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getDiagnostic_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnostic")
-private val clang_getDiagnostic_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnostic_ADDR, clang_getDiagnostic_DESC)
+private val clang_getDiagnostic_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnostic") }
+private val clang_getDiagnostic_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnostic_ADDR, clang_getDiagnostic_DESC) }
 
 fun clang_getDiagnostic(arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -6034,8 +6086,8 @@ fun clang_getDiagnostic(arg0: MemorySegment, arg1: Int): MemorySegment {
  * {@snippet lang=c : clang_getDiagnosticSetFromTU typedef CXDiagnosticSet = (Void)*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_getDiagnosticSetFromTU_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getDiagnosticSetFromTU_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDiagnosticSetFromTU")
-private val clang_getDiagnosticSetFromTU_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDiagnosticSetFromTU_ADDR, clang_getDiagnosticSetFromTU_DESC)
+private val clang_getDiagnosticSetFromTU_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDiagnosticSetFromTU") }
+private val clang_getDiagnosticSetFromTU_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDiagnosticSetFromTU_ADDR, clang_getDiagnosticSetFromTU_DESC) }
 
 fun clang_getDiagnosticSetFromTU(arg0: MemorySegment): MemorySegment {
     try {
@@ -6053,8 +6105,8 @@ fun clang_getDiagnosticSetFromTU(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_getTranslationUnitSpelling typedef CXString = Declared(CXString)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_getTranslationUnitSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_getTranslationUnitSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTranslationUnitSpelling")
-private val clang_getTranslationUnitSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTranslationUnitSpelling_ADDR, clang_getTranslationUnitSpelling_DESC)
+private val clang_getTranslationUnitSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTranslationUnitSpelling") }
+private val clang_getTranslationUnitSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTranslationUnitSpelling_ADDR, clang_getTranslationUnitSpelling_DESC) }
 
 fun clang_getTranslationUnitSpelling(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -6072,8 +6124,8 @@ fun clang_getTranslationUnitSpelling(allocator: SegmentAllocator, arg0: MemorySe
  * {@snippet lang=c : clang_createTranslationUnitFromSourceFile typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*(typedef CXIndex = (Void)*,(Char)*,Int,((Char)*)*,UNSIGNED = Int,(Declared(CXUnsavedFile))*)
  */
 private val clang_createTranslationUnitFromSourceFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_createTranslationUnitFromSourceFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_createTranslationUnitFromSourceFile")
-private val clang_createTranslationUnitFromSourceFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_createTranslationUnitFromSourceFile_ADDR, clang_createTranslationUnitFromSourceFile_DESC)
+private val clang_createTranslationUnitFromSourceFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_createTranslationUnitFromSourceFile") }
+private val clang_createTranslationUnitFromSourceFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_createTranslationUnitFromSourceFile_ADDR, clang_createTranslationUnitFromSourceFile_DESC) }
 
 fun clang_createTranslationUnitFromSourceFile(arg0: MemorySegment, arg1: MemorySegment, arg2: Int, arg3: MemorySegment, arg4: Int, arg5: MemorySegment): MemorySegment {
     try {
@@ -6091,8 +6143,8 @@ fun clang_createTranslationUnitFromSourceFile(arg0: MemorySegment, arg1: MemoryS
  * {@snippet lang=c : clang_createTranslationUnit typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*(typedef CXIndex = (Void)*,(Char)*)
  */
 private val clang_createTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_createTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_createTranslationUnit")
-private val clang_createTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_createTranslationUnit_ADDR, clang_createTranslationUnit_DESC)
+private val clang_createTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_createTranslationUnit") }
+private val clang_createTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_createTranslationUnit_ADDR, clang_createTranslationUnit_DESC) }
 
 fun clang_createTranslationUnit(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -6110,8 +6162,8 @@ fun clang_createTranslationUnit(arg0: MemorySegment, arg1: MemorySegment): Memor
  * {@snippet lang=c : clang_createTranslationUnit2 Declared(CXErrorCode)(typedef CXIndex = (Void)*,(Char)*,(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)*)
  */
 private val clang_createTranslationUnit2_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_createTranslationUnit2_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_createTranslationUnit2")
-private val clang_createTranslationUnit2_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_createTranslationUnit2_ADDR, clang_createTranslationUnit2_DESC)
+private val clang_createTranslationUnit2_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_createTranslationUnit2") }
+private val clang_createTranslationUnit2_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_createTranslationUnit2_ADDR, clang_createTranslationUnit2_DESC) }
 
 fun clang_createTranslationUnit2(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -6214,8 +6266,8 @@ fun CXTranslationUnit_RetainExcludedConditionalBlocks(): Int = 32768
  * {@snippet lang=c : clang_defaultEditingTranslationUnitOptions UNSIGNED = Int()
  */
 private val clang_defaultEditingTranslationUnitOptions_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT)
-private val clang_defaultEditingTranslationUnitOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_defaultEditingTranslationUnitOptions")
-private val clang_defaultEditingTranslationUnitOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_defaultEditingTranslationUnitOptions_ADDR, clang_defaultEditingTranslationUnitOptions_DESC)
+private val clang_defaultEditingTranslationUnitOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_defaultEditingTranslationUnitOptions") }
+private val clang_defaultEditingTranslationUnitOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_defaultEditingTranslationUnitOptions_ADDR, clang_defaultEditingTranslationUnitOptions_DESC) }
 
 fun clang_defaultEditingTranslationUnitOptions(): Int {
     try {
@@ -6233,8 +6285,8 @@ fun clang_defaultEditingTranslationUnitOptions(): Int {
  * {@snippet lang=c : clang_parseTranslationUnit typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*(typedef CXIndex = (Void)*,(Char)*,((Char)*)*,Int,(Declared(CXUnsavedFile))*,UNSIGNED = Int,UNSIGNED = Int)
  */
 private val clang_parseTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_parseTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_parseTranslationUnit")
-private val clang_parseTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_parseTranslationUnit_ADDR, clang_parseTranslationUnit_DESC)
+private val clang_parseTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_parseTranslationUnit") }
+private val clang_parseTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_parseTranslationUnit_ADDR, clang_parseTranslationUnit_DESC) }
 
 fun clang_parseTranslationUnit(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: Int, arg4: MemorySegment, arg5: Int, arg6: Int): MemorySegment {
     try {
@@ -6252,8 +6304,8 @@ fun clang_parseTranslationUnit(arg0: MemorySegment, arg1: MemorySegment, arg2: M
  * {@snippet lang=c : clang_parseTranslationUnit2 Declared(CXErrorCode)(typedef CXIndex = (Void)*,(Char)*,((Char)*)*,Int,(Declared(CXUnsavedFile))*,UNSIGNED = Int,UNSIGNED = Int,(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)*)
  */
 private val clang_parseTranslationUnit2_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_parseTranslationUnit2_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_parseTranslationUnit2")
-private val clang_parseTranslationUnit2_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_parseTranslationUnit2_ADDR, clang_parseTranslationUnit2_DESC)
+private val clang_parseTranslationUnit2_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_parseTranslationUnit2") }
+private val clang_parseTranslationUnit2_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_parseTranslationUnit2_ADDR, clang_parseTranslationUnit2_DESC) }
 
 fun clang_parseTranslationUnit2(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: Int, arg4: MemorySegment, arg5: Int, arg6: Int, arg7: MemorySegment): Int {
     try {
@@ -6271,8 +6323,8 @@ fun clang_parseTranslationUnit2(arg0: MemorySegment, arg1: MemorySegment, arg2: 
  * {@snippet lang=c : clang_parseTranslationUnit2FullArgv Declared(CXErrorCode)(typedef CXIndex = (Void)*,(Char)*,((Char)*)*,Int,(Declared(CXUnsavedFile))*,UNSIGNED = Int,UNSIGNED = Int,(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)*)
  */
 private val clang_parseTranslationUnit2FullArgv_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_parseTranslationUnit2FullArgv_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_parseTranslationUnit2FullArgv")
-private val clang_parseTranslationUnit2FullArgv_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_parseTranslationUnit2FullArgv_ADDR, clang_parseTranslationUnit2FullArgv_DESC)
+private val clang_parseTranslationUnit2FullArgv_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_parseTranslationUnit2FullArgv") }
+private val clang_parseTranslationUnit2FullArgv_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_parseTranslationUnit2FullArgv_ADDR, clang_parseTranslationUnit2FullArgv_DESC) }
 
 fun clang_parseTranslationUnit2FullArgv(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: Int, arg4: MemorySegment, arg5: Int, arg6: Int, arg7: MemorySegment): Int {
     try {
@@ -6295,8 +6347,8 @@ fun CXSaveTranslationUnit_None(): Int = 0
  * {@snippet lang=c : clang_defaultSaveOptions UNSIGNED = Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_defaultSaveOptions_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_defaultSaveOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_defaultSaveOptions")
-private val clang_defaultSaveOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_defaultSaveOptions_ADDR, clang_defaultSaveOptions_DESC)
+private val clang_defaultSaveOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_defaultSaveOptions") }
+private val clang_defaultSaveOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_defaultSaveOptions_ADDR, clang_defaultSaveOptions_DESC) }
 
 fun clang_defaultSaveOptions(arg0: MemorySegment): Int {
     try {
@@ -6334,8 +6386,8 @@ fun CXSaveError_InvalidTU(): Int = 3
  * {@snippet lang=c : clang_saveTranslationUnit Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,(Char)*,UNSIGNED = Int)
  */
 private val clang_saveTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_saveTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_saveTranslationUnit")
-private val clang_saveTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_saveTranslationUnit_ADDR, clang_saveTranslationUnit_DESC)
+private val clang_saveTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_saveTranslationUnit") }
+private val clang_saveTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_saveTranslationUnit_ADDR, clang_saveTranslationUnit_DESC) }
 
 fun clang_saveTranslationUnit(arg0: MemorySegment, arg1: MemorySegment, arg2: Int): Int {
     try {
@@ -6353,8 +6405,8 @@ fun clang_saveTranslationUnit(arg0: MemorySegment, arg1: MemorySegment, arg2: In
  * {@snippet lang=c : clang_suspendTranslationUnit UNSIGNED = Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_suspendTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_suspendTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_suspendTranslationUnit")
-private val clang_suspendTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_suspendTranslationUnit_ADDR, clang_suspendTranslationUnit_DESC)
+private val clang_suspendTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_suspendTranslationUnit") }
+private val clang_suspendTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_suspendTranslationUnit_ADDR, clang_suspendTranslationUnit_DESC) }
 
 fun clang_suspendTranslationUnit(arg0: MemorySegment): Int {
     try {
@@ -6372,8 +6424,8 @@ fun clang_suspendTranslationUnit(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_disposeTranslationUnit Void(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_disposeTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeTranslationUnit")
-private val clang_disposeTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeTranslationUnit_ADDR, clang_disposeTranslationUnit_DESC)
+private val clang_disposeTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeTranslationUnit") }
+private val clang_disposeTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeTranslationUnit_ADDR, clang_disposeTranslationUnit_DESC) }
 
 fun clang_disposeTranslationUnit(arg0: MemorySegment): Unit {
     try {
@@ -6396,8 +6448,8 @@ fun CXReparse_None(): Int = 0
  * {@snippet lang=c : clang_defaultReparseOptions UNSIGNED = Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_defaultReparseOptions_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_defaultReparseOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_defaultReparseOptions")
-private val clang_defaultReparseOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_defaultReparseOptions_ADDR, clang_defaultReparseOptions_DESC)
+private val clang_defaultReparseOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_defaultReparseOptions") }
+private val clang_defaultReparseOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_defaultReparseOptions_ADDR, clang_defaultReparseOptions_DESC) }
 
 fun clang_defaultReparseOptions(arg0: MemorySegment): Int {
     try {
@@ -6415,8 +6467,8 @@ fun clang_defaultReparseOptions(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_reparseTranslationUnit Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,UNSIGNED = Int,(Declared(CXUnsavedFile))*,UNSIGNED = Int)
  */
 private val clang_reparseTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_reparseTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_reparseTranslationUnit")
-private val clang_reparseTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_reparseTranslationUnit_ADDR, clang_reparseTranslationUnit_DESC)
+private val clang_reparseTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_reparseTranslationUnit") }
+private val clang_reparseTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_reparseTranslationUnit_ADDR, clang_reparseTranslationUnit_DESC) }
 
 fun clang_reparseTranslationUnit(arg0: MemorySegment, arg1: Int, arg2: MemorySegment, arg3: Int): Int {
     try {
@@ -6524,8 +6576,8 @@ fun CXTUResourceUsage_Last(): Int = 14
  * {@snippet lang=c : clang_getTUResourceUsageName (Char)*(Declared(CXTUResourceUsageKind))
  */
 private val clang_getTUResourceUsageName_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getTUResourceUsageName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTUResourceUsageName")
-private val clang_getTUResourceUsageName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTUResourceUsageName_ADDR, clang_getTUResourceUsageName_DESC)
+private val clang_getTUResourceUsageName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTUResourceUsageName") }
+private val clang_getTUResourceUsageName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTUResourceUsageName_ADDR, clang_getTUResourceUsageName_DESC) }
 
 fun clang_getTUResourceUsageName(arg0: Int): MemorySegment {
     try {
@@ -6651,8 +6703,8 @@ class CXTUResourceUsage {
  * {@snippet lang=c : clang_getCXTUResourceUsage typedef CXTUResourceUsage = Declared(CXTUResourceUsage)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_getCXTUResourceUsage_DESC: FunctionDescriptor = FunctionDescriptor.of(CXTUResourceUsage.layout, ValueLayout.ADDRESS)
-private val clang_getCXTUResourceUsage_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCXTUResourceUsage")
-private val clang_getCXTUResourceUsage_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCXTUResourceUsage_ADDR, clang_getCXTUResourceUsage_DESC)
+private val clang_getCXTUResourceUsage_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCXTUResourceUsage") }
+private val clang_getCXTUResourceUsage_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCXTUResourceUsage_ADDR, clang_getCXTUResourceUsage_DESC) }
 
 fun clang_getCXTUResourceUsage(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -6670,8 +6722,8 @@ fun clang_getCXTUResourceUsage(allocator: SegmentAllocator, arg0: MemorySegment)
  * {@snippet lang=c : clang_disposeCXTUResourceUsage Void(typedef CXTUResourceUsage = Declared(CXTUResourceUsage))
  */
 private val clang_disposeCXTUResourceUsage_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXTUResourceUsage.layout)
-private val clang_disposeCXTUResourceUsage_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeCXTUResourceUsage")
-private val clang_disposeCXTUResourceUsage_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeCXTUResourceUsage_ADDR, clang_disposeCXTUResourceUsage_DESC)
+private val clang_disposeCXTUResourceUsage_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeCXTUResourceUsage") }
+private val clang_disposeCXTUResourceUsage_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeCXTUResourceUsage_ADDR, clang_disposeCXTUResourceUsage_DESC) }
 
 fun clang_disposeCXTUResourceUsage(arg0: MemorySegment): Unit {
     try {
@@ -6689,8 +6741,8 @@ fun clang_disposeCXTUResourceUsage(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_getTranslationUnitTargetInfo typedef CXTargetInfo = (Declared(CXTargetInfoImpl))*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_getTranslationUnitTargetInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getTranslationUnitTargetInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTranslationUnitTargetInfo")
-private val clang_getTranslationUnitTargetInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTranslationUnitTargetInfo_ADDR, clang_getTranslationUnitTargetInfo_DESC)
+private val clang_getTranslationUnitTargetInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTranslationUnitTargetInfo") }
+private val clang_getTranslationUnitTargetInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTranslationUnitTargetInfo_ADDR, clang_getTranslationUnitTargetInfo_DESC) }
 
 fun clang_getTranslationUnitTargetInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -6708,8 +6760,8 @@ fun clang_getTranslationUnitTargetInfo(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_TargetInfo_dispose Void(typedef CXTargetInfo = (Declared(CXTargetInfoImpl))*)
  */
 private val clang_TargetInfo_dispose_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_TargetInfo_dispose_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_TargetInfo_dispose")
-private val clang_TargetInfo_dispose_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_TargetInfo_dispose_ADDR, clang_TargetInfo_dispose_DESC)
+private val clang_TargetInfo_dispose_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_TargetInfo_dispose") }
+private val clang_TargetInfo_dispose_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_TargetInfo_dispose_ADDR, clang_TargetInfo_dispose_DESC) }
 
 fun clang_TargetInfo_dispose(arg0: MemorySegment): Unit {
     try {
@@ -6727,8 +6779,8 @@ fun clang_TargetInfo_dispose(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_TargetInfo_getTriple typedef CXString = Declared(CXString)(typedef CXTargetInfo = (Declared(CXTargetInfoImpl))*)
  */
 private val clang_TargetInfo_getTriple_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_TargetInfo_getTriple_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_TargetInfo_getTriple")
-private val clang_TargetInfo_getTriple_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_TargetInfo_getTriple_ADDR, clang_TargetInfo_getTriple_DESC)
+private val clang_TargetInfo_getTriple_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_TargetInfo_getTriple") }
+private val clang_TargetInfo_getTriple_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_TargetInfo_getTriple_ADDR, clang_TargetInfo_getTriple_DESC) }
 
 fun clang_TargetInfo_getTriple(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -6746,8 +6798,8 @@ fun clang_TargetInfo_getTriple(allocator: SegmentAllocator, arg0: MemorySegment)
  * {@snippet lang=c : clang_TargetInfo_getPointerWidth Int(typedef CXTargetInfo = (Declared(CXTargetInfoImpl))*)
  */
 private val clang_TargetInfo_getPointerWidth_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_TargetInfo_getPointerWidth_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_TargetInfo_getPointerWidth")
-private val clang_TargetInfo_getPointerWidth_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_TargetInfo_getPointerWidth_ADDR, clang_TargetInfo_getPointerWidth_DESC)
+private val clang_TargetInfo_getPointerWidth_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_TargetInfo_getPointerWidth") }
+private val clang_TargetInfo_getPointerWidth_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_TargetInfo_getPointerWidth_ADDR, clang_TargetInfo_getPointerWidth_DESC) }
 
 fun clang_TargetInfo_getPointerWidth(arg0: MemorySegment): Int {
     try {
@@ -8358,8 +8410,8 @@ class CXCursor {
  * {@snippet lang=c : clang_getNullCursor typedef CXCursor = Declared(CXCursor)()
  */
 private val clang_getNullCursor_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout)
-private val clang_getNullCursor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNullCursor")
-private val clang_getNullCursor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNullCursor_ADDR, clang_getNullCursor_DESC)
+private val clang_getNullCursor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNullCursor") }
+private val clang_getNullCursor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNullCursor_ADDR, clang_getNullCursor_DESC) }
 
 fun clang_getNullCursor(allocator: SegmentAllocator): MemorySegment {
     try {
@@ -8377,8 +8429,8 @@ fun clang_getNullCursor(allocator: SegmentAllocator): MemorySegment {
  * {@snippet lang=c : clang_getTranslationUnitCursor typedef CXCursor = Declared(CXCursor)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_getTranslationUnitCursor_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, ValueLayout.ADDRESS)
-private val clang_getTranslationUnitCursor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTranslationUnitCursor")
-private val clang_getTranslationUnitCursor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTranslationUnitCursor_ADDR, clang_getTranslationUnitCursor_DESC)
+private val clang_getTranslationUnitCursor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTranslationUnitCursor") }
+private val clang_getTranslationUnitCursor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTranslationUnitCursor_ADDR, clang_getTranslationUnitCursor_DESC) }
 
 fun clang_getTranslationUnitCursor(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -8396,8 +8448,8 @@ fun clang_getTranslationUnitCursor(allocator: SegmentAllocator, arg0: MemorySegm
  * {@snippet lang=c : clang_equalCursors UNSIGNED = Int(typedef CXCursor = Declared(CXCursor),typedef CXCursor = Declared(CXCursor))
  */
 private val clang_equalCursors_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, CXCursor.layout)
-private val clang_equalCursors_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_equalCursors")
-private val clang_equalCursors_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_equalCursors_ADDR, clang_equalCursors_DESC)
+private val clang_equalCursors_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_equalCursors") }
+private val clang_equalCursors_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_equalCursors_ADDR, clang_equalCursors_DESC) }
 
 fun clang_equalCursors(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -8415,8 +8467,8 @@ fun clang_equalCursors(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isNull Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isNull_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isNull_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isNull")
-private val clang_Cursor_isNull_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isNull_ADDR, clang_Cursor_isNull_DESC)
+private val clang_Cursor_isNull_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isNull") }
+private val clang_Cursor_isNull_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isNull_ADDR, clang_Cursor_isNull_DESC) }
 
 fun clang_Cursor_isNull(arg0: MemorySegment): Int {
     try {
@@ -8434,8 +8486,8 @@ fun clang_Cursor_isNull(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_hashCursor UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_hashCursor_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_hashCursor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_hashCursor")
-private val clang_hashCursor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_hashCursor_ADDR, clang_hashCursor_DESC)
+private val clang_hashCursor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_hashCursor") }
+private val clang_hashCursor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_hashCursor_ADDR, clang_hashCursor_DESC) }
 
 fun clang_hashCursor(arg0: MemorySegment): Int {
     try {
@@ -8453,8 +8505,8 @@ fun clang_hashCursor(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCursorKind Declared(CXCursorKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorKind")
-private val clang_getCursorKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorKind_ADDR, clang_getCursorKind_DESC)
+private val clang_getCursorKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorKind") }
+private val clang_getCursorKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorKind_ADDR, clang_getCursorKind_DESC) }
 
 fun clang_getCursorKind(arg0: MemorySegment): Int {
     try {
@@ -8472,8 +8524,8 @@ fun clang_getCursorKind(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_isDeclaration UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isDeclaration_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isDeclaration_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isDeclaration")
-private val clang_isDeclaration_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isDeclaration_ADDR, clang_isDeclaration_DESC)
+private val clang_isDeclaration_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isDeclaration") }
+private val clang_isDeclaration_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isDeclaration_ADDR, clang_isDeclaration_DESC) }
 
 fun clang_isDeclaration(arg0: Int): Int {
     try {
@@ -8491,8 +8543,8 @@ fun clang_isDeclaration(arg0: Int): Int {
  * {@snippet lang=c : clang_isInvalidDeclaration UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_isInvalidDeclaration_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_isInvalidDeclaration_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isInvalidDeclaration")
-private val clang_isInvalidDeclaration_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isInvalidDeclaration_ADDR, clang_isInvalidDeclaration_DESC)
+private val clang_isInvalidDeclaration_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isInvalidDeclaration") }
+private val clang_isInvalidDeclaration_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isInvalidDeclaration_ADDR, clang_isInvalidDeclaration_DESC) }
 
 fun clang_isInvalidDeclaration(arg0: MemorySegment): Int {
     try {
@@ -8510,8 +8562,8 @@ fun clang_isInvalidDeclaration(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_isReference UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isReference_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isReference_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isReference")
-private val clang_isReference_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isReference_ADDR, clang_isReference_DESC)
+private val clang_isReference_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isReference") }
+private val clang_isReference_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isReference_ADDR, clang_isReference_DESC) }
 
 fun clang_isReference(arg0: Int): Int {
     try {
@@ -8529,8 +8581,8 @@ fun clang_isReference(arg0: Int): Int {
  * {@snippet lang=c : clang_isExpression UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isExpression_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isExpression_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isExpression")
-private val clang_isExpression_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isExpression_ADDR, clang_isExpression_DESC)
+private val clang_isExpression_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isExpression") }
+private val clang_isExpression_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isExpression_ADDR, clang_isExpression_DESC) }
 
 fun clang_isExpression(arg0: Int): Int {
     try {
@@ -8548,8 +8600,8 @@ fun clang_isExpression(arg0: Int): Int {
  * {@snippet lang=c : clang_isStatement UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isStatement_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isStatement_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isStatement")
-private val clang_isStatement_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isStatement_ADDR, clang_isStatement_DESC)
+private val clang_isStatement_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isStatement") }
+private val clang_isStatement_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isStatement_ADDR, clang_isStatement_DESC) }
 
 fun clang_isStatement(arg0: Int): Int {
     try {
@@ -8567,8 +8619,8 @@ fun clang_isStatement(arg0: Int): Int {
  * {@snippet lang=c : clang_isAttribute UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isAttribute_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isAttribute_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isAttribute")
-private val clang_isAttribute_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isAttribute_ADDR, clang_isAttribute_DESC)
+private val clang_isAttribute_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isAttribute") }
+private val clang_isAttribute_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isAttribute_ADDR, clang_isAttribute_DESC) }
 
 fun clang_isAttribute(arg0: Int): Int {
     try {
@@ -8586,8 +8638,8 @@ fun clang_isAttribute(arg0: Int): Int {
  * {@snippet lang=c : clang_Cursor_hasAttrs UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_hasAttrs_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_hasAttrs_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_hasAttrs")
-private val clang_Cursor_hasAttrs_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_hasAttrs_ADDR, clang_Cursor_hasAttrs_DESC)
+private val clang_Cursor_hasAttrs_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_hasAttrs") }
+private val clang_Cursor_hasAttrs_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_hasAttrs_ADDR, clang_Cursor_hasAttrs_DESC) }
 
 fun clang_Cursor_hasAttrs(arg0: MemorySegment): Int {
     try {
@@ -8605,8 +8657,8 @@ fun clang_Cursor_hasAttrs(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_isInvalid UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isInvalid_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isInvalid_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isInvalid")
-private val clang_isInvalid_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isInvalid_ADDR, clang_isInvalid_DESC)
+private val clang_isInvalid_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isInvalid") }
+private val clang_isInvalid_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isInvalid_ADDR, clang_isInvalid_DESC) }
 
 fun clang_isInvalid(arg0: Int): Int {
     try {
@@ -8624,8 +8676,8 @@ fun clang_isInvalid(arg0: Int): Int {
  * {@snippet lang=c : clang_isTranslationUnit UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isTranslationUnit")
-private val clang_isTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isTranslationUnit_ADDR, clang_isTranslationUnit_DESC)
+private val clang_isTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isTranslationUnit") }
+private val clang_isTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isTranslationUnit_ADDR, clang_isTranslationUnit_DESC) }
 
 fun clang_isTranslationUnit(arg0: Int): Int {
     try {
@@ -8643,8 +8695,8 @@ fun clang_isTranslationUnit(arg0: Int): Int {
  * {@snippet lang=c : clang_isPreprocessing UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isPreprocessing_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isPreprocessing_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isPreprocessing")
-private val clang_isPreprocessing_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isPreprocessing_ADDR, clang_isPreprocessing_DESC)
+private val clang_isPreprocessing_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isPreprocessing") }
+private val clang_isPreprocessing_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isPreprocessing_ADDR, clang_isPreprocessing_DESC) }
 
 fun clang_isPreprocessing(arg0: Int): Int {
     try {
@@ -8662,8 +8714,8 @@ fun clang_isPreprocessing(arg0: Int): Int {
  * {@snippet lang=c : clang_isUnexposed UNSIGNED = Int(Declared(CXCursorKind))
  */
 private val clang_isUnexposed_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_isUnexposed_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isUnexposed")
-private val clang_isUnexposed_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isUnexposed_ADDR, clang_isUnexposed_DESC)
+private val clang_isUnexposed_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isUnexposed") }
+private val clang_isUnexposed_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isUnexposed_ADDR, clang_isUnexposed_DESC) }
 
 fun clang_isUnexposed(arg0: Int): Int {
     try {
@@ -8706,8 +8758,8 @@ fun CXLinkage_External(): Int = 4
  * {@snippet lang=c : clang_getCursorLinkage Declared(CXLinkageKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorLinkage_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorLinkage_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorLinkage")
-private val clang_getCursorLinkage_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorLinkage_ADDR, clang_getCursorLinkage_DESC)
+private val clang_getCursorLinkage_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorLinkage") }
+private val clang_getCursorLinkage_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorLinkage_ADDR, clang_getCursorLinkage_DESC) }
 
 fun clang_getCursorLinkage(arg0: MemorySegment): Int {
     try {
@@ -8745,8 +8797,8 @@ fun CXVisibility_Default(): Int = 3
  * {@snippet lang=c : clang_getCursorVisibility Declared(CXVisibilityKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorVisibility_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorVisibility_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorVisibility")
-private val clang_getCursorVisibility_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorVisibility_ADDR, clang_getCursorVisibility_DESC)
+private val clang_getCursorVisibility_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorVisibility") }
+private val clang_getCursorVisibility_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorVisibility_ADDR, clang_getCursorVisibility_DESC) }
 
 fun clang_getCursorVisibility(arg0: MemorySegment): Int {
     try {
@@ -8764,8 +8816,8 @@ fun clang_getCursorVisibility(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCursorAvailability Declared(CXAvailabilityKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorAvailability_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorAvailability_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorAvailability")
-private val clang_getCursorAvailability_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorAvailability_ADDR, clang_getCursorAvailability_DESC)
+private val clang_getCursorAvailability_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorAvailability") }
+private val clang_getCursorAvailability_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorAvailability_ADDR, clang_getCursorAvailability_DESC) }
 
 fun clang_getCursorAvailability(arg0: MemorySegment): Int {
     try {
@@ -8851,8 +8903,8 @@ class CXPlatformAvailability {
  * {@snippet lang=c : clang_getCursorPlatformAvailability Int(typedef CXCursor = Declared(CXCursor),(Int)*,(typedef CXString = Declared(CXString))*,(Int)*,(typedef CXString = Declared(CXString))*,(typedef CXPlatformAvailability = Declared(CXPlatformAvailability))*,Int)
  */
 private val clang_getCursorPlatformAvailability_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getCursorPlatformAvailability_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorPlatformAvailability")
-private val clang_getCursorPlatformAvailability_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorPlatformAvailability_ADDR, clang_getCursorPlatformAvailability_DESC)
+private val clang_getCursorPlatformAvailability_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorPlatformAvailability") }
+private val clang_getCursorPlatformAvailability_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorPlatformAvailability_ADDR, clang_getCursorPlatformAvailability_DESC) }
 
 fun clang_getCursorPlatformAvailability(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment, arg5: MemorySegment, arg6: Int): Int {
     try {
@@ -8870,8 +8922,8 @@ fun clang_getCursorPlatformAvailability(arg0: MemorySegment, arg1: MemorySegment
  * {@snippet lang=c : clang_disposeCXPlatformAvailability Void((typedef CXPlatformAvailability = Declared(CXPlatformAvailability))*)
  */
 private val clang_disposeCXPlatformAvailability_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeCXPlatformAvailability_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeCXPlatformAvailability")
-private val clang_disposeCXPlatformAvailability_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeCXPlatformAvailability_ADDR, clang_disposeCXPlatformAvailability_DESC)
+private val clang_disposeCXPlatformAvailability_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeCXPlatformAvailability") }
+private val clang_disposeCXPlatformAvailability_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeCXPlatformAvailability_ADDR, clang_disposeCXPlatformAvailability_DESC) }
 
 fun clang_disposeCXPlatformAvailability(arg0: MemorySegment): Unit {
     try {
@@ -8889,8 +8941,8 @@ fun clang_disposeCXPlatformAvailability(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_Cursor_getVarDeclInitializer typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getVarDeclInitializer_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout)
-private val clang_Cursor_getVarDeclInitializer_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getVarDeclInitializer")
-private val clang_Cursor_getVarDeclInitializer_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getVarDeclInitializer_ADDR, clang_Cursor_getVarDeclInitializer_DESC)
+private val clang_Cursor_getVarDeclInitializer_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getVarDeclInitializer") }
+private val clang_Cursor_getVarDeclInitializer_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getVarDeclInitializer_ADDR, clang_Cursor_getVarDeclInitializer_DESC) }
 
 fun clang_Cursor_getVarDeclInitializer(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -8908,8 +8960,8 @@ fun clang_Cursor_getVarDeclInitializer(allocator: SegmentAllocator, arg0: Memory
  * {@snippet lang=c : clang_Cursor_hasVarDeclGlobalStorage Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_hasVarDeclGlobalStorage_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_hasVarDeclGlobalStorage_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_hasVarDeclGlobalStorage")
-private val clang_Cursor_hasVarDeclGlobalStorage_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_hasVarDeclGlobalStorage_ADDR, clang_Cursor_hasVarDeclGlobalStorage_DESC)
+private val clang_Cursor_hasVarDeclGlobalStorage_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_hasVarDeclGlobalStorage") }
+private val clang_Cursor_hasVarDeclGlobalStorage_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_hasVarDeclGlobalStorage_ADDR, clang_Cursor_hasVarDeclGlobalStorage_DESC) }
 
 fun clang_Cursor_hasVarDeclGlobalStorage(arg0: MemorySegment): Int {
     try {
@@ -8927,8 +8979,8 @@ fun clang_Cursor_hasVarDeclGlobalStorage(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_hasVarDeclExternalStorage Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_hasVarDeclExternalStorage_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_hasVarDeclExternalStorage_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_hasVarDeclExternalStorage")
-private val clang_Cursor_hasVarDeclExternalStorage_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_hasVarDeclExternalStorage_ADDR, clang_Cursor_hasVarDeclExternalStorage_DESC)
+private val clang_Cursor_hasVarDeclExternalStorage_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_hasVarDeclExternalStorage") }
+private val clang_Cursor_hasVarDeclExternalStorage_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_hasVarDeclExternalStorage_ADDR, clang_Cursor_hasVarDeclExternalStorage_DESC) }
 
 fun clang_Cursor_hasVarDeclExternalStorage(arg0: MemorySegment): Int {
     try {
@@ -8966,8 +9018,8 @@ fun CXLanguage_CPlusPlus(): Int = 3
  * {@snippet lang=c : clang_getCursorLanguage Declared(CXLanguageKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorLanguage_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorLanguage_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorLanguage")
-private val clang_getCursorLanguage_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorLanguage_ADDR, clang_getCursorLanguage_DESC)
+private val clang_getCursorLanguage_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorLanguage") }
+private val clang_getCursorLanguage_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorLanguage_ADDR, clang_getCursorLanguage_DESC) }
 
 fun clang_getCursorLanguage(arg0: MemorySegment): Int {
     try {
@@ -9000,8 +9052,8 @@ fun CXTLS_Static(): Int = 2
  * {@snippet lang=c : clang_getCursorTLSKind Declared(CXTLSKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorTLSKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorTLSKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorTLSKind")
-private val clang_getCursorTLSKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorTLSKind_ADDR, clang_getCursorTLSKind_DESC)
+private val clang_getCursorTLSKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorTLSKind") }
+private val clang_getCursorTLSKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorTLSKind_ADDR, clang_getCursorTLSKind_DESC) }
 
 fun clang_getCursorTLSKind(arg0: MemorySegment): Int {
     try {
@@ -9019,8 +9071,8 @@ fun clang_getCursorTLSKind(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getTranslationUnit typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_Cursor_getTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getTranslationUnit")
-private val clang_Cursor_getTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getTranslationUnit_ADDR, clang_Cursor_getTranslationUnit_DESC)
+private val clang_Cursor_getTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getTranslationUnit") }
+private val clang_Cursor_getTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getTranslationUnit_ADDR, clang_Cursor_getTranslationUnit_DESC) }
 
 fun clang_Cursor_getTranslationUnit(arg0: MemorySegment): MemorySegment {
     try {
@@ -9071,8 +9123,8 @@ typealias CXCursorSet = MemorySegment?
  * {@snippet lang=c : clang_createCXCursorSet typedef CXCursorSet = (Declared(CXCursorSetImpl))*()
  */
 private val clang_createCXCursorSet_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS)
-private val clang_createCXCursorSet_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_createCXCursorSet")
-private val clang_createCXCursorSet_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_createCXCursorSet_ADDR, clang_createCXCursorSet_DESC)
+private val clang_createCXCursorSet_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_createCXCursorSet") }
+private val clang_createCXCursorSet_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_createCXCursorSet_ADDR, clang_createCXCursorSet_DESC) }
 
 fun clang_createCXCursorSet(): MemorySegment {
     try {
@@ -9090,8 +9142,8 @@ fun clang_createCXCursorSet(): MemorySegment {
  * {@snippet lang=c : clang_disposeCXCursorSet Void(typedef CXCursorSet = (Declared(CXCursorSetImpl))*)
  */
 private val clang_disposeCXCursorSet_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeCXCursorSet_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeCXCursorSet")
-private val clang_disposeCXCursorSet_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeCXCursorSet_ADDR, clang_disposeCXCursorSet_DESC)
+private val clang_disposeCXCursorSet_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeCXCursorSet") }
+private val clang_disposeCXCursorSet_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeCXCursorSet_ADDR, clang_disposeCXCursorSet_DESC) }
 
 fun clang_disposeCXCursorSet(arg0: MemorySegment): Unit {
     try {
@@ -9109,8 +9161,8 @@ fun clang_disposeCXCursorSet(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_CXCursorSet_contains UNSIGNED = Int(typedef CXCursorSet = (Declared(CXCursorSetImpl))*,typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXCursorSet_contains_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_CXCursorSet_contains_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXCursorSet_contains")
-private val clang_CXCursorSet_contains_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXCursorSet_contains_ADDR, clang_CXCursorSet_contains_DESC)
+private val clang_CXCursorSet_contains_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXCursorSet_contains") }
+private val clang_CXCursorSet_contains_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXCursorSet_contains_ADDR, clang_CXCursorSet_contains_DESC) }
 
 fun clang_CXCursorSet_contains(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -9128,8 +9180,8 @@ fun clang_CXCursorSet_contains(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_CXCursorSet_insert UNSIGNED = Int(typedef CXCursorSet = (Declared(CXCursorSetImpl))*,typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXCursorSet_insert_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_CXCursorSet_insert_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXCursorSet_insert")
-private val clang_CXCursorSet_insert_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXCursorSet_insert_ADDR, clang_CXCursorSet_insert_DESC)
+private val clang_CXCursorSet_insert_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXCursorSet_insert") }
+private val clang_CXCursorSet_insert_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXCursorSet_insert_ADDR, clang_CXCursorSet_insert_DESC) }
 
 fun clang_CXCursorSet_insert(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -9147,8 +9199,8 @@ fun clang_CXCursorSet_insert(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_getCursorSemanticParent typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorSemanticParent_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout)
-private val clang_getCursorSemanticParent_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorSemanticParent")
-private val clang_getCursorSemanticParent_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorSemanticParent_ADDR, clang_getCursorSemanticParent_DESC)
+private val clang_getCursorSemanticParent_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorSemanticParent") }
+private val clang_getCursorSemanticParent_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorSemanticParent_ADDR, clang_getCursorSemanticParent_DESC) }
 
 fun clang_getCursorSemanticParent(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -9166,8 +9218,8 @@ fun clang_getCursorSemanticParent(allocator: SegmentAllocator, arg0: MemorySegme
  * {@snippet lang=c : clang_getCursorLexicalParent typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorLexicalParent_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout)
-private val clang_getCursorLexicalParent_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorLexicalParent")
-private val clang_getCursorLexicalParent_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorLexicalParent_ADDR, clang_getCursorLexicalParent_DESC)
+private val clang_getCursorLexicalParent_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorLexicalParent") }
+private val clang_getCursorLexicalParent_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorLexicalParent_ADDR, clang_getCursorLexicalParent_DESC) }
 
 fun clang_getCursorLexicalParent(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -9185,8 +9237,8 @@ fun clang_getCursorLexicalParent(allocator: SegmentAllocator, arg0: MemorySegmen
  * {@snippet lang=c : clang_getOverriddenCursors Void(typedef CXCursor = Declared(CXCursor),((typedef CXCursor = Declared(CXCursor))*)*,(UNSIGNED = Int)*)
  */
 private val clang_getOverriddenCursors_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXCursor.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getOverriddenCursors_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getOverriddenCursors")
-private val clang_getOverriddenCursors_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getOverriddenCursors_ADDR, clang_getOverriddenCursors_DESC)
+private val clang_getOverriddenCursors_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getOverriddenCursors") }
+private val clang_getOverriddenCursors_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getOverriddenCursors_ADDR, clang_getOverriddenCursors_DESC) }
 
 fun clang_getOverriddenCursors(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Unit {
     try {
@@ -9204,8 +9256,8 @@ fun clang_getOverriddenCursors(arg0: MemorySegment, arg1: MemorySegment, arg2: M
  * {@snippet lang=c : clang_disposeOverriddenCursors Void((typedef CXCursor = Declared(CXCursor))*)
  */
 private val clang_disposeOverriddenCursors_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeOverriddenCursors_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeOverriddenCursors")
-private val clang_disposeOverriddenCursors_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeOverriddenCursors_ADDR, clang_disposeOverriddenCursors_DESC)
+private val clang_disposeOverriddenCursors_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeOverriddenCursors") }
+private val clang_disposeOverriddenCursors_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeOverriddenCursors_ADDR, clang_disposeOverriddenCursors_DESC) }
 
 fun clang_disposeOverriddenCursors(arg0: MemorySegment): Unit {
     try {
@@ -9223,8 +9275,8 @@ fun clang_disposeOverriddenCursors(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_getIncludedFile typedef CXFile = (Void)*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getIncludedFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_getIncludedFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getIncludedFile")
-private val clang_getIncludedFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getIncludedFile_ADDR, clang_getIncludedFile_DESC)
+private val clang_getIncludedFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getIncludedFile") }
+private val clang_getIncludedFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getIncludedFile_ADDR, clang_getIncludedFile_DESC) }
 
 fun clang_getIncludedFile(arg0: MemorySegment): MemorySegment {
     try {
@@ -9242,8 +9294,8 @@ fun clang_getIncludedFile(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_getCursor typedef CXCursor = Declared(CXCursor)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXSourceLocation = Declared(CXSourceLocation))
  */
 private val clang_getCursor_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, ValueLayout.ADDRESS, CXSourceLocation.layout)
-private val clang_getCursor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursor")
-private val clang_getCursor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursor_ADDR, clang_getCursor_DESC)
+private val clang_getCursor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursor") }
+private val clang_getCursor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursor_ADDR, clang_getCursor_DESC) }
 
 fun clang_getCursor(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -9261,8 +9313,8 @@ fun clang_getCursor(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Memo
  * {@snippet lang=c : clang_getCursorLocation typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorLocation_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, CXCursor.layout)
-private val clang_getCursorLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorLocation")
-private val clang_getCursorLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorLocation_ADDR, clang_getCursorLocation_DESC)
+private val clang_getCursorLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorLocation") }
+private val clang_getCursorLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorLocation_ADDR, clang_getCursorLocation_DESC) }
 
 fun clang_getCursorLocation(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -9280,8 +9332,8 @@ fun clang_getCursorLocation(allocator: SegmentAllocator, arg0: MemorySegment): M
  * {@snippet lang=c : clang_getCursorExtent typedef CXSourceRange = Declared(CXSourceRange)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorExtent_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout, CXCursor.layout)
-private val clang_getCursorExtent_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorExtent")
-private val clang_getCursorExtent_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorExtent_ADDR, clang_getCursorExtent_DESC)
+private val clang_getCursorExtent_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorExtent") }
+private val clang_getCursorExtent_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorExtent_ADDR, clang_getCursorExtent_DESC) }
 
 fun clang_getCursorExtent(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10173,8 +10225,8 @@ class CXType {
  * {@snippet lang=c : clang_getCursorType typedef CXType = Declared(CXType)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXCursor.layout)
-private val clang_getCursorType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorType")
-private val clang_getCursorType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorType_ADDR, clang_getCursorType_DESC)
+private val clang_getCursorType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorType") }
+private val clang_getCursorType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorType_ADDR, clang_getCursorType_DESC) }
 
 fun clang_getCursorType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10192,8 +10244,8 @@ fun clang_getCursorType(allocator: SegmentAllocator, arg0: MemorySegment): Memor
  * {@snippet lang=c : clang_getTypeSpelling typedef CXString = Declared(CXString)(typedef CXType = Declared(CXType))
  */
 private val clang_getTypeSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXType.layout)
-private val clang_getTypeSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTypeSpelling")
-private val clang_getTypeSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTypeSpelling_ADDR, clang_getTypeSpelling_DESC)
+private val clang_getTypeSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTypeSpelling") }
+private val clang_getTypeSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTypeSpelling_ADDR, clang_getTypeSpelling_DESC) }
 
 fun clang_getTypeSpelling(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10211,8 +10263,8 @@ fun clang_getTypeSpelling(allocator: SegmentAllocator, arg0: MemorySegment): Mem
  * {@snippet lang=c : clang_getTypedefDeclUnderlyingType typedef CXType = Declared(CXType)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getTypedefDeclUnderlyingType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXCursor.layout)
-private val clang_getTypedefDeclUnderlyingType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTypedefDeclUnderlyingType")
-private val clang_getTypedefDeclUnderlyingType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTypedefDeclUnderlyingType_ADDR, clang_getTypedefDeclUnderlyingType_DESC)
+private val clang_getTypedefDeclUnderlyingType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTypedefDeclUnderlyingType") }
+private val clang_getTypedefDeclUnderlyingType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTypedefDeclUnderlyingType_ADDR, clang_getTypedefDeclUnderlyingType_DESC) }
 
 fun clang_getTypedefDeclUnderlyingType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10230,8 +10282,8 @@ fun clang_getTypedefDeclUnderlyingType(allocator: SegmentAllocator, arg0: Memory
  * {@snippet lang=c : clang_getEnumDeclIntegerType typedef CXType = Declared(CXType)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getEnumDeclIntegerType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXCursor.layout)
-private val clang_getEnumDeclIntegerType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getEnumDeclIntegerType")
-private val clang_getEnumDeclIntegerType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getEnumDeclIntegerType_ADDR, clang_getEnumDeclIntegerType_DESC)
+private val clang_getEnumDeclIntegerType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getEnumDeclIntegerType") }
+private val clang_getEnumDeclIntegerType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getEnumDeclIntegerType_ADDR, clang_getEnumDeclIntegerType_DESC) }
 
 fun clang_getEnumDeclIntegerType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10249,8 +10301,8 @@ fun clang_getEnumDeclIntegerType(allocator: SegmentAllocator, arg0: MemorySegmen
  * {@snippet lang=c : clang_getEnumConstantDeclValue LongLong(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getEnumConstantDeclValue_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXCursor.layout)
-private val clang_getEnumConstantDeclValue_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getEnumConstantDeclValue")
-private val clang_getEnumConstantDeclValue_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getEnumConstantDeclValue_ADDR, clang_getEnumConstantDeclValue_DESC)
+private val clang_getEnumConstantDeclValue_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getEnumConstantDeclValue") }
+private val clang_getEnumConstantDeclValue_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getEnumConstantDeclValue_ADDR, clang_getEnumConstantDeclValue_DESC) }
 
 fun clang_getEnumConstantDeclValue(arg0: MemorySegment): Long {
     try {
@@ -10268,8 +10320,8 @@ fun clang_getEnumConstantDeclValue(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_getEnumConstantDeclUnsignedValue UNSIGNED = LongLong(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getEnumConstantDeclUnsignedValue_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXCursor.layout)
-private val clang_getEnumConstantDeclUnsignedValue_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getEnumConstantDeclUnsignedValue")
-private val clang_getEnumConstantDeclUnsignedValue_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getEnumConstantDeclUnsignedValue_ADDR, clang_getEnumConstantDeclUnsignedValue_DESC)
+private val clang_getEnumConstantDeclUnsignedValue_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getEnumConstantDeclUnsignedValue") }
+private val clang_getEnumConstantDeclUnsignedValue_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getEnumConstantDeclUnsignedValue_ADDR, clang_getEnumConstantDeclUnsignedValue_DESC) }
 
 fun clang_getEnumConstantDeclUnsignedValue(arg0: MemorySegment): Long {
     try {
@@ -10287,8 +10339,8 @@ fun clang_getEnumConstantDeclUnsignedValue(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_Cursor_isBitField UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isBitField_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isBitField_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isBitField")
-private val clang_Cursor_isBitField_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isBitField_ADDR, clang_Cursor_isBitField_DESC)
+private val clang_Cursor_isBitField_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isBitField") }
+private val clang_Cursor_isBitField_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isBitField_ADDR, clang_Cursor_isBitField_DESC) }
 
 fun clang_Cursor_isBitField(arg0: MemorySegment): Int {
     try {
@@ -10306,8 +10358,8 @@ fun clang_Cursor_isBitField(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getFieldDeclBitWidth Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getFieldDeclBitWidth_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getFieldDeclBitWidth_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFieldDeclBitWidth")
-private val clang_getFieldDeclBitWidth_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFieldDeclBitWidth_ADDR, clang_getFieldDeclBitWidth_DESC)
+private val clang_getFieldDeclBitWidth_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFieldDeclBitWidth") }
+private val clang_getFieldDeclBitWidth_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFieldDeclBitWidth_ADDR, clang_getFieldDeclBitWidth_DESC) }
 
 fun clang_getFieldDeclBitWidth(arg0: MemorySegment): Int {
     try {
@@ -10325,8 +10377,8 @@ fun clang_getFieldDeclBitWidth(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getNumArguments Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getNumArguments_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getNumArguments_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getNumArguments")
-private val clang_Cursor_getNumArguments_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getNumArguments_ADDR, clang_Cursor_getNumArguments_DESC)
+private val clang_Cursor_getNumArguments_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getNumArguments") }
+private val clang_Cursor_getNumArguments_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getNumArguments_ADDR, clang_Cursor_getNumArguments_DESC) }
 
 fun clang_Cursor_getNumArguments(arg0: MemorySegment): Int {
     try {
@@ -10344,8 +10396,8 @@ fun clang_Cursor_getNumArguments(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getArgument typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_Cursor_getArgument_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getArgument_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getArgument")
-private val clang_Cursor_getArgument_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getArgument_ADDR, clang_Cursor_getArgument_DESC)
+private val clang_Cursor_getArgument_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getArgument") }
+private val clang_Cursor_getArgument_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getArgument_ADDR, clang_Cursor_getArgument_DESC) }
 
 fun clang_Cursor_getArgument(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -10413,8 +10465,8 @@ fun CXTemplateArgumentKind_Invalid(): Int = 9
  * {@snippet lang=c : clang_Cursor_getNumTemplateArguments Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getNumTemplateArguments_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getNumTemplateArguments_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getNumTemplateArguments")
-private val clang_Cursor_getNumTemplateArguments_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getNumTemplateArguments_ADDR, clang_Cursor_getNumTemplateArguments_DESC)
+private val clang_Cursor_getNumTemplateArguments_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getNumTemplateArguments") }
+private val clang_Cursor_getNumTemplateArguments_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getNumTemplateArguments_ADDR, clang_Cursor_getNumTemplateArguments_DESC) }
 
 fun clang_Cursor_getNumTemplateArguments(arg0: MemorySegment): Int {
     try {
@@ -10432,8 +10484,8 @@ fun clang_Cursor_getNumTemplateArguments(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getTemplateArgumentKind Declared(CXTemplateArgumentKind)(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_Cursor_getTemplateArgumentKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getTemplateArgumentKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getTemplateArgumentKind")
-private val clang_Cursor_getTemplateArgumentKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentKind_ADDR, clang_Cursor_getTemplateArgumentKind_DESC)
+private val clang_Cursor_getTemplateArgumentKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getTemplateArgumentKind") }
+private val clang_Cursor_getTemplateArgumentKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentKind_ADDR, clang_Cursor_getTemplateArgumentKind_DESC) }
 
 fun clang_Cursor_getTemplateArgumentKind(arg0: MemorySegment, arg1: Int): Int {
     try {
@@ -10451,8 +10503,8 @@ fun clang_Cursor_getTemplateArgumentKind(arg0: MemorySegment, arg1: Int): Int {
  * {@snippet lang=c : clang_Cursor_getTemplateArgumentType typedef CXType = Declared(CXType)(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_Cursor_getTemplateArgumentType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getTemplateArgumentType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getTemplateArgumentType")
-private val clang_Cursor_getTemplateArgumentType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentType_ADDR, clang_Cursor_getTemplateArgumentType_DESC)
+private val clang_Cursor_getTemplateArgumentType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getTemplateArgumentType") }
+private val clang_Cursor_getTemplateArgumentType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentType_ADDR, clang_Cursor_getTemplateArgumentType_DESC) }
 
 fun clang_Cursor_getTemplateArgumentType(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -10470,8 +10522,8 @@ fun clang_Cursor_getTemplateArgumentType(allocator: SegmentAllocator, arg0: Memo
  * {@snippet lang=c : clang_Cursor_getTemplateArgumentValue LongLong(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_Cursor_getTemplateArgumentValue_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getTemplateArgumentValue_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getTemplateArgumentValue")
-private val clang_Cursor_getTemplateArgumentValue_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentValue_ADDR, clang_Cursor_getTemplateArgumentValue_DESC)
+private val clang_Cursor_getTemplateArgumentValue_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getTemplateArgumentValue") }
+private val clang_Cursor_getTemplateArgumentValue_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentValue_ADDR, clang_Cursor_getTemplateArgumentValue_DESC) }
 
 fun clang_Cursor_getTemplateArgumentValue(arg0: MemorySegment, arg1: Int): Long {
     try {
@@ -10489,8 +10541,8 @@ fun clang_Cursor_getTemplateArgumentValue(arg0: MemorySegment, arg1: Int): Long 
  * {@snippet lang=c : clang_Cursor_getTemplateArgumentUnsignedValue UNSIGNED = LongLong(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_Cursor_getTemplateArgumentUnsignedValue_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getTemplateArgumentUnsignedValue_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getTemplateArgumentUnsignedValue")
-private val clang_Cursor_getTemplateArgumentUnsignedValue_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentUnsignedValue_ADDR, clang_Cursor_getTemplateArgumentUnsignedValue_DESC)
+private val clang_Cursor_getTemplateArgumentUnsignedValue_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getTemplateArgumentUnsignedValue") }
+private val clang_Cursor_getTemplateArgumentUnsignedValue_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getTemplateArgumentUnsignedValue_ADDR, clang_Cursor_getTemplateArgumentUnsignedValue_DESC) }
 
 fun clang_Cursor_getTemplateArgumentUnsignedValue(arg0: MemorySegment, arg1: Int): Long {
     try {
@@ -10508,8 +10560,8 @@ fun clang_Cursor_getTemplateArgumentUnsignedValue(arg0: MemorySegment, arg1: Int
  * {@snippet lang=c : clang_equalTypes UNSIGNED = Int(typedef CXType = Declared(CXType),typedef CXType = Declared(CXType))
  */
 private val clang_equalTypes_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout, CXType.layout)
-private val clang_equalTypes_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_equalTypes")
-private val clang_equalTypes_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_equalTypes_ADDR, clang_equalTypes_DESC)
+private val clang_equalTypes_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_equalTypes") }
+private val clang_equalTypes_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_equalTypes_ADDR, clang_equalTypes_DESC) }
 
 fun clang_equalTypes(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -10527,8 +10579,8 @@ fun clang_equalTypes(arg0: MemorySegment, arg1: MemorySegment): Int {
  * {@snippet lang=c : clang_getCanonicalType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_getCanonicalType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_getCanonicalType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCanonicalType")
-private val clang_getCanonicalType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCanonicalType_ADDR, clang_getCanonicalType_DESC)
+private val clang_getCanonicalType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCanonicalType") }
+private val clang_getCanonicalType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCanonicalType_ADDR, clang_getCanonicalType_DESC) }
 
 fun clang_getCanonicalType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10546,8 +10598,8 @@ fun clang_getCanonicalType(allocator: SegmentAllocator, arg0: MemorySegment): Me
  * {@snippet lang=c : clang_isConstQualifiedType UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_isConstQualifiedType_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_isConstQualifiedType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isConstQualifiedType")
-private val clang_isConstQualifiedType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isConstQualifiedType_ADDR, clang_isConstQualifiedType_DESC)
+private val clang_isConstQualifiedType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isConstQualifiedType") }
+private val clang_isConstQualifiedType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isConstQualifiedType_ADDR, clang_isConstQualifiedType_DESC) }
 
 fun clang_isConstQualifiedType(arg0: MemorySegment): Int {
     try {
@@ -10565,8 +10617,8 @@ fun clang_isConstQualifiedType(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isMacroFunctionLike UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isMacroFunctionLike_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isMacroFunctionLike_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isMacroFunctionLike")
-private val clang_Cursor_isMacroFunctionLike_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isMacroFunctionLike_ADDR, clang_Cursor_isMacroFunctionLike_DESC)
+private val clang_Cursor_isMacroFunctionLike_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isMacroFunctionLike") }
+private val clang_Cursor_isMacroFunctionLike_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isMacroFunctionLike_ADDR, clang_Cursor_isMacroFunctionLike_DESC) }
 
 fun clang_Cursor_isMacroFunctionLike(arg0: MemorySegment): Int {
     try {
@@ -10584,8 +10636,8 @@ fun clang_Cursor_isMacroFunctionLike(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isMacroBuiltin UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isMacroBuiltin_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isMacroBuiltin_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isMacroBuiltin")
-private val clang_Cursor_isMacroBuiltin_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isMacroBuiltin_ADDR, clang_Cursor_isMacroBuiltin_DESC)
+private val clang_Cursor_isMacroBuiltin_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isMacroBuiltin") }
+private val clang_Cursor_isMacroBuiltin_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isMacroBuiltin_ADDR, clang_Cursor_isMacroBuiltin_DESC) }
 
 fun clang_Cursor_isMacroBuiltin(arg0: MemorySegment): Int {
     try {
@@ -10603,8 +10655,8 @@ fun clang_Cursor_isMacroBuiltin(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isFunctionInlined UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isFunctionInlined_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isFunctionInlined_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isFunctionInlined")
-private val clang_Cursor_isFunctionInlined_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isFunctionInlined_ADDR, clang_Cursor_isFunctionInlined_DESC)
+private val clang_Cursor_isFunctionInlined_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isFunctionInlined") }
+private val clang_Cursor_isFunctionInlined_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isFunctionInlined_ADDR, clang_Cursor_isFunctionInlined_DESC) }
 
 fun clang_Cursor_isFunctionInlined(arg0: MemorySegment): Int {
     try {
@@ -10622,8 +10674,8 @@ fun clang_Cursor_isFunctionInlined(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_isVolatileQualifiedType UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_isVolatileQualifiedType_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_isVolatileQualifiedType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isVolatileQualifiedType")
-private val clang_isVolatileQualifiedType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isVolatileQualifiedType_ADDR, clang_isVolatileQualifiedType_DESC)
+private val clang_isVolatileQualifiedType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isVolatileQualifiedType") }
+private val clang_isVolatileQualifiedType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isVolatileQualifiedType_ADDR, clang_isVolatileQualifiedType_DESC) }
 
 fun clang_isVolatileQualifiedType(arg0: MemorySegment): Int {
     try {
@@ -10641,8 +10693,8 @@ fun clang_isVolatileQualifiedType(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_isRestrictQualifiedType UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_isRestrictQualifiedType_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_isRestrictQualifiedType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isRestrictQualifiedType")
-private val clang_isRestrictQualifiedType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isRestrictQualifiedType_ADDR, clang_isRestrictQualifiedType_DESC)
+private val clang_isRestrictQualifiedType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isRestrictQualifiedType") }
+private val clang_isRestrictQualifiedType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isRestrictQualifiedType_ADDR, clang_isRestrictQualifiedType_DESC) }
 
 fun clang_isRestrictQualifiedType(arg0: MemorySegment): Int {
     try {
@@ -10660,8 +10712,8 @@ fun clang_isRestrictQualifiedType(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getAddressSpace UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_getAddressSpace_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_getAddressSpace_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getAddressSpace")
-private val clang_getAddressSpace_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getAddressSpace_ADDR, clang_getAddressSpace_DESC)
+private val clang_getAddressSpace_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getAddressSpace") }
+private val clang_getAddressSpace_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getAddressSpace_ADDR, clang_getAddressSpace_DESC) }
 
 fun clang_getAddressSpace(arg0: MemorySegment): Int {
     try {
@@ -10679,8 +10731,8 @@ fun clang_getAddressSpace(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getTypedefName typedef CXString = Declared(CXString)(typedef CXType = Declared(CXType))
  */
 private val clang_getTypedefName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXType.layout)
-private val clang_getTypedefName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTypedefName")
-private val clang_getTypedefName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTypedefName_ADDR, clang_getTypedefName_DESC)
+private val clang_getTypedefName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTypedefName") }
+private val clang_getTypedefName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTypedefName_ADDR, clang_getTypedefName_DESC) }
 
 fun clang_getTypedefName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10698,8 +10750,8 @@ fun clang_getTypedefName(allocator: SegmentAllocator, arg0: MemorySegment): Memo
  * {@snippet lang=c : clang_getPointeeType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_getPointeeType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_getPointeeType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getPointeeType")
-private val clang_getPointeeType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getPointeeType_ADDR, clang_getPointeeType_DESC)
+private val clang_getPointeeType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getPointeeType") }
+private val clang_getPointeeType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getPointeeType_ADDR, clang_getPointeeType_DESC) }
 
 fun clang_getPointeeType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10717,8 +10769,8 @@ fun clang_getPointeeType(allocator: SegmentAllocator, arg0: MemorySegment): Memo
  * {@snippet lang=c : clang_getUnqualifiedType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_getUnqualifiedType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_getUnqualifiedType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getUnqualifiedType")
-private val clang_getUnqualifiedType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getUnqualifiedType_ADDR, clang_getUnqualifiedType_DESC)
+private val clang_getUnqualifiedType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getUnqualifiedType") }
+private val clang_getUnqualifiedType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getUnqualifiedType_ADDR, clang_getUnqualifiedType_DESC) }
 
 fun clang_getUnqualifiedType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10736,8 +10788,8 @@ fun clang_getUnqualifiedType(allocator: SegmentAllocator, arg0: MemorySegment): 
  * {@snippet lang=c : clang_getNonReferenceType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_getNonReferenceType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_getNonReferenceType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNonReferenceType")
-private val clang_getNonReferenceType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNonReferenceType_ADDR, clang_getNonReferenceType_DESC)
+private val clang_getNonReferenceType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNonReferenceType") }
+private val clang_getNonReferenceType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNonReferenceType_ADDR, clang_getNonReferenceType_DESC) }
 
 fun clang_getNonReferenceType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10755,8 +10807,8 @@ fun clang_getNonReferenceType(allocator: SegmentAllocator, arg0: MemorySegment):
  * {@snippet lang=c : clang_getTypeDeclaration typedef CXCursor = Declared(CXCursor)(typedef CXType = Declared(CXType))
  */
 private val clang_getTypeDeclaration_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXType.layout)
-private val clang_getTypeDeclaration_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTypeDeclaration")
-private val clang_getTypeDeclaration_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTypeDeclaration_ADDR, clang_getTypeDeclaration_DESC)
+private val clang_getTypeDeclaration_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTypeDeclaration") }
+private val clang_getTypeDeclaration_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTypeDeclaration_ADDR, clang_getTypeDeclaration_DESC) }
 
 fun clang_getTypeDeclaration(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10774,8 +10826,8 @@ fun clang_getTypeDeclaration(allocator: SegmentAllocator, arg0: MemorySegment): 
  * {@snippet lang=c : clang_getDeclObjCTypeEncoding typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getDeclObjCTypeEncoding_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_getDeclObjCTypeEncoding_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDeclObjCTypeEncoding")
-private val clang_getDeclObjCTypeEncoding_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDeclObjCTypeEncoding_ADDR, clang_getDeclObjCTypeEncoding_DESC)
+private val clang_getDeclObjCTypeEncoding_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDeclObjCTypeEncoding") }
+private val clang_getDeclObjCTypeEncoding_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDeclObjCTypeEncoding_ADDR, clang_getDeclObjCTypeEncoding_DESC) }
 
 fun clang_getDeclObjCTypeEncoding(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10793,8 +10845,8 @@ fun clang_getDeclObjCTypeEncoding(allocator: SegmentAllocator, arg0: MemorySegme
  * {@snippet lang=c : clang_Type_getObjCEncoding typedef CXString = Declared(CXString)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getObjCEncoding_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXType.layout)
-private val clang_Type_getObjCEncoding_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getObjCEncoding")
-private val clang_Type_getObjCEncoding_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getObjCEncoding_ADDR, clang_Type_getObjCEncoding_DESC)
+private val clang_Type_getObjCEncoding_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getObjCEncoding") }
+private val clang_Type_getObjCEncoding_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getObjCEncoding_ADDR, clang_Type_getObjCEncoding_DESC) }
 
 fun clang_Type_getObjCEncoding(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10812,8 +10864,8 @@ fun clang_Type_getObjCEncoding(allocator: SegmentAllocator, arg0: MemorySegment)
  * {@snippet lang=c : clang_getTypeKindSpelling typedef CXString = Declared(CXString)(Declared(CXTypeKind))
  */
 private val clang_getTypeKindSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.JAVA_INT)
-private val clang_getTypeKindSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTypeKindSpelling")
-private val clang_getTypeKindSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTypeKindSpelling_ADDR, clang_getTypeKindSpelling_DESC)
+private val clang_getTypeKindSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTypeKindSpelling") }
+private val clang_getTypeKindSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTypeKindSpelling_ADDR, clang_getTypeKindSpelling_DESC) }
 
 fun clang_getTypeKindSpelling(allocator: SegmentAllocator, arg0: Int): MemorySegment {
     try {
@@ -10831,8 +10883,8 @@ fun clang_getTypeKindSpelling(allocator: SegmentAllocator, arg0: Int): MemorySeg
  * {@snippet lang=c : clang_getFunctionTypeCallingConv Declared(CXCallingConv)(typedef CXType = Declared(CXType))
  */
 private val clang_getFunctionTypeCallingConv_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_getFunctionTypeCallingConv_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFunctionTypeCallingConv")
-private val clang_getFunctionTypeCallingConv_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFunctionTypeCallingConv_ADDR, clang_getFunctionTypeCallingConv_DESC)
+private val clang_getFunctionTypeCallingConv_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFunctionTypeCallingConv") }
+private val clang_getFunctionTypeCallingConv_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFunctionTypeCallingConv_ADDR, clang_getFunctionTypeCallingConv_DESC) }
 
 fun clang_getFunctionTypeCallingConv(arg0: MemorySegment): Int {
     try {
@@ -10850,8 +10902,8 @@ fun clang_getFunctionTypeCallingConv(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getResultType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_getResultType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_getResultType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getResultType")
-private val clang_getResultType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getResultType_ADDR, clang_getResultType_DESC)
+private val clang_getResultType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getResultType") }
+private val clang_getResultType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getResultType_ADDR, clang_getResultType_DESC) }
 
 fun clang_getResultType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10869,8 +10921,8 @@ fun clang_getResultType(allocator: SegmentAllocator, arg0: MemorySegment): Memor
  * {@snippet lang=c : clang_getExceptionSpecificationType Int(typedef CXType = Declared(CXType))
  */
 private val clang_getExceptionSpecificationType_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_getExceptionSpecificationType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getExceptionSpecificationType")
-private val clang_getExceptionSpecificationType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getExceptionSpecificationType_ADDR, clang_getExceptionSpecificationType_DESC)
+private val clang_getExceptionSpecificationType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getExceptionSpecificationType") }
+private val clang_getExceptionSpecificationType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getExceptionSpecificationType_ADDR, clang_getExceptionSpecificationType_DESC) }
 
 fun clang_getExceptionSpecificationType(arg0: MemorySegment): Int {
     try {
@@ -10888,8 +10940,8 @@ fun clang_getExceptionSpecificationType(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getNumArgTypes Int(typedef CXType = Declared(CXType))
  */
 private val clang_getNumArgTypes_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_getNumArgTypes_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNumArgTypes")
-private val clang_getNumArgTypes_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNumArgTypes_ADDR, clang_getNumArgTypes_DESC)
+private val clang_getNumArgTypes_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNumArgTypes") }
+private val clang_getNumArgTypes_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNumArgTypes_ADDR, clang_getNumArgTypes_DESC) }
 
 fun clang_getNumArgTypes(arg0: MemorySegment): Int {
     try {
@@ -10907,8 +10959,8 @@ fun clang_getNumArgTypes(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getArgType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType),UNSIGNED = Int)
  */
 private val clang_getArgType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout, ValueLayout.JAVA_INT)
-private val clang_getArgType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getArgType")
-private val clang_getArgType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getArgType_ADDR, clang_getArgType_DESC)
+private val clang_getArgType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getArgType") }
+private val clang_getArgType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getArgType_ADDR, clang_getArgType_DESC) }
 
 fun clang_getArgType(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -10926,8 +10978,8 @@ fun clang_getArgType(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int
  * {@snippet lang=c : clang_Type_getObjCObjectBaseType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getObjCObjectBaseType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_Type_getObjCObjectBaseType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getObjCObjectBaseType")
-private val clang_Type_getObjCObjectBaseType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getObjCObjectBaseType_ADDR, clang_Type_getObjCObjectBaseType_DESC)
+private val clang_Type_getObjCObjectBaseType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getObjCObjectBaseType") }
+private val clang_Type_getObjCObjectBaseType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getObjCObjectBaseType_ADDR, clang_Type_getObjCObjectBaseType_DESC) }
 
 fun clang_Type_getObjCObjectBaseType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -10945,8 +10997,8 @@ fun clang_Type_getObjCObjectBaseType(allocator: SegmentAllocator, arg0: MemorySe
  * {@snippet lang=c : clang_Type_getNumObjCProtocolRefs UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getNumObjCProtocolRefs_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_Type_getNumObjCProtocolRefs_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getNumObjCProtocolRefs")
-private val clang_Type_getNumObjCProtocolRefs_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getNumObjCProtocolRefs_ADDR, clang_Type_getNumObjCProtocolRefs_DESC)
+private val clang_Type_getNumObjCProtocolRefs_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getNumObjCProtocolRefs") }
+private val clang_Type_getNumObjCProtocolRefs_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getNumObjCProtocolRefs_ADDR, clang_Type_getNumObjCProtocolRefs_DESC) }
 
 fun clang_Type_getNumObjCProtocolRefs(arg0: MemorySegment): Int {
     try {
@@ -10964,8 +11016,8 @@ fun clang_Type_getNumObjCProtocolRefs(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Type_getObjCProtocolDecl typedef CXCursor = Declared(CXCursor)(typedef CXType = Declared(CXType),UNSIGNED = Int)
  */
 private val clang_Type_getObjCProtocolDecl_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXType.layout, ValueLayout.JAVA_INT)
-private val clang_Type_getObjCProtocolDecl_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getObjCProtocolDecl")
-private val clang_Type_getObjCProtocolDecl_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getObjCProtocolDecl_ADDR, clang_Type_getObjCProtocolDecl_DESC)
+private val clang_Type_getObjCProtocolDecl_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getObjCProtocolDecl") }
+private val clang_Type_getObjCProtocolDecl_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getObjCProtocolDecl_ADDR, clang_Type_getObjCProtocolDecl_DESC) }
 
 fun clang_Type_getObjCProtocolDecl(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -10983,8 +11035,8 @@ fun clang_Type_getObjCProtocolDecl(allocator: SegmentAllocator, arg0: MemorySegm
  * {@snippet lang=c : clang_Type_getNumObjCTypeArgs UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getNumObjCTypeArgs_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_Type_getNumObjCTypeArgs_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getNumObjCTypeArgs")
-private val clang_Type_getNumObjCTypeArgs_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getNumObjCTypeArgs_ADDR, clang_Type_getNumObjCTypeArgs_DESC)
+private val clang_Type_getNumObjCTypeArgs_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getNumObjCTypeArgs") }
+private val clang_Type_getNumObjCTypeArgs_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getNumObjCTypeArgs_ADDR, clang_Type_getNumObjCTypeArgs_DESC) }
 
 fun clang_Type_getNumObjCTypeArgs(arg0: MemorySegment): Int {
     try {
@@ -11002,8 +11054,8 @@ fun clang_Type_getNumObjCTypeArgs(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Type_getObjCTypeArg typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType),UNSIGNED = Int)
  */
 private val clang_Type_getObjCTypeArg_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout, ValueLayout.JAVA_INT)
-private val clang_Type_getObjCTypeArg_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getObjCTypeArg")
-private val clang_Type_getObjCTypeArg_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getObjCTypeArg_ADDR, clang_Type_getObjCTypeArg_DESC)
+private val clang_Type_getObjCTypeArg_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getObjCTypeArg") }
+private val clang_Type_getObjCTypeArg_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getObjCTypeArg_ADDR, clang_Type_getObjCTypeArg_DESC) }
 
 fun clang_Type_getObjCTypeArg(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -11021,8 +11073,8 @@ fun clang_Type_getObjCTypeArg(allocator: SegmentAllocator, arg0: MemorySegment, 
  * {@snippet lang=c : clang_isFunctionTypeVariadic UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_isFunctionTypeVariadic_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_isFunctionTypeVariadic_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isFunctionTypeVariadic")
-private val clang_isFunctionTypeVariadic_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isFunctionTypeVariadic_ADDR, clang_isFunctionTypeVariadic_DESC)
+private val clang_isFunctionTypeVariadic_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isFunctionTypeVariadic") }
+private val clang_isFunctionTypeVariadic_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isFunctionTypeVariadic_ADDR, clang_isFunctionTypeVariadic_DESC) }
 
 fun clang_isFunctionTypeVariadic(arg0: MemorySegment): Int {
     try {
@@ -11040,8 +11092,8 @@ fun clang_isFunctionTypeVariadic(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCursorResultType typedef CXType = Declared(CXType)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorResultType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXCursor.layout)
-private val clang_getCursorResultType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorResultType")
-private val clang_getCursorResultType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorResultType_ADDR, clang_getCursorResultType_DESC)
+private val clang_getCursorResultType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorResultType") }
+private val clang_getCursorResultType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorResultType_ADDR, clang_getCursorResultType_DESC) }
 
 fun clang_getCursorResultType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11059,8 +11111,8 @@ fun clang_getCursorResultType(allocator: SegmentAllocator, arg0: MemorySegment):
  * {@snippet lang=c : clang_getCursorExceptionSpecificationType Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorExceptionSpecificationType_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorExceptionSpecificationType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorExceptionSpecificationType")
-private val clang_getCursorExceptionSpecificationType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorExceptionSpecificationType_ADDR, clang_getCursorExceptionSpecificationType_DESC)
+private val clang_getCursorExceptionSpecificationType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorExceptionSpecificationType") }
+private val clang_getCursorExceptionSpecificationType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorExceptionSpecificationType_ADDR, clang_getCursorExceptionSpecificationType_DESC) }
 
 fun clang_getCursorExceptionSpecificationType(arg0: MemorySegment): Int {
     try {
@@ -11078,8 +11130,8 @@ fun clang_getCursorExceptionSpecificationType(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_isPODType UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_isPODType_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_isPODType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isPODType")
-private val clang_isPODType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isPODType_ADDR, clang_isPODType_DESC)
+private val clang_isPODType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isPODType") }
+private val clang_isPODType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isPODType_ADDR, clang_isPODType_DESC) }
 
 fun clang_isPODType(arg0: MemorySegment): Int {
     try {
@@ -11097,8 +11149,8 @@ fun clang_isPODType(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getElementType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_getElementType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_getElementType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getElementType")
-private val clang_getElementType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getElementType_ADDR, clang_getElementType_DESC)
+private val clang_getElementType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getElementType") }
+private val clang_getElementType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getElementType_ADDR, clang_getElementType_DESC) }
 
 fun clang_getElementType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11116,8 +11168,8 @@ fun clang_getElementType(allocator: SegmentAllocator, arg0: MemorySegment): Memo
  * {@snippet lang=c : clang_getNumElements LongLong(typedef CXType = Declared(CXType))
  */
 private val clang_getNumElements_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXType.layout)
-private val clang_getNumElements_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNumElements")
-private val clang_getNumElements_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNumElements_ADDR, clang_getNumElements_DESC)
+private val clang_getNumElements_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNumElements") }
+private val clang_getNumElements_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNumElements_ADDR, clang_getNumElements_DESC) }
 
 fun clang_getNumElements(arg0: MemorySegment): Long {
     try {
@@ -11135,8 +11187,8 @@ fun clang_getNumElements(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_getArrayElementType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_getArrayElementType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_getArrayElementType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getArrayElementType")
-private val clang_getArrayElementType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getArrayElementType_ADDR, clang_getArrayElementType_DESC)
+private val clang_getArrayElementType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getArrayElementType") }
+private val clang_getArrayElementType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getArrayElementType_ADDR, clang_getArrayElementType_DESC) }
 
 fun clang_getArrayElementType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11154,8 +11206,8 @@ fun clang_getArrayElementType(allocator: SegmentAllocator, arg0: MemorySegment):
  * {@snippet lang=c : clang_getArraySize LongLong(typedef CXType = Declared(CXType))
  */
 private val clang_getArraySize_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXType.layout)
-private val clang_getArraySize_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getArraySize")
-private val clang_getArraySize_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getArraySize_ADDR, clang_getArraySize_DESC)
+private val clang_getArraySize_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getArraySize") }
+private val clang_getArraySize_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getArraySize_ADDR, clang_getArraySize_DESC) }
 
 fun clang_getArraySize(arg0: MemorySegment): Long {
     try {
@@ -11173,8 +11225,8 @@ fun clang_getArraySize(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_Type_getNamedType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getNamedType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_Type_getNamedType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getNamedType")
-private val clang_Type_getNamedType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getNamedType_ADDR, clang_Type_getNamedType_DESC)
+private val clang_Type_getNamedType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getNamedType") }
+private val clang_Type_getNamedType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getNamedType_ADDR, clang_Type_getNamedType_DESC) }
 
 fun clang_Type_getNamedType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11192,8 +11244,8 @@ fun clang_Type_getNamedType(allocator: SegmentAllocator, arg0: MemorySegment): M
  * {@snippet lang=c : clang_Type_isTransparentTagTypedef UNSIGNED = Int(typedef CXType = Declared(CXType))
  */
 private val clang_Type_isTransparentTagTypedef_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_Type_isTransparentTagTypedef_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_isTransparentTagTypedef")
-private val clang_Type_isTransparentTagTypedef_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_isTransparentTagTypedef_ADDR, clang_Type_isTransparentTagTypedef_DESC)
+private val clang_Type_isTransparentTagTypedef_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_isTransparentTagTypedef") }
+private val clang_Type_isTransparentTagTypedef_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_isTransparentTagTypedef_ADDR, clang_Type_isTransparentTagTypedef_DESC) }
 
 fun clang_Type_isTransparentTagTypedef(arg0: MemorySegment): Int {
     try {
@@ -11236,8 +11288,8 @@ fun CXTypeNullability_NullableResult(): Int = 4
  * {@snippet lang=c : clang_Type_getNullability Declared(CXTypeNullabilityKind)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getNullability_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_Type_getNullability_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getNullability")
-private val clang_Type_getNullability_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getNullability_ADDR, clang_Type_getNullability_DESC)
+private val clang_Type_getNullability_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getNullability") }
+private val clang_Type_getNullability_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getNullability_ADDR, clang_Type_getNullability_DESC) }
 
 fun clang_Type_getNullability(arg0: MemorySegment): Int {
     try {
@@ -11285,8 +11337,8 @@ fun CXTypeLayoutError_Undeduced(): Int = -6
  * {@snippet lang=c : clang_Type_getAlignOf LongLong(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getAlignOf_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXType.layout)
-private val clang_Type_getAlignOf_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getAlignOf")
-private val clang_Type_getAlignOf_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getAlignOf_ADDR, clang_Type_getAlignOf_DESC)
+private val clang_Type_getAlignOf_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getAlignOf") }
+private val clang_Type_getAlignOf_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getAlignOf_ADDR, clang_Type_getAlignOf_DESC) }
 
 fun clang_Type_getAlignOf(arg0: MemorySegment): Long {
     try {
@@ -11304,8 +11356,8 @@ fun clang_Type_getAlignOf(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_Type_getClassType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getClassType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_Type_getClassType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getClassType")
-private val clang_Type_getClassType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getClassType_ADDR, clang_Type_getClassType_DESC)
+private val clang_Type_getClassType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getClassType") }
+private val clang_Type_getClassType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getClassType_ADDR, clang_Type_getClassType_DESC) }
 
 fun clang_Type_getClassType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11323,8 +11375,8 @@ fun clang_Type_getClassType(allocator: SegmentAllocator, arg0: MemorySegment): M
  * {@snippet lang=c : clang_Type_getSizeOf LongLong(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getSizeOf_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXType.layout)
-private val clang_Type_getSizeOf_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getSizeOf")
-private val clang_Type_getSizeOf_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getSizeOf_ADDR, clang_Type_getSizeOf_DESC)
+private val clang_Type_getSizeOf_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getSizeOf") }
+private val clang_Type_getSizeOf_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getSizeOf_ADDR, clang_Type_getSizeOf_DESC) }
 
 fun clang_Type_getSizeOf(arg0: MemorySegment): Long {
     try {
@@ -11342,8 +11394,8 @@ fun clang_Type_getSizeOf(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_Type_getOffsetOf LongLong(typedef CXType = Declared(CXType),(Char)*)
  */
 private val clang_Type_getOffsetOf_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXType.layout, ValueLayout.ADDRESS)
-private val clang_Type_getOffsetOf_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getOffsetOf")
-private val clang_Type_getOffsetOf_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getOffsetOf_ADDR, clang_Type_getOffsetOf_DESC)
+private val clang_Type_getOffsetOf_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getOffsetOf") }
+private val clang_Type_getOffsetOf_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getOffsetOf_ADDR, clang_Type_getOffsetOf_DESC) }
 
 fun clang_Type_getOffsetOf(arg0: MemorySegment, arg1: MemorySegment): Long {
     try {
@@ -11361,8 +11413,8 @@ fun clang_Type_getOffsetOf(arg0: MemorySegment, arg1: MemorySegment): Long {
  * {@snippet lang=c : clang_Type_getModifiedType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getModifiedType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_Type_getModifiedType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getModifiedType")
-private val clang_Type_getModifiedType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getModifiedType_ADDR, clang_Type_getModifiedType_DESC)
+private val clang_Type_getModifiedType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getModifiedType") }
+private val clang_Type_getModifiedType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getModifiedType_ADDR, clang_Type_getModifiedType_DESC) }
 
 fun clang_Type_getModifiedType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11380,8 +11432,8 @@ fun clang_Type_getModifiedType(allocator: SegmentAllocator, arg0: MemorySegment)
  * {@snippet lang=c : clang_Type_getValueType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getValueType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout)
-private val clang_Type_getValueType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getValueType")
-private val clang_Type_getValueType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getValueType_ADDR, clang_Type_getValueType_DESC)
+private val clang_Type_getValueType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getValueType") }
+private val clang_Type_getValueType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getValueType_ADDR, clang_Type_getValueType_DESC) }
 
 fun clang_Type_getValueType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11399,8 +11451,8 @@ fun clang_Type_getValueType(allocator: SegmentAllocator, arg0: MemorySegment): M
  * {@snippet lang=c : clang_Cursor_getOffsetOfField LongLong(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getOffsetOfField_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXCursor.layout)
-private val clang_Cursor_getOffsetOfField_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getOffsetOfField")
-private val clang_Cursor_getOffsetOfField_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getOffsetOfField_ADDR, clang_Cursor_getOffsetOfField_DESC)
+private val clang_Cursor_getOffsetOfField_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getOffsetOfField") }
+private val clang_Cursor_getOffsetOfField_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getOffsetOfField_ADDR, clang_Cursor_getOffsetOfField_DESC) }
 
 fun clang_Cursor_getOffsetOfField(arg0: MemorySegment): Long {
     try {
@@ -11418,8 +11470,8 @@ fun clang_Cursor_getOffsetOfField(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_Cursor_isAnonymous UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isAnonymous_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isAnonymous_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isAnonymous")
-private val clang_Cursor_isAnonymous_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isAnonymous_ADDR, clang_Cursor_isAnonymous_DESC)
+private val clang_Cursor_isAnonymous_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isAnonymous") }
+private val clang_Cursor_isAnonymous_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isAnonymous_ADDR, clang_Cursor_isAnonymous_DESC) }
 
 fun clang_Cursor_isAnonymous(arg0: MemorySegment): Int {
     try {
@@ -11437,8 +11489,8 @@ fun clang_Cursor_isAnonymous(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isAnonymousRecordDecl UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isAnonymousRecordDecl_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isAnonymousRecordDecl_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isAnonymousRecordDecl")
-private val clang_Cursor_isAnonymousRecordDecl_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isAnonymousRecordDecl_ADDR, clang_Cursor_isAnonymousRecordDecl_DESC)
+private val clang_Cursor_isAnonymousRecordDecl_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isAnonymousRecordDecl") }
+private val clang_Cursor_isAnonymousRecordDecl_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isAnonymousRecordDecl_ADDR, clang_Cursor_isAnonymousRecordDecl_DESC) }
 
 fun clang_Cursor_isAnonymousRecordDecl(arg0: MemorySegment): Int {
     try {
@@ -11456,8 +11508,8 @@ fun clang_Cursor_isAnonymousRecordDecl(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isInlineNamespace UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isInlineNamespace_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isInlineNamespace_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isInlineNamespace")
-private val clang_Cursor_isInlineNamespace_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isInlineNamespace_ADDR, clang_Cursor_isInlineNamespace_DESC)
+private val clang_Cursor_isInlineNamespace_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isInlineNamespace") }
+private val clang_Cursor_isInlineNamespace_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isInlineNamespace_ADDR, clang_Cursor_isInlineNamespace_DESC) }
 
 fun clang_Cursor_isInlineNamespace(arg0: MemorySegment): Int {
     try {
@@ -11490,8 +11542,8 @@ fun CXRefQualifier_RValue(): Int = 2
  * {@snippet lang=c : clang_Type_getNumTemplateArguments Int(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getNumTemplateArguments_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_Type_getNumTemplateArguments_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getNumTemplateArguments")
-private val clang_Type_getNumTemplateArguments_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getNumTemplateArguments_ADDR, clang_Type_getNumTemplateArguments_DESC)
+private val clang_Type_getNumTemplateArguments_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getNumTemplateArguments") }
+private val clang_Type_getNumTemplateArguments_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getNumTemplateArguments_ADDR, clang_Type_getNumTemplateArguments_DESC) }
 
 fun clang_Type_getNumTemplateArguments(arg0: MemorySegment): Int {
     try {
@@ -11509,8 +11561,8 @@ fun clang_Type_getNumTemplateArguments(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Type_getTemplateArgumentAsType typedef CXType = Declared(CXType)(typedef CXType = Declared(CXType),UNSIGNED = Int)
  */
 private val clang_Type_getTemplateArgumentAsType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXType.layout, ValueLayout.JAVA_INT)
-private val clang_Type_getTemplateArgumentAsType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getTemplateArgumentAsType")
-private val clang_Type_getTemplateArgumentAsType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getTemplateArgumentAsType_ADDR, clang_Type_getTemplateArgumentAsType_DESC)
+private val clang_Type_getTemplateArgumentAsType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getTemplateArgumentAsType") }
+private val clang_Type_getTemplateArgumentAsType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getTemplateArgumentAsType_ADDR, clang_Type_getTemplateArgumentAsType_DESC) }
 
 fun clang_Type_getTemplateArgumentAsType(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -11528,8 +11580,8 @@ fun clang_Type_getTemplateArgumentAsType(allocator: SegmentAllocator, arg0: Memo
  * {@snippet lang=c : clang_Type_getCXXRefQualifier Declared(CXRefQualifierKind)(typedef CXType = Declared(CXType))
  */
 private val clang_Type_getCXXRefQualifier_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout)
-private val clang_Type_getCXXRefQualifier_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_getCXXRefQualifier")
-private val clang_Type_getCXXRefQualifier_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_getCXXRefQualifier_ADDR, clang_Type_getCXXRefQualifier_DESC)
+private val clang_Type_getCXXRefQualifier_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_getCXXRefQualifier") }
+private val clang_Type_getCXXRefQualifier_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_getCXXRefQualifier_ADDR, clang_Type_getCXXRefQualifier_DESC) }
 
 fun clang_Type_getCXXRefQualifier(arg0: MemorySegment): Int {
     try {
@@ -11547,8 +11599,8 @@ fun clang_Type_getCXXRefQualifier(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_isVirtualBase UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_isVirtualBase_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_isVirtualBase_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isVirtualBase")
-private val clang_isVirtualBase_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isVirtualBase_ADDR, clang_isVirtualBase_DESC)
+private val clang_isVirtualBase_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isVirtualBase") }
+private val clang_isVirtualBase_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isVirtualBase_ADDR, clang_isVirtualBase_DESC) }
 
 fun clang_isVirtualBase(arg0: MemorySegment): Int {
     try {
@@ -11566,8 +11618,8 @@ fun clang_isVirtualBase(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getOffsetOfBase LongLong(typedef CXCursor = Declared(CXCursor),typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getOffsetOfBase_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, CXCursor.layout, CXCursor.layout)
-private val clang_getOffsetOfBase_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getOffsetOfBase")
-private val clang_getOffsetOfBase_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getOffsetOfBase_ADDR, clang_getOffsetOfBase_DESC)
+private val clang_getOffsetOfBase_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getOffsetOfBase") }
+private val clang_getOffsetOfBase_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getOffsetOfBase_ADDR, clang_getOffsetOfBase_DESC) }
 
 fun clang_getOffsetOfBase(arg0: MemorySegment, arg1: MemorySegment): Long {
     try {
@@ -11605,8 +11657,8 @@ fun CX_CXXPrivate(): Int = 3
  * {@snippet lang=c : clang_getCXXAccessSpecifier Declared(CX_CXXAccessSpecifier)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCXXAccessSpecifier_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCXXAccessSpecifier_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCXXAccessSpecifier")
-private val clang_getCXXAccessSpecifier_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCXXAccessSpecifier_ADDR, clang_getCXXAccessSpecifier_DESC)
+private val clang_getCXXAccessSpecifier_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCXXAccessSpecifier") }
+private val clang_getCXXAccessSpecifier_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCXXAccessSpecifier_ADDR, clang_getCXXAccessSpecifier_DESC) }
 
 fun clang_getCXXAccessSpecifier(arg0: MemorySegment): Int {
     try {
@@ -11839,8 +11891,8 @@ fun CX_BO_LAST(): Int = 33
  * {@snippet lang=c : clang_Cursor_getBinaryOpcode Declared(CX_BinaryOperatorKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getBinaryOpcode_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getBinaryOpcode_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getBinaryOpcode")
-private val clang_Cursor_getBinaryOpcode_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getBinaryOpcode_ADDR, clang_Cursor_getBinaryOpcode_DESC)
+private val clang_Cursor_getBinaryOpcode_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getBinaryOpcode") }
+private val clang_Cursor_getBinaryOpcode_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getBinaryOpcode_ADDR, clang_Cursor_getBinaryOpcode_DESC) }
 
 fun clang_Cursor_getBinaryOpcode(arg0: MemorySegment): Int {
     try {
@@ -11858,8 +11910,8 @@ fun clang_Cursor_getBinaryOpcode(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getBinaryOpcodeStr typedef CXString = Declared(CXString)(Declared(CX_BinaryOperatorKind))
  */
 private val clang_Cursor_getBinaryOpcodeStr_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getBinaryOpcodeStr_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getBinaryOpcodeStr")
-private val clang_Cursor_getBinaryOpcodeStr_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getBinaryOpcodeStr_ADDR, clang_Cursor_getBinaryOpcodeStr_DESC)
+private val clang_Cursor_getBinaryOpcodeStr_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getBinaryOpcodeStr") }
+private val clang_Cursor_getBinaryOpcodeStr_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getBinaryOpcodeStr_ADDR, clang_Cursor_getBinaryOpcodeStr_DESC) }
 
 fun clang_Cursor_getBinaryOpcodeStr(allocator: SegmentAllocator, arg0: Int): MemorySegment {
     try {
@@ -11877,8 +11929,8 @@ fun clang_Cursor_getBinaryOpcodeStr(allocator: SegmentAllocator, arg0: Int): Mem
  * {@snippet lang=c : clang_Cursor_getStorageClass Declared(CX_StorageClass)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getStorageClass_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getStorageClass_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getStorageClass")
-private val clang_Cursor_getStorageClass_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getStorageClass_ADDR, clang_Cursor_getStorageClass_DESC)
+private val clang_Cursor_getStorageClass_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getStorageClass") }
+private val clang_Cursor_getStorageClass_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getStorageClass_ADDR, clang_Cursor_getStorageClass_DESC) }
 
 fun clang_Cursor_getStorageClass(arg0: MemorySegment): Int {
     try {
@@ -11896,8 +11948,8 @@ fun clang_Cursor_getStorageClass(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getNumOverloadedDecls UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getNumOverloadedDecls_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getNumOverloadedDecls_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNumOverloadedDecls")
-private val clang_getNumOverloadedDecls_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNumOverloadedDecls_ADDR, clang_getNumOverloadedDecls_DESC)
+private val clang_getNumOverloadedDecls_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNumOverloadedDecls") }
+private val clang_getNumOverloadedDecls_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNumOverloadedDecls_ADDR, clang_getNumOverloadedDecls_DESC) }
 
 fun clang_getNumOverloadedDecls(arg0: MemorySegment): Int {
     try {
@@ -11915,8 +11967,8 @@ fun clang_getNumOverloadedDecls(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getOverloadedDecl typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_getOverloadedDecl_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_getOverloadedDecl_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getOverloadedDecl")
-private val clang_getOverloadedDecl_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getOverloadedDecl_ADDR, clang_getOverloadedDecl_DESC)
+private val clang_getOverloadedDecl_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getOverloadedDecl") }
+private val clang_getOverloadedDecl_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getOverloadedDecl_ADDR, clang_getOverloadedDecl_DESC) }
 
 fun clang_getOverloadedDecl(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -11934,8 +11986,8 @@ fun clang_getOverloadedDecl(allocator: SegmentAllocator, arg0: MemorySegment, ar
  * {@snippet lang=c : clang_getIBOutletCollectionType typedef CXType = Declared(CXType)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getIBOutletCollectionType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXCursor.layout)
-private val clang_getIBOutletCollectionType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getIBOutletCollectionType")
-private val clang_getIBOutletCollectionType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getIBOutletCollectionType_ADDR, clang_getIBOutletCollectionType_DESC)
+private val clang_getIBOutletCollectionType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getIBOutletCollectionType") }
+private val clang_getIBOutletCollectionType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getIBOutletCollectionType_ADDR, clang_getIBOutletCollectionType_DESC) }
 
 fun clang_getIBOutletCollectionType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -11991,8 +12043,8 @@ object CXCursorVisitor {
  * {@snippet lang=c : clang_visitChildren UNSIGNED = Int(typedef CXCursor = Declared(CXCursor),typedef CXCursorVisitor = (Declared(CXChildVisitResult)(Declared(CXCursor),Declared(CXCursor),(Void)*))*,typedef CXClientData = (Void)*)
  */
 private val clang_visitChildren_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_visitChildren_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_visitChildren")
-private val clang_visitChildren_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_visitChildren_ADDR, clang_visitChildren_DESC)
+private val clang_visitChildren_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_visitChildren") }
+private val clang_visitChildren_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_visitChildren_ADDR, clang_visitChildren_DESC) }
 
 fun clang_visitChildren(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -12015,8 +12067,8 @@ typealias CXCursorVisitorBlock = MemorySegment?
  * {@snippet lang=c : clang_visitChildrenWithBlock UNSIGNED = Int(typedef CXCursor = Declared(CXCursor),typedef CXCursorVisitorBlock = (Declared(CXChildVisitResult)(Declared(CXCursor),Declared(CXCursor)))*)
  */
 private val clang_visitChildrenWithBlock_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.ADDRESS)
-private val clang_visitChildrenWithBlock_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_visitChildrenWithBlock")
-private val clang_visitChildrenWithBlock_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_visitChildrenWithBlock_ADDR, clang_visitChildrenWithBlock_DESC)
+private val clang_visitChildrenWithBlock_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_visitChildrenWithBlock") }
+private val clang_visitChildrenWithBlock_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_visitChildrenWithBlock_ADDR, clang_visitChildrenWithBlock_DESC) }
 
 fun clang_visitChildrenWithBlock(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -12034,8 +12086,8 @@ fun clang_visitChildrenWithBlock(arg0: MemorySegment, arg1: MemorySegment): Int 
  * {@snippet lang=c : clang_getCursorUSR typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorUSR_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_getCursorUSR_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorUSR")
-private val clang_getCursorUSR_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorUSR_ADDR, clang_getCursorUSR_DESC)
+private val clang_getCursorUSR_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorUSR") }
+private val clang_getCursorUSR_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorUSR_ADDR, clang_getCursorUSR_DESC) }
 
 fun clang_getCursorUSR(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12053,8 +12105,8 @@ fun clang_getCursorUSR(allocator: SegmentAllocator, arg0: MemorySegment): Memory
  * {@snippet lang=c : clang_constructUSR_ObjCClass typedef CXString = Declared(CXString)((Char)*)
  */
 private val clang_constructUSR_ObjCClass_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_constructUSR_ObjCClass_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_constructUSR_ObjCClass")
-private val clang_constructUSR_ObjCClass_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCClass_ADDR, clang_constructUSR_ObjCClass_DESC)
+private val clang_constructUSR_ObjCClass_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_constructUSR_ObjCClass") }
+private val clang_constructUSR_ObjCClass_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCClass_ADDR, clang_constructUSR_ObjCClass_DESC) }
 
 fun clang_constructUSR_ObjCClass(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12072,8 +12124,8 @@ fun clang_constructUSR_ObjCClass(allocator: SegmentAllocator, arg0: MemorySegmen
  * {@snippet lang=c : clang_constructUSR_ObjCCategory typedef CXString = Declared(CXString)((Char)*,(Char)*)
  */
 private val clang_constructUSR_ObjCCategory_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_constructUSR_ObjCCategory_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_constructUSR_ObjCCategory")
-private val clang_constructUSR_ObjCCategory_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCCategory_ADDR, clang_constructUSR_ObjCCategory_DESC)
+private val clang_constructUSR_ObjCCategory_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_constructUSR_ObjCCategory") }
+private val clang_constructUSR_ObjCCategory_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCCategory_ADDR, clang_constructUSR_ObjCCategory_DESC) }
 
 fun clang_constructUSR_ObjCCategory(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -12091,8 +12143,8 @@ fun clang_constructUSR_ObjCCategory(allocator: SegmentAllocator, arg0: MemorySeg
  * {@snippet lang=c : clang_constructUSR_ObjCProtocol typedef CXString = Declared(CXString)((Char)*)
  */
 private val clang_constructUSR_ObjCProtocol_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_constructUSR_ObjCProtocol_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_constructUSR_ObjCProtocol")
-private val clang_constructUSR_ObjCProtocol_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCProtocol_ADDR, clang_constructUSR_ObjCProtocol_DESC)
+private val clang_constructUSR_ObjCProtocol_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_constructUSR_ObjCProtocol") }
+private val clang_constructUSR_ObjCProtocol_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCProtocol_ADDR, clang_constructUSR_ObjCProtocol_DESC) }
 
 fun clang_constructUSR_ObjCProtocol(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12110,8 +12162,8 @@ fun clang_constructUSR_ObjCProtocol(allocator: SegmentAllocator, arg0: MemorySeg
  * {@snippet lang=c : clang_constructUSR_ObjCIvar typedef CXString = Declared(CXString)((Char)*,typedef CXString = Declared(CXString))
  */
 private val clang_constructUSR_ObjCIvar_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, CXString.layout)
-private val clang_constructUSR_ObjCIvar_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_constructUSR_ObjCIvar")
-private val clang_constructUSR_ObjCIvar_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCIvar_ADDR, clang_constructUSR_ObjCIvar_DESC)
+private val clang_constructUSR_ObjCIvar_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_constructUSR_ObjCIvar") }
+private val clang_constructUSR_ObjCIvar_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCIvar_ADDR, clang_constructUSR_ObjCIvar_DESC) }
 
 fun clang_constructUSR_ObjCIvar(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -12129,8 +12181,8 @@ fun clang_constructUSR_ObjCIvar(allocator: SegmentAllocator, arg0: MemorySegment
  * {@snippet lang=c : clang_constructUSR_ObjCMethod typedef CXString = Declared(CXString)((Char)*,UNSIGNED = Int,typedef CXString = Declared(CXString))
  */
 private val clang_constructUSR_ObjCMethod_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, CXString.layout)
-private val clang_constructUSR_ObjCMethod_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_constructUSR_ObjCMethod")
-private val clang_constructUSR_ObjCMethod_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCMethod_ADDR, clang_constructUSR_ObjCMethod_DESC)
+private val clang_constructUSR_ObjCMethod_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_constructUSR_ObjCMethod") }
+private val clang_constructUSR_ObjCMethod_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCMethod_ADDR, clang_constructUSR_ObjCMethod_DESC) }
 
 fun clang_constructUSR_ObjCMethod(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int, arg2: MemorySegment): MemorySegment {
     try {
@@ -12148,8 +12200,8 @@ fun clang_constructUSR_ObjCMethod(allocator: SegmentAllocator, arg0: MemorySegme
  * {@snippet lang=c : clang_constructUSR_ObjCProperty typedef CXString = Declared(CXString)((Char)*,typedef CXString = Declared(CXString))
  */
 private val clang_constructUSR_ObjCProperty_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, CXString.layout)
-private val clang_constructUSR_ObjCProperty_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_constructUSR_ObjCProperty")
-private val clang_constructUSR_ObjCProperty_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCProperty_ADDR, clang_constructUSR_ObjCProperty_DESC)
+private val clang_constructUSR_ObjCProperty_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_constructUSR_ObjCProperty") }
+private val clang_constructUSR_ObjCProperty_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_constructUSR_ObjCProperty_ADDR, clang_constructUSR_ObjCProperty_DESC) }
 
 fun clang_constructUSR_ObjCProperty(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -12167,8 +12219,8 @@ fun clang_constructUSR_ObjCProperty(allocator: SegmentAllocator, arg0: MemorySeg
  * {@snippet lang=c : clang_getCursorSpelling typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_getCursorSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorSpelling")
-private val clang_getCursorSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorSpelling_ADDR, clang_getCursorSpelling_DESC)
+private val clang_getCursorSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorSpelling") }
+private val clang_getCursorSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorSpelling_ADDR, clang_getCursorSpelling_DESC) }
 
 fun clang_getCursorSpelling(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12186,8 +12238,8 @@ fun clang_getCursorSpelling(allocator: SegmentAllocator, arg0: MemorySegment): M
  * {@snippet lang=c : clang_Cursor_getSpellingNameRange typedef CXSourceRange = Declared(CXSourceRange)(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int,UNSIGNED = Int)
  */
 private val clang_Cursor_getSpellingNameRange_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout, CXCursor.layout, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_Cursor_getSpellingNameRange_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getSpellingNameRange")
-private val clang_Cursor_getSpellingNameRange_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getSpellingNameRange_ADDR, clang_Cursor_getSpellingNameRange_DESC)
+private val clang_Cursor_getSpellingNameRange_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getSpellingNameRange") }
+private val clang_Cursor_getSpellingNameRange_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getSpellingNameRange_ADDR, clang_Cursor_getSpellingNameRange_DESC) }
 
 fun clang_Cursor_getSpellingNameRange(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int, arg2: Int): MemorySegment {
     try {
@@ -12345,8 +12397,8 @@ fun CXPrintingPolicy_LastProperty(): Int = 25
  * {@snippet lang=c : clang_PrintingPolicy_getProperty UNSIGNED = Int(typedef CXPrintingPolicy = (Void)*,Declared(CXPrintingPolicyProperty))
  */
 private val clang_PrintingPolicy_getProperty_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_PrintingPolicy_getProperty_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_PrintingPolicy_getProperty")
-private val clang_PrintingPolicy_getProperty_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_PrintingPolicy_getProperty_ADDR, clang_PrintingPolicy_getProperty_DESC)
+private val clang_PrintingPolicy_getProperty_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_PrintingPolicy_getProperty") }
+private val clang_PrintingPolicy_getProperty_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_PrintingPolicy_getProperty_ADDR, clang_PrintingPolicy_getProperty_DESC) }
 
 fun clang_PrintingPolicy_getProperty(arg0: MemorySegment, arg1: Int): Int {
     try {
@@ -12364,8 +12416,8 @@ fun clang_PrintingPolicy_getProperty(arg0: MemorySegment, arg1: Int): Int {
  * {@snippet lang=c : clang_PrintingPolicy_setProperty Void(typedef CXPrintingPolicy = (Void)*,Declared(CXPrintingPolicyProperty),UNSIGNED = Int)
  */
 private val clang_PrintingPolicy_setProperty_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_PrintingPolicy_setProperty_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_PrintingPolicy_setProperty")
-private val clang_PrintingPolicy_setProperty_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_PrintingPolicy_setProperty_ADDR, clang_PrintingPolicy_setProperty_DESC)
+private val clang_PrintingPolicy_setProperty_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_PrintingPolicy_setProperty") }
+private val clang_PrintingPolicy_setProperty_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_PrintingPolicy_setProperty_ADDR, clang_PrintingPolicy_setProperty_DESC) }
 
 fun clang_PrintingPolicy_setProperty(arg0: MemorySegment, arg1: Int, arg2: Int): Unit {
     try {
@@ -12383,8 +12435,8 @@ fun clang_PrintingPolicy_setProperty(arg0: MemorySegment, arg1: Int, arg2: Int):
  * {@snippet lang=c : clang_getCursorPrintingPolicy typedef CXPrintingPolicy = (Void)*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorPrintingPolicy_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_getCursorPrintingPolicy_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorPrintingPolicy")
-private val clang_getCursorPrintingPolicy_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorPrintingPolicy_ADDR, clang_getCursorPrintingPolicy_DESC)
+private val clang_getCursorPrintingPolicy_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorPrintingPolicy") }
+private val clang_getCursorPrintingPolicy_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorPrintingPolicy_ADDR, clang_getCursorPrintingPolicy_DESC) }
 
 fun clang_getCursorPrintingPolicy(arg0: MemorySegment): MemorySegment {
     try {
@@ -12402,8 +12454,8 @@ fun clang_getCursorPrintingPolicy(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_PrintingPolicy_dispose Void(typedef CXPrintingPolicy = (Void)*)
  */
 private val clang_PrintingPolicy_dispose_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_PrintingPolicy_dispose_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_PrintingPolicy_dispose")
-private val clang_PrintingPolicy_dispose_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_PrintingPolicy_dispose_ADDR, clang_PrintingPolicy_dispose_DESC)
+private val clang_PrintingPolicy_dispose_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_PrintingPolicy_dispose") }
+private val clang_PrintingPolicy_dispose_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_PrintingPolicy_dispose_ADDR, clang_PrintingPolicy_dispose_DESC) }
 
 fun clang_PrintingPolicy_dispose(arg0: MemorySegment): Unit {
     try {
@@ -12421,8 +12473,8 @@ fun clang_PrintingPolicy_dispose(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_getCursorPrettyPrinted typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor),typedef CXPrintingPolicy = (Void)*)
  */
 private val clang_getCursorPrettyPrinted_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout, ValueLayout.ADDRESS)
-private val clang_getCursorPrettyPrinted_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorPrettyPrinted")
-private val clang_getCursorPrettyPrinted_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorPrettyPrinted_ADDR, clang_getCursorPrettyPrinted_DESC)
+private val clang_getCursorPrettyPrinted_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorPrettyPrinted") }
+private val clang_getCursorPrettyPrinted_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorPrettyPrinted_ADDR, clang_getCursorPrettyPrinted_DESC) }
 
 fun clang_getCursorPrettyPrinted(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -12440,8 +12492,8 @@ fun clang_getCursorPrettyPrinted(allocator: SegmentAllocator, arg0: MemorySegmen
  * {@snippet lang=c : clang_getTypePrettyPrinted typedef CXString = Declared(CXString)(typedef CXType = Declared(CXType),typedef CXPrintingPolicy = (Void)*)
  */
 private val clang_getTypePrettyPrinted_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXType.layout, ValueLayout.ADDRESS)
-private val clang_getTypePrettyPrinted_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTypePrettyPrinted")
-private val clang_getTypePrettyPrinted_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTypePrettyPrinted_ADDR, clang_getTypePrettyPrinted_DESC)
+private val clang_getTypePrettyPrinted_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTypePrettyPrinted") }
+private val clang_getTypePrettyPrinted_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTypePrettyPrinted_ADDR, clang_getTypePrettyPrinted_DESC) }
 
 fun clang_getTypePrettyPrinted(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -12459,8 +12511,8 @@ fun clang_getTypePrettyPrinted(allocator: SegmentAllocator, arg0: MemorySegment,
  * {@snippet lang=c : clang_getFullyQualifiedName typedef CXString = Declared(CXString)(typedef CXType = Declared(CXType),typedef CXPrintingPolicy = (Void)*,UNSIGNED = Int)
  */
 private val clang_getFullyQualifiedName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXType.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getFullyQualifiedName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getFullyQualifiedName")
-private val clang_getFullyQualifiedName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getFullyQualifiedName_ADDR, clang_getFullyQualifiedName_DESC)
+private val clang_getFullyQualifiedName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getFullyQualifiedName") }
+private val clang_getFullyQualifiedName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getFullyQualifiedName_ADDR, clang_getFullyQualifiedName_DESC) }
 
 fun clang_getFullyQualifiedName(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment, arg2: Int): MemorySegment {
     try {
@@ -12478,8 +12530,8 @@ fun clang_getFullyQualifiedName(allocator: SegmentAllocator, arg0: MemorySegment
  * {@snippet lang=c : clang_getCursorDisplayName typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorDisplayName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_getCursorDisplayName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorDisplayName")
-private val clang_getCursorDisplayName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorDisplayName_ADDR, clang_getCursorDisplayName_DESC)
+private val clang_getCursorDisplayName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorDisplayName") }
+private val clang_getCursorDisplayName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorDisplayName_ADDR, clang_getCursorDisplayName_DESC) }
 
 fun clang_getCursorDisplayName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12497,8 +12549,8 @@ fun clang_getCursorDisplayName(allocator: SegmentAllocator, arg0: MemorySegment)
  * {@snippet lang=c : clang_getCursorReferenced typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorReferenced_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout)
-private val clang_getCursorReferenced_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorReferenced")
-private val clang_getCursorReferenced_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorReferenced_ADDR, clang_getCursorReferenced_DESC)
+private val clang_getCursorReferenced_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorReferenced") }
+private val clang_getCursorReferenced_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorReferenced_ADDR, clang_getCursorReferenced_DESC) }
 
 fun clang_getCursorReferenced(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12516,8 +12568,8 @@ fun clang_getCursorReferenced(allocator: SegmentAllocator, arg0: MemorySegment):
  * {@snippet lang=c : clang_getCursorDefinition typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorDefinition_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout)
-private val clang_getCursorDefinition_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorDefinition")
-private val clang_getCursorDefinition_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorDefinition_ADDR, clang_getCursorDefinition_DESC)
+private val clang_getCursorDefinition_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorDefinition") }
+private val clang_getCursorDefinition_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorDefinition_ADDR, clang_getCursorDefinition_DESC) }
 
 fun clang_getCursorDefinition(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12535,8 +12587,8 @@ fun clang_getCursorDefinition(allocator: SegmentAllocator, arg0: MemorySegment):
  * {@snippet lang=c : clang_isCursorDefinition UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_isCursorDefinition_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_isCursorDefinition_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_isCursorDefinition")
-private val clang_isCursorDefinition_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_isCursorDefinition_ADDR, clang_isCursorDefinition_DESC)
+private val clang_isCursorDefinition_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_isCursorDefinition") }
+private val clang_isCursorDefinition_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_isCursorDefinition_ADDR, clang_isCursorDefinition_DESC) }
 
 fun clang_isCursorDefinition(arg0: MemorySegment): Int {
     try {
@@ -12554,8 +12606,8 @@ fun clang_isCursorDefinition(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCanonicalCursor typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCanonicalCursor_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout)
-private val clang_getCanonicalCursor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCanonicalCursor")
-private val clang_getCanonicalCursor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCanonicalCursor_ADDR, clang_getCanonicalCursor_DESC)
+private val clang_getCanonicalCursor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCanonicalCursor") }
+private val clang_getCanonicalCursor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCanonicalCursor_ADDR, clang_getCanonicalCursor_DESC) }
 
 fun clang_getCanonicalCursor(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12573,8 +12625,8 @@ fun clang_getCanonicalCursor(allocator: SegmentAllocator, arg0: MemorySegment): 
  * {@snippet lang=c : clang_Cursor_getObjCSelectorIndex Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getObjCSelectorIndex_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getObjCSelectorIndex_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getObjCSelectorIndex")
-private val clang_Cursor_getObjCSelectorIndex_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCSelectorIndex_ADDR, clang_Cursor_getObjCSelectorIndex_DESC)
+private val clang_Cursor_getObjCSelectorIndex_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getObjCSelectorIndex") }
+private val clang_Cursor_getObjCSelectorIndex_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCSelectorIndex_ADDR, clang_Cursor_getObjCSelectorIndex_DESC) }
 
 fun clang_Cursor_getObjCSelectorIndex(arg0: MemorySegment): Int {
     try {
@@ -12592,8 +12644,8 @@ fun clang_Cursor_getObjCSelectorIndex(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isDynamicCall Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isDynamicCall_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isDynamicCall_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isDynamicCall")
-private val clang_Cursor_isDynamicCall_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isDynamicCall_ADDR, clang_Cursor_isDynamicCall_DESC)
+private val clang_Cursor_isDynamicCall_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isDynamicCall") }
+private val clang_Cursor_isDynamicCall_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isDynamicCall_ADDR, clang_Cursor_isDynamicCall_DESC) }
 
 fun clang_Cursor_isDynamicCall(arg0: MemorySegment): Int {
     try {
@@ -12611,8 +12663,8 @@ fun clang_Cursor_isDynamicCall(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getReceiverType typedef CXType = Declared(CXType)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getReceiverType_DESC: FunctionDescriptor = FunctionDescriptor.of(CXType.layout, CXCursor.layout)
-private val clang_Cursor_getReceiverType_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getReceiverType")
-private val clang_Cursor_getReceiverType_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getReceiverType_ADDR, clang_Cursor_getReceiverType_DESC)
+private val clang_Cursor_getReceiverType_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getReceiverType") }
+private val clang_Cursor_getReceiverType_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getReceiverType_ADDR, clang_Cursor_getReceiverType_DESC) }
 
 fun clang_Cursor_getReceiverType(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12700,8 +12752,8 @@ fun CXObjCPropertyAttr_class(): Int = 4096
  * {@snippet lang=c : clang_Cursor_getObjCPropertyAttributes UNSIGNED = Int(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_Cursor_getObjCPropertyAttributes_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getObjCPropertyAttributes_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getObjCPropertyAttributes")
-private val clang_Cursor_getObjCPropertyAttributes_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCPropertyAttributes_ADDR, clang_Cursor_getObjCPropertyAttributes_DESC)
+private val clang_Cursor_getObjCPropertyAttributes_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getObjCPropertyAttributes") }
+private val clang_Cursor_getObjCPropertyAttributes_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCPropertyAttributes_ADDR, clang_Cursor_getObjCPropertyAttributes_DESC) }
 
 fun clang_Cursor_getObjCPropertyAttributes(arg0: MemorySegment, arg1: Int): Int {
     try {
@@ -12719,8 +12771,8 @@ fun clang_Cursor_getObjCPropertyAttributes(arg0: MemorySegment, arg1: Int): Int 
  * {@snippet lang=c : clang_Cursor_getObjCPropertyGetterName typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getObjCPropertyGetterName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_Cursor_getObjCPropertyGetterName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getObjCPropertyGetterName")
-private val clang_Cursor_getObjCPropertyGetterName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCPropertyGetterName_ADDR, clang_Cursor_getObjCPropertyGetterName_DESC)
+private val clang_Cursor_getObjCPropertyGetterName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getObjCPropertyGetterName") }
+private val clang_Cursor_getObjCPropertyGetterName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCPropertyGetterName_ADDR, clang_Cursor_getObjCPropertyGetterName_DESC) }
 
 fun clang_Cursor_getObjCPropertyGetterName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12738,8 +12790,8 @@ fun clang_Cursor_getObjCPropertyGetterName(allocator: SegmentAllocator, arg0: Me
  * {@snippet lang=c : clang_Cursor_getObjCPropertySetterName typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getObjCPropertySetterName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_Cursor_getObjCPropertySetterName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getObjCPropertySetterName")
-private val clang_Cursor_getObjCPropertySetterName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCPropertySetterName_ADDR, clang_Cursor_getObjCPropertySetterName_DESC)
+private val clang_Cursor_getObjCPropertySetterName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getObjCPropertySetterName") }
+private val clang_Cursor_getObjCPropertySetterName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCPropertySetterName_ADDR, clang_Cursor_getObjCPropertySetterName_DESC) }
 
 fun clang_Cursor_getObjCPropertySetterName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12792,8 +12844,8 @@ fun CXObjCDeclQualifier_Oneway(): Int = 32
  * {@snippet lang=c : clang_Cursor_getObjCDeclQualifiers UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getObjCDeclQualifiers_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getObjCDeclQualifiers_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getObjCDeclQualifiers")
-private val clang_Cursor_getObjCDeclQualifiers_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCDeclQualifiers_ADDR, clang_Cursor_getObjCDeclQualifiers_DESC)
+private val clang_Cursor_getObjCDeclQualifiers_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getObjCDeclQualifiers") }
+private val clang_Cursor_getObjCDeclQualifiers_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCDeclQualifiers_ADDR, clang_Cursor_getObjCDeclQualifiers_DESC) }
 
 fun clang_Cursor_getObjCDeclQualifiers(arg0: MemorySegment): Int {
     try {
@@ -12811,8 +12863,8 @@ fun clang_Cursor_getObjCDeclQualifiers(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isObjCOptional UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isObjCOptional_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isObjCOptional_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isObjCOptional")
-private val clang_Cursor_isObjCOptional_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isObjCOptional_ADDR, clang_Cursor_isObjCOptional_DESC)
+private val clang_Cursor_isObjCOptional_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isObjCOptional") }
+private val clang_Cursor_isObjCOptional_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isObjCOptional_ADDR, clang_Cursor_isObjCOptional_DESC) }
 
 fun clang_Cursor_isObjCOptional(arg0: MemorySegment): Int {
     try {
@@ -12830,8 +12882,8 @@ fun clang_Cursor_isObjCOptional(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isVariadic UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isVariadic_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isVariadic_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isVariadic")
-private val clang_Cursor_isVariadic_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isVariadic_ADDR, clang_Cursor_isVariadic_DESC)
+private val clang_Cursor_isVariadic_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isVariadic") }
+private val clang_Cursor_isVariadic_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isVariadic_ADDR, clang_Cursor_isVariadic_DESC) }
 
 fun clang_Cursor_isVariadic(arg0: MemorySegment): Int {
     try {
@@ -12849,8 +12901,8 @@ fun clang_Cursor_isVariadic(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_isExternalSymbol UNSIGNED = Int(typedef CXCursor = Declared(CXCursor),(typedef CXString = Declared(CXString))*,(typedef CXString = Declared(CXString))*,(UNSIGNED = Int)*)
  */
 private val clang_Cursor_isExternalSymbol_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_Cursor_isExternalSymbol_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isExternalSymbol")
-private val clang_Cursor_isExternalSymbol_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isExternalSymbol_ADDR, clang_Cursor_isExternalSymbol_DESC)
+private val clang_Cursor_isExternalSymbol_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isExternalSymbol") }
+private val clang_Cursor_isExternalSymbol_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isExternalSymbol_ADDR, clang_Cursor_isExternalSymbol_DESC) }
 
 fun clang_Cursor_isExternalSymbol(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment): Int {
     try {
@@ -12868,8 +12920,8 @@ fun clang_Cursor_isExternalSymbol(arg0: MemorySegment, arg1: MemorySegment, arg2
  * {@snippet lang=c : clang_Cursor_getCommentRange typedef CXSourceRange = Declared(CXSourceRange)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getCommentRange_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout, CXCursor.layout)
-private val clang_Cursor_getCommentRange_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getCommentRange")
-private val clang_Cursor_getCommentRange_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getCommentRange_ADDR, clang_Cursor_getCommentRange_DESC)
+private val clang_Cursor_getCommentRange_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getCommentRange") }
+private val clang_Cursor_getCommentRange_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getCommentRange_ADDR, clang_Cursor_getCommentRange_DESC) }
 
 fun clang_Cursor_getCommentRange(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12887,8 +12939,8 @@ fun clang_Cursor_getCommentRange(allocator: SegmentAllocator, arg0: MemorySegmen
  * {@snippet lang=c : clang_Cursor_getRawCommentText typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getRawCommentText_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_Cursor_getRawCommentText_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getRawCommentText")
-private val clang_Cursor_getRawCommentText_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getRawCommentText_ADDR, clang_Cursor_getRawCommentText_DESC)
+private val clang_Cursor_getRawCommentText_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getRawCommentText") }
+private val clang_Cursor_getRawCommentText_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getRawCommentText_ADDR, clang_Cursor_getRawCommentText_DESC) }
 
 fun clang_Cursor_getRawCommentText(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12906,8 +12958,8 @@ fun clang_Cursor_getRawCommentText(allocator: SegmentAllocator, arg0: MemorySegm
  * {@snippet lang=c : clang_Cursor_getBriefCommentText typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getBriefCommentText_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_Cursor_getBriefCommentText_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getBriefCommentText")
-private val clang_Cursor_getBriefCommentText_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getBriefCommentText_ADDR, clang_Cursor_getBriefCommentText_DESC)
+private val clang_Cursor_getBriefCommentText_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getBriefCommentText") }
+private val clang_Cursor_getBriefCommentText_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getBriefCommentText_ADDR, clang_Cursor_getBriefCommentText_DESC) }
 
 fun clang_Cursor_getBriefCommentText(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12925,8 +12977,8 @@ fun clang_Cursor_getBriefCommentText(allocator: SegmentAllocator, arg0: MemorySe
  * {@snippet lang=c : clang_Cursor_getMangling typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getMangling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_Cursor_getMangling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getMangling")
-private val clang_Cursor_getMangling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getMangling_ADDR, clang_Cursor_getMangling_DESC)
+private val clang_Cursor_getMangling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getMangling") }
+private val clang_Cursor_getMangling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getMangling_ADDR, clang_Cursor_getMangling_DESC) }
 
 fun clang_Cursor_getMangling(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -12944,8 +12996,8 @@ fun clang_Cursor_getMangling(allocator: SegmentAllocator, arg0: MemorySegment): 
  * {@snippet lang=c : clang_Cursor_getCXXManglings (typedef CXStringSet = Declared(CXStringSet))*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getCXXManglings_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_Cursor_getCXXManglings_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getCXXManglings")
-private val clang_Cursor_getCXXManglings_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getCXXManglings_ADDR, clang_Cursor_getCXXManglings_DESC)
+private val clang_Cursor_getCXXManglings_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getCXXManglings") }
+private val clang_Cursor_getCXXManglings_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getCXXManglings_ADDR, clang_Cursor_getCXXManglings_DESC) }
 
 fun clang_Cursor_getCXXManglings(arg0: MemorySegment): MemorySegment {
     try {
@@ -12963,8 +13015,8 @@ fun clang_Cursor_getCXXManglings(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_Cursor_getObjCManglings (typedef CXStringSet = Declared(CXStringSet))*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getObjCManglings_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_Cursor_getObjCManglings_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getObjCManglings")
-private val clang_Cursor_getObjCManglings_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCManglings_ADDR, clang_Cursor_getObjCManglings_DESC)
+private val clang_Cursor_getObjCManglings_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getObjCManglings") }
+private val clang_Cursor_getObjCManglings_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getObjCManglings_ADDR, clang_Cursor_getObjCManglings_DESC) }
 
 fun clang_Cursor_getObjCManglings(arg0: MemorySegment): MemorySegment {
     try {
@@ -12982,8 +13034,8 @@ fun clang_Cursor_getObjCManglings(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_Cursor_getGCCAssemblyTemplate typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getGCCAssemblyTemplate_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout)
-private val clang_Cursor_getGCCAssemblyTemplate_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getGCCAssemblyTemplate")
-private val clang_Cursor_getGCCAssemblyTemplate_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyTemplate_ADDR, clang_Cursor_getGCCAssemblyTemplate_DESC)
+private val clang_Cursor_getGCCAssemblyTemplate_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getGCCAssemblyTemplate") }
+private val clang_Cursor_getGCCAssemblyTemplate_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyTemplate_ADDR, clang_Cursor_getGCCAssemblyTemplate_DESC) }
 
 fun clang_Cursor_getGCCAssemblyTemplate(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -13001,8 +13053,8 @@ fun clang_Cursor_getGCCAssemblyTemplate(allocator: SegmentAllocator, arg0: Memor
  * {@snippet lang=c : clang_Cursor_isGCCAssemblyHasGoto UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isGCCAssemblyHasGoto_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isGCCAssemblyHasGoto_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isGCCAssemblyHasGoto")
-private val clang_Cursor_isGCCAssemblyHasGoto_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isGCCAssemblyHasGoto_ADDR, clang_Cursor_isGCCAssemblyHasGoto_DESC)
+private val clang_Cursor_isGCCAssemblyHasGoto_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isGCCAssemblyHasGoto") }
+private val clang_Cursor_isGCCAssemblyHasGoto_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isGCCAssemblyHasGoto_ADDR, clang_Cursor_isGCCAssemblyHasGoto_DESC) }
 
 fun clang_Cursor_isGCCAssemblyHasGoto(arg0: MemorySegment): Int {
     try {
@@ -13020,8 +13072,8 @@ fun clang_Cursor_isGCCAssemblyHasGoto(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getGCCAssemblyNumOutputs UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getGCCAssemblyNumOutputs_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getGCCAssemblyNumOutputs_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getGCCAssemblyNumOutputs")
-private val clang_Cursor_getGCCAssemblyNumOutputs_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyNumOutputs_ADDR, clang_Cursor_getGCCAssemblyNumOutputs_DESC)
+private val clang_Cursor_getGCCAssemblyNumOutputs_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getGCCAssemblyNumOutputs") }
+private val clang_Cursor_getGCCAssemblyNumOutputs_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyNumOutputs_ADDR, clang_Cursor_getGCCAssemblyNumOutputs_DESC) }
 
 fun clang_Cursor_getGCCAssemblyNumOutputs(arg0: MemorySegment): Int {
     try {
@@ -13039,8 +13091,8 @@ fun clang_Cursor_getGCCAssemblyNumOutputs(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getGCCAssemblyNumInputs UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getGCCAssemblyNumInputs_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getGCCAssemblyNumInputs_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getGCCAssemblyNumInputs")
-private val clang_Cursor_getGCCAssemblyNumInputs_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyNumInputs_ADDR, clang_Cursor_getGCCAssemblyNumInputs_DESC)
+private val clang_Cursor_getGCCAssemblyNumInputs_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getGCCAssemblyNumInputs") }
+private val clang_Cursor_getGCCAssemblyNumInputs_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyNumInputs_ADDR, clang_Cursor_getGCCAssemblyNumInputs_DESC) }
 
 fun clang_Cursor_getGCCAssemblyNumInputs(arg0: MemorySegment): Int {
     try {
@@ -13058,8 +13110,8 @@ fun clang_Cursor_getGCCAssemblyNumInputs(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getGCCAssemblyInput UNSIGNED = Int(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int,(typedef CXString = Declared(CXString))*,(typedef CXCursor = Declared(CXCursor))*)
  */
 private val clang_Cursor_getGCCAssemblyInput_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_Cursor_getGCCAssemblyInput_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getGCCAssemblyInput")
-private val clang_Cursor_getGCCAssemblyInput_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyInput_ADDR, clang_Cursor_getGCCAssemblyInput_DESC)
+private val clang_Cursor_getGCCAssemblyInput_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getGCCAssemblyInput") }
+private val clang_Cursor_getGCCAssemblyInput_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyInput_ADDR, clang_Cursor_getGCCAssemblyInput_DESC) }
 
 fun clang_Cursor_getGCCAssemblyInput(arg0: MemorySegment, arg1: Int, arg2: MemorySegment, arg3: MemorySegment): Int {
     try {
@@ -13077,8 +13129,8 @@ fun clang_Cursor_getGCCAssemblyInput(arg0: MemorySegment, arg1: Int, arg2: Memor
  * {@snippet lang=c : clang_Cursor_getGCCAssemblyOutput UNSIGNED = Int(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int,(typedef CXString = Declared(CXString))*,(typedef CXCursor = Declared(CXCursor))*)
  */
 private val clang_Cursor_getGCCAssemblyOutput_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_Cursor_getGCCAssemblyOutput_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getGCCAssemblyOutput")
-private val clang_Cursor_getGCCAssemblyOutput_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyOutput_ADDR, clang_Cursor_getGCCAssemblyOutput_DESC)
+private val clang_Cursor_getGCCAssemblyOutput_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getGCCAssemblyOutput") }
+private val clang_Cursor_getGCCAssemblyOutput_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyOutput_ADDR, clang_Cursor_getGCCAssemblyOutput_DESC) }
 
 fun clang_Cursor_getGCCAssemblyOutput(arg0: MemorySegment, arg1: Int, arg2: MemorySegment, arg3: MemorySegment): Int {
     try {
@@ -13096,8 +13148,8 @@ fun clang_Cursor_getGCCAssemblyOutput(arg0: MemorySegment, arg1: Int, arg2: Memo
  * {@snippet lang=c : clang_Cursor_getGCCAssemblyNumClobbers UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getGCCAssemblyNumClobbers_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_getGCCAssemblyNumClobbers_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getGCCAssemblyNumClobbers")
-private val clang_Cursor_getGCCAssemblyNumClobbers_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyNumClobbers_ADDR, clang_Cursor_getGCCAssemblyNumClobbers_DESC)
+private val clang_Cursor_getGCCAssemblyNumClobbers_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getGCCAssemblyNumClobbers") }
+private val clang_Cursor_getGCCAssemblyNumClobbers_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyNumClobbers_ADDR, clang_Cursor_getGCCAssemblyNumClobbers_DESC) }
 
 fun clang_Cursor_getGCCAssemblyNumClobbers(arg0: MemorySegment): Int {
     try {
@@ -13115,8 +13167,8 @@ fun clang_Cursor_getGCCAssemblyNumClobbers(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Cursor_getGCCAssemblyClobber typedef CXString = Declared(CXString)(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int)
  */
 private val clang_Cursor_getGCCAssemblyClobber_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, CXCursor.layout, ValueLayout.JAVA_INT)
-private val clang_Cursor_getGCCAssemblyClobber_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getGCCAssemblyClobber")
-private val clang_Cursor_getGCCAssemblyClobber_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyClobber_ADDR, clang_Cursor_getGCCAssemblyClobber_DESC)
+private val clang_Cursor_getGCCAssemblyClobber_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getGCCAssemblyClobber") }
+private val clang_Cursor_getGCCAssemblyClobber_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getGCCAssemblyClobber_ADDR, clang_Cursor_getGCCAssemblyClobber_DESC) }
 
 fun clang_Cursor_getGCCAssemblyClobber(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -13134,8 +13186,8 @@ fun clang_Cursor_getGCCAssemblyClobber(allocator: SegmentAllocator, arg0: Memory
  * {@snippet lang=c : clang_Cursor_isGCCAssemblyVolatile UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_isGCCAssemblyVolatile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_Cursor_isGCCAssemblyVolatile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_isGCCAssemblyVolatile")
-private val clang_Cursor_isGCCAssemblyVolatile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_isGCCAssemblyVolatile_ADDR, clang_Cursor_isGCCAssemblyVolatile_DESC)
+private val clang_Cursor_isGCCAssemblyVolatile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_isGCCAssemblyVolatile") }
+private val clang_Cursor_isGCCAssemblyVolatile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_isGCCAssemblyVolatile_ADDR, clang_Cursor_isGCCAssemblyVolatile_DESC) }
 
 fun clang_Cursor_isGCCAssemblyVolatile(arg0: MemorySegment): Int {
     try {
@@ -13158,8 +13210,8 @@ typealias CXModule = MemorySegment?
  * {@snippet lang=c : clang_Cursor_getModule typedef CXModule = (Void)*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_getModule_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_Cursor_getModule_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_getModule")
-private val clang_Cursor_getModule_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_getModule_ADDR, clang_Cursor_getModule_DESC)
+private val clang_Cursor_getModule_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_getModule") }
+private val clang_Cursor_getModule_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_getModule_ADDR, clang_Cursor_getModule_DESC) }
 
 fun clang_Cursor_getModule(arg0: MemorySegment): MemorySegment {
     try {
@@ -13177,8 +13229,8 @@ fun clang_Cursor_getModule(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_getModuleForFile typedef CXModule = (Void)*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*)
  */
 private val clang_getModuleForFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getModuleForFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getModuleForFile")
-private val clang_getModuleForFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getModuleForFile_ADDR, clang_getModuleForFile_DESC)
+private val clang_getModuleForFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getModuleForFile") }
+private val clang_getModuleForFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getModuleForFile_ADDR, clang_getModuleForFile_DESC) }
 
 fun clang_getModuleForFile(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -13196,8 +13248,8 @@ fun clang_getModuleForFile(arg0: MemorySegment, arg1: MemorySegment): MemorySegm
  * {@snippet lang=c : clang_Module_getASTFile typedef CXFile = (Void)*(typedef CXModule = (Void)*)
  */
 private val clang_Module_getASTFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_Module_getASTFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Module_getASTFile")
-private val clang_Module_getASTFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Module_getASTFile_ADDR, clang_Module_getASTFile_DESC)
+private val clang_Module_getASTFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Module_getASTFile") }
+private val clang_Module_getASTFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Module_getASTFile_ADDR, clang_Module_getASTFile_DESC) }
 
 fun clang_Module_getASTFile(arg0: MemorySegment): MemorySegment {
     try {
@@ -13215,8 +13267,8 @@ fun clang_Module_getASTFile(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_Module_getParent typedef CXModule = (Void)*(typedef CXModule = (Void)*)
  */
 private val clang_Module_getParent_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_Module_getParent_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Module_getParent")
-private val clang_Module_getParent_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Module_getParent_ADDR, clang_Module_getParent_DESC)
+private val clang_Module_getParent_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Module_getParent") }
+private val clang_Module_getParent_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Module_getParent_ADDR, clang_Module_getParent_DESC) }
 
 fun clang_Module_getParent(arg0: MemorySegment): MemorySegment {
     try {
@@ -13234,8 +13286,8 @@ fun clang_Module_getParent(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_Module_getName typedef CXString = Declared(CXString)(typedef CXModule = (Void)*)
  */
 private val clang_Module_getName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_Module_getName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Module_getName")
-private val clang_Module_getName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Module_getName_ADDR, clang_Module_getName_DESC)
+private val clang_Module_getName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Module_getName") }
+private val clang_Module_getName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Module_getName_ADDR, clang_Module_getName_DESC) }
 
 fun clang_Module_getName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -13253,8 +13305,8 @@ fun clang_Module_getName(allocator: SegmentAllocator, arg0: MemorySegment): Memo
  * {@snippet lang=c : clang_Module_getFullName typedef CXString = Declared(CXString)(typedef CXModule = (Void)*)
  */
 private val clang_Module_getFullName_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_Module_getFullName_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Module_getFullName")
-private val clang_Module_getFullName_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Module_getFullName_ADDR, clang_Module_getFullName_DESC)
+private val clang_Module_getFullName_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Module_getFullName") }
+private val clang_Module_getFullName_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Module_getFullName_ADDR, clang_Module_getFullName_DESC) }
 
 fun clang_Module_getFullName(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -13272,8 +13324,8 @@ fun clang_Module_getFullName(allocator: SegmentAllocator, arg0: MemorySegment): 
  * {@snippet lang=c : clang_Module_isSystem Int(typedef CXModule = (Void)*)
  */
 private val clang_Module_isSystem_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_Module_isSystem_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Module_isSystem")
-private val clang_Module_isSystem_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Module_isSystem_ADDR, clang_Module_isSystem_DESC)
+private val clang_Module_isSystem_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Module_isSystem") }
+private val clang_Module_isSystem_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Module_isSystem_ADDR, clang_Module_isSystem_DESC) }
 
 fun clang_Module_isSystem(arg0: MemorySegment): Int {
     try {
@@ -13291,8 +13343,8 @@ fun clang_Module_isSystem(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_Module_getNumTopLevelHeaders UNSIGNED = Int(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXModule = (Void)*)
  */
 private val clang_Module_getNumTopLevelHeaders_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_Module_getNumTopLevelHeaders_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Module_getNumTopLevelHeaders")
-private val clang_Module_getNumTopLevelHeaders_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Module_getNumTopLevelHeaders_ADDR, clang_Module_getNumTopLevelHeaders_DESC)
+private val clang_Module_getNumTopLevelHeaders_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Module_getNumTopLevelHeaders") }
+private val clang_Module_getNumTopLevelHeaders_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Module_getNumTopLevelHeaders_ADDR, clang_Module_getNumTopLevelHeaders_DESC) }
 
 fun clang_Module_getNumTopLevelHeaders(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -13310,8 +13362,8 @@ fun clang_Module_getNumTopLevelHeaders(arg0: MemorySegment, arg1: MemorySegment)
  * {@snippet lang=c : clang_Module_getTopLevelHeader typedef CXFile = (Void)*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXModule = (Void)*,UNSIGNED = Int)
  */
 private val clang_Module_getTopLevelHeader_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_Module_getTopLevelHeader_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Module_getTopLevelHeader")
-private val clang_Module_getTopLevelHeader_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Module_getTopLevelHeader_ADDR, clang_Module_getTopLevelHeader_DESC)
+private val clang_Module_getTopLevelHeader_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Module_getTopLevelHeader") }
+private val clang_Module_getTopLevelHeader_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Module_getTopLevelHeader_ADDR, clang_Module_getTopLevelHeader_DESC) }
 
 fun clang_Module_getTopLevelHeader(arg0: MemorySegment, arg1: MemorySegment, arg2: Int): MemorySegment {
     try {
@@ -13329,8 +13381,8 @@ fun clang_Module_getTopLevelHeader(arg0: MemorySegment, arg1: MemorySegment, arg
  * {@snippet lang=c : clang_CXXConstructor_isConvertingConstructor UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXConstructor_isConvertingConstructor_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXConstructor_isConvertingConstructor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXConstructor_isConvertingConstructor")
-private val clang_CXXConstructor_isConvertingConstructor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isConvertingConstructor_ADDR, clang_CXXConstructor_isConvertingConstructor_DESC)
+private val clang_CXXConstructor_isConvertingConstructor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXConstructor_isConvertingConstructor") }
+private val clang_CXXConstructor_isConvertingConstructor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isConvertingConstructor_ADDR, clang_CXXConstructor_isConvertingConstructor_DESC) }
 
 fun clang_CXXConstructor_isConvertingConstructor(arg0: MemorySegment): Int {
     try {
@@ -13348,8 +13400,8 @@ fun clang_CXXConstructor_isConvertingConstructor(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXConstructor_isCopyConstructor UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXConstructor_isCopyConstructor_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXConstructor_isCopyConstructor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXConstructor_isCopyConstructor")
-private val clang_CXXConstructor_isCopyConstructor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isCopyConstructor_ADDR, clang_CXXConstructor_isCopyConstructor_DESC)
+private val clang_CXXConstructor_isCopyConstructor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXConstructor_isCopyConstructor") }
+private val clang_CXXConstructor_isCopyConstructor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isCopyConstructor_ADDR, clang_CXXConstructor_isCopyConstructor_DESC) }
 
 fun clang_CXXConstructor_isCopyConstructor(arg0: MemorySegment): Int {
     try {
@@ -13367,8 +13419,8 @@ fun clang_CXXConstructor_isCopyConstructor(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXConstructor_isDefaultConstructor UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXConstructor_isDefaultConstructor_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXConstructor_isDefaultConstructor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXConstructor_isDefaultConstructor")
-private val clang_CXXConstructor_isDefaultConstructor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isDefaultConstructor_ADDR, clang_CXXConstructor_isDefaultConstructor_DESC)
+private val clang_CXXConstructor_isDefaultConstructor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXConstructor_isDefaultConstructor") }
+private val clang_CXXConstructor_isDefaultConstructor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isDefaultConstructor_ADDR, clang_CXXConstructor_isDefaultConstructor_DESC) }
 
 fun clang_CXXConstructor_isDefaultConstructor(arg0: MemorySegment): Int {
     try {
@@ -13386,8 +13438,8 @@ fun clang_CXXConstructor_isDefaultConstructor(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXConstructor_isMoveConstructor UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXConstructor_isMoveConstructor_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXConstructor_isMoveConstructor_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXConstructor_isMoveConstructor")
-private val clang_CXXConstructor_isMoveConstructor_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isMoveConstructor_ADDR, clang_CXXConstructor_isMoveConstructor_DESC)
+private val clang_CXXConstructor_isMoveConstructor_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXConstructor_isMoveConstructor") }
+private val clang_CXXConstructor_isMoveConstructor_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXConstructor_isMoveConstructor_ADDR, clang_CXXConstructor_isMoveConstructor_DESC) }
 
 fun clang_CXXConstructor_isMoveConstructor(arg0: MemorySegment): Int {
     try {
@@ -13405,8 +13457,8 @@ fun clang_CXXConstructor_isMoveConstructor(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXField_isMutable UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXField_isMutable_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXField_isMutable_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXField_isMutable")
-private val clang_CXXField_isMutable_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXField_isMutable_ADDR, clang_CXXField_isMutable_DESC)
+private val clang_CXXField_isMutable_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXField_isMutable") }
+private val clang_CXXField_isMutable_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXField_isMutable_ADDR, clang_CXXField_isMutable_DESC) }
 
 fun clang_CXXField_isMutable(arg0: MemorySegment): Int {
     try {
@@ -13424,8 +13476,8 @@ fun clang_CXXField_isMutable(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isDefaulted UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isDefaulted_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isDefaulted_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isDefaulted")
-private val clang_CXXMethod_isDefaulted_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isDefaulted_ADDR, clang_CXXMethod_isDefaulted_DESC)
+private val clang_CXXMethod_isDefaulted_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isDefaulted") }
+private val clang_CXXMethod_isDefaulted_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isDefaulted_ADDR, clang_CXXMethod_isDefaulted_DESC) }
 
 fun clang_CXXMethod_isDefaulted(arg0: MemorySegment): Int {
     try {
@@ -13443,8 +13495,8 @@ fun clang_CXXMethod_isDefaulted(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isDeleted UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isDeleted_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isDeleted_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isDeleted")
-private val clang_CXXMethod_isDeleted_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isDeleted_ADDR, clang_CXXMethod_isDeleted_DESC)
+private val clang_CXXMethod_isDeleted_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isDeleted") }
+private val clang_CXXMethod_isDeleted_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isDeleted_ADDR, clang_CXXMethod_isDeleted_DESC) }
 
 fun clang_CXXMethod_isDeleted(arg0: MemorySegment): Int {
     try {
@@ -13462,8 +13514,8 @@ fun clang_CXXMethod_isDeleted(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isPureVirtual UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isPureVirtual_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isPureVirtual_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isPureVirtual")
-private val clang_CXXMethod_isPureVirtual_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isPureVirtual_ADDR, clang_CXXMethod_isPureVirtual_DESC)
+private val clang_CXXMethod_isPureVirtual_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isPureVirtual") }
+private val clang_CXXMethod_isPureVirtual_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isPureVirtual_ADDR, clang_CXXMethod_isPureVirtual_DESC) }
 
 fun clang_CXXMethod_isPureVirtual(arg0: MemorySegment): Int {
     try {
@@ -13481,8 +13533,8 @@ fun clang_CXXMethod_isPureVirtual(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isStatic UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isStatic_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isStatic_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isStatic")
-private val clang_CXXMethod_isStatic_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isStatic_ADDR, clang_CXXMethod_isStatic_DESC)
+private val clang_CXXMethod_isStatic_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isStatic") }
+private val clang_CXXMethod_isStatic_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isStatic_ADDR, clang_CXXMethod_isStatic_DESC) }
 
 fun clang_CXXMethod_isStatic(arg0: MemorySegment): Int {
     try {
@@ -13500,8 +13552,8 @@ fun clang_CXXMethod_isStatic(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isVirtual UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isVirtual_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isVirtual_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isVirtual")
-private val clang_CXXMethod_isVirtual_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isVirtual_ADDR, clang_CXXMethod_isVirtual_DESC)
+private val clang_CXXMethod_isVirtual_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isVirtual") }
+private val clang_CXXMethod_isVirtual_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isVirtual_ADDR, clang_CXXMethod_isVirtual_DESC) }
 
 fun clang_CXXMethod_isVirtual(arg0: MemorySegment): Int {
     try {
@@ -13519,8 +13571,8 @@ fun clang_CXXMethod_isVirtual(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isCopyAssignmentOperator UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isCopyAssignmentOperator_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isCopyAssignmentOperator_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isCopyAssignmentOperator")
-private val clang_CXXMethod_isCopyAssignmentOperator_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isCopyAssignmentOperator_ADDR, clang_CXXMethod_isCopyAssignmentOperator_DESC)
+private val clang_CXXMethod_isCopyAssignmentOperator_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isCopyAssignmentOperator") }
+private val clang_CXXMethod_isCopyAssignmentOperator_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isCopyAssignmentOperator_ADDR, clang_CXXMethod_isCopyAssignmentOperator_DESC) }
 
 fun clang_CXXMethod_isCopyAssignmentOperator(arg0: MemorySegment): Int {
     try {
@@ -13538,8 +13590,8 @@ fun clang_CXXMethod_isCopyAssignmentOperator(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isMoveAssignmentOperator UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isMoveAssignmentOperator_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isMoveAssignmentOperator_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isMoveAssignmentOperator")
-private val clang_CXXMethod_isMoveAssignmentOperator_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isMoveAssignmentOperator_ADDR, clang_CXXMethod_isMoveAssignmentOperator_DESC)
+private val clang_CXXMethod_isMoveAssignmentOperator_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isMoveAssignmentOperator") }
+private val clang_CXXMethod_isMoveAssignmentOperator_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isMoveAssignmentOperator_ADDR, clang_CXXMethod_isMoveAssignmentOperator_DESC) }
 
 fun clang_CXXMethod_isMoveAssignmentOperator(arg0: MemorySegment): Int {
     try {
@@ -13557,8 +13609,8 @@ fun clang_CXXMethod_isMoveAssignmentOperator(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isExplicit UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isExplicit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isExplicit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isExplicit")
-private val clang_CXXMethod_isExplicit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isExplicit_ADDR, clang_CXXMethod_isExplicit_DESC)
+private val clang_CXXMethod_isExplicit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isExplicit") }
+private val clang_CXXMethod_isExplicit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isExplicit_ADDR, clang_CXXMethod_isExplicit_DESC) }
 
 fun clang_CXXMethod_isExplicit(arg0: MemorySegment): Int {
     try {
@@ -13576,8 +13628,8 @@ fun clang_CXXMethod_isExplicit(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXRecord_isAbstract UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXRecord_isAbstract_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXRecord_isAbstract_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXRecord_isAbstract")
-private val clang_CXXRecord_isAbstract_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXRecord_isAbstract_ADDR, clang_CXXRecord_isAbstract_DESC)
+private val clang_CXXRecord_isAbstract_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXRecord_isAbstract") }
+private val clang_CXXRecord_isAbstract_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXRecord_isAbstract_ADDR, clang_CXXRecord_isAbstract_DESC) }
 
 fun clang_CXXRecord_isAbstract(arg0: MemorySegment): Int {
     try {
@@ -13595,8 +13647,8 @@ fun clang_CXXRecord_isAbstract(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_EnumDecl_isScoped UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_EnumDecl_isScoped_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_EnumDecl_isScoped_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EnumDecl_isScoped")
-private val clang_EnumDecl_isScoped_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EnumDecl_isScoped_ADDR, clang_EnumDecl_isScoped_DESC)
+private val clang_EnumDecl_isScoped_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EnumDecl_isScoped") }
+private val clang_EnumDecl_isScoped_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EnumDecl_isScoped_ADDR, clang_EnumDecl_isScoped_DESC) }
 
 fun clang_EnumDecl_isScoped(arg0: MemorySegment): Int {
     try {
@@ -13614,8 +13666,8 @@ fun clang_EnumDecl_isScoped(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_CXXMethod_isConst UNSIGNED = Int(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_CXXMethod_isConst_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_CXXMethod_isConst_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_CXXMethod_isConst")
-private val clang_CXXMethod_isConst_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_CXXMethod_isConst_ADDR, clang_CXXMethod_isConst_DESC)
+private val clang_CXXMethod_isConst_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_CXXMethod_isConst") }
+private val clang_CXXMethod_isConst_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_CXXMethod_isConst_ADDR, clang_CXXMethod_isConst_DESC) }
 
 fun clang_CXXMethod_isConst(arg0: MemorySegment): Int {
     try {
@@ -13633,8 +13685,8 @@ fun clang_CXXMethod_isConst(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getTemplateCursorKind Declared(CXCursorKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getTemplateCursorKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getTemplateCursorKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTemplateCursorKind")
-private val clang_getTemplateCursorKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTemplateCursorKind_ADDR, clang_getTemplateCursorKind_DESC)
+private val clang_getTemplateCursorKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTemplateCursorKind") }
+private val clang_getTemplateCursorKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTemplateCursorKind_ADDR, clang_getTemplateCursorKind_DESC) }
 
 fun clang_getTemplateCursorKind(arg0: MemorySegment): Int {
     try {
@@ -13652,8 +13704,8 @@ fun clang_getTemplateCursorKind(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getSpecializedCursorTemplate typedef CXCursor = Declared(CXCursor)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getSpecializedCursorTemplate_DESC: FunctionDescriptor = FunctionDescriptor.of(CXCursor.layout, CXCursor.layout)
-private val clang_getSpecializedCursorTemplate_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getSpecializedCursorTemplate")
-private val clang_getSpecializedCursorTemplate_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getSpecializedCursorTemplate_ADDR, clang_getSpecializedCursorTemplate_DESC)
+private val clang_getSpecializedCursorTemplate_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getSpecializedCursorTemplate") }
+private val clang_getSpecializedCursorTemplate_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getSpecializedCursorTemplate_ADDR, clang_getSpecializedCursorTemplate_DESC) }
 
 fun clang_getSpecializedCursorTemplate(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -13671,8 +13723,8 @@ fun clang_getSpecializedCursorTemplate(allocator: SegmentAllocator, arg0: Memory
  * {@snippet lang=c : clang_getCursorReferenceNameRange typedef CXSourceRange = Declared(CXSourceRange)(typedef CXCursor = Declared(CXCursor),UNSIGNED = Int,UNSIGNED = Int)
  */
 private val clang_getCursorReferenceNameRange_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout, CXCursor.layout, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_getCursorReferenceNameRange_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorReferenceNameRange")
-private val clang_getCursorReferenceNameRange_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorReferenceNameRange_ADDR, clang_getCursorReferenceNameRange_DESC)
+private val clang_getCursorReferenceNameRange_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorReferenceNameRange") }
+private val clang_getCursorReferenceNameRange_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorReferenceNameRange_ADDR, clang_getCursorReferenceNameRange_DESC) }
 
 fun clang_getCursorReferenceNameRange(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int, arg2: Int): MemorySegment {
     try {
@@ -13773,8 +13825,8 @@ class CXToken {
  * {@snippet lang=c : clang_getToken (typedef CXToken = Declared(CXToken))*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXSourceLocation = Declared(CXSourceLocation))
  */
 private val clang_getToken_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, CXSourceLocation.layout)
-private val clang_getToken_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getToken")
-private val clang_getToken_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getToken_ADDR, clang_getToken_DESC)
+private val clang_getToken_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getToken") }
+private val clang_getToken_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getToken_ADDR, clang_getToken_DESC) }
 
 fun clang_getToken(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -13792,8 +13844,8 @@ fun clang_getToken(arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_getTokenKind typedef CXTokenKind = Declared(CXTokenKind)(typedef CXToken = Declared(CXToken))
  */
 private val clang_getTokenKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXToken.layout)
-private val clang_getTokenKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTokenKind")
-private val clang_getTokenKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTokenKind_ADDR, clang_getTokenKind_DESC)
+private val clang_getTokenKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTokenKind") }
+private val clang_getTokenKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTokenKind_ADDR, clang_getTokenKind_DESC) }
 
 fun clang_getTokenKind(arg0: MemorySegment): Int {
     try {
@@ -13811,8 +13863,8 @@ fun clang_getTokenKind(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getTokenSpelling typedef CXString = Declared(CXString)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXToken = Declared(CXToken))
  */
 private val clang_getTokenSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, CXToken.layout)
-private val clang_getTokenSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTokenSpelling")
-private val clang_getTokenSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTokenSpelling_ADDR, clang_getTokenSpelling_DESC)
+private val clang_getTokenSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTokenSpelling") }
+private val clang_getTokenSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTokenSpelling_ADDR, clang_getTokenSpelling_DESC) }
 
 fun clang_getTokenSpelling(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -13830,8 +13882,8 @@ fun clang_getTokenSpelling(allocator: SegmentAllocator, arg0: MemorySegment, arg
  * {@snippet lang=c : clang_getTokenLocation typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXToken = Declared(CXToken))
  */
 private val clang_getTokenLocation_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, ValueLayout.ADDRESS, CXToken.layout)
-private val clang_getTokenLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTokenLocation")
-private val clang_getTokenLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTokenLocation_ADDR, clang_getTokenLocation_DESC)
+private val clang_getTokenLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTokenLocation") }
+private val clang_getTokenLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTokenLocation_ADDR, clang_getTokenLocation_DESC) }
 
 fun clang_getTokenLocation(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -13849,8 +13901,8 @@ fun clang_getTokenLocation(allocator: SegmentAllocator, arg0: MemorySegment, arg
  * {@snippet lang=c : clang_getTokenExtent typedef CXSourceRange = Declared(CXSourceRange)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXToken = Declared(CXToken))
  */
 private val clang_getTokenExtent_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceRange.layout, ValueLayout.ADDRESS, CXToken.layout)
-private val clang_getTokenExtent_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getTokenExtent")
-private val clang_getTokenExtent_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getTokenExtent_ADDR, clang_getTokenExtent_DESC)
+private val clang_getTokenExtent_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getTokenExtent") }
+private val clang_getTokenExtent_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getTokenExtent_ADDR, clang_getTokenExtent_DESC) }
 
 fun clang_getTokenExtent(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -13868,8 +13920,8 @@ fun clang_getTokenExtent(allocator: SegmentAllocator, arg0: MemorySegment, arg1:
  * {@snippet lang=c : clang_tokenize Void(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXSourceRange = Declared(CXSourceRange),((typedef CXToken = Declared(CXToken))*)*,(UNSIGNED = Int)*)
  */
 private val clang_tokenize_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, CXSourceRange.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_tokenize_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_tokenize")
-private val clang_tokenize_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_tokenize_ADDR, clang_tokenize_DESC)
+private val clang_tokenize_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_tokenize") }
+private val clang_tokenize_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_tokenize_ADDR, clang_tokenize_DESC) }
 
 fun clang_tokenize(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment): Unit {
     try {
@@ -13887,8 +13939,8 @@ fun clang_tokenize(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment
  * {@snippet lang=c : clang_annotateTokens Void(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,(typedef CXToken = Declared(CXToken))*,UNSIGNED = Int,(typedef CXCursor = Declared(CXCursor))*)
  */
 private val clang_annotateTokens_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_annotateTokens_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_annotateTokens")
-private val clang_annotateTokens_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_annotateTokens_ADDR, clang_annotateTokens_DESC)
+private val clang_annotateTokens_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_annotateTokens") }
+private val clang_annotateTokens_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_annotateTokens_ADDR, clang_annotateTokens_DESC) }
 
 fun clang_annotateTokens(arg0: MemorySegment, arg1: MemorySegment, arg2: Int, arg3: MemorySegment): Unit {
     try {
@@ -13906,8 +13958,8 @@ fun clang_annotateTokens(arg0: MemorySegment, arg1: MemorySegment, arg2: Int, ar
  * {@snippet lang=c : clang_disposeTokens Void(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,(typedef CXToken = Declared(CXToken))*,UNSIGNED = Int)
  */
 private val clang_disposeTokens_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_disposeTokens_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeTokens")
-private val clang_disposeTokens_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeTokens_ADDR, clang_disposeTokens_DESC)
+private val clang_disposeTokens_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeTokens") }
+private val clang_disposeTokens_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeTokens_ADDR, clang_disposeTokens_DESC) }
 
 fun clang_disposeTokens(arg0: MemorySegment, arg1: MemorySegment, arg2: Int): Unit {
     try {
@@ -13925,8 +13977,8 @@ fun clang_disposeTokens(arg0: MemorySegment, arg1: MemorySegment, arg2: Int): Un
  * {@snippet lang=c : clang_getCursorKindSpelling typedef CXString = Declared(CXString)(Declared(CXCursorKind))
  */
 private val clang_getCursorKindSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.JAVA_INT)
-private val clang_getCursorKindSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorKindSpelling")
-private val clang_getCursorKindSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorKindSpelling_ADDR, clang_getCursorKindSpelling_DESC)
+private val clang_getCursorKindSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorKindSpelling") }
+private val clang_getCursorKindSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorKindSpelling_ADDR, clang_getCursorKindSpelling_DESC) }
 
 fun clang_getCursorKindSpelling(allocator: SegmentAllocator, arg0: Int): MemorySegment {
     try {
@@ -13944,8 +13996,8 @@ fun clang_getCursorKindSpelling(allocator: SegmentAllocator, arg0: Int): MemoryS
  * {@snippet lang=c : clang_getDefinitionSpellingAndExtent Void(typedef CXCursor = Declared(CXCursor),((Char)*)*,((Char)*)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*)
  */
 private val clang_getDefinitionSpellingAndExtent_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXCursor.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getDefinitionSpellingAndExtent_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getDefinitionSpellingAndExtent")
-private val clang_getDefinitionSpellingAndExtent_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getDefinitionSpellingAndExtent_ADDR, clang_getDefinitionSpellingAndExtent_DESC)
+private val clang_getDefinitionSpellingAndExtent_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getDefinitionSpellingAndExtent") }
+private val clang_getDefinitionSpellingAndExtent_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getDefinitionSpellingAndExtent_ADDR, clang_getDefinitionSpellingAndExtent_DESC) }
 
 fun clang_getDefinitionSpellingAndExtent(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment, arg5: MemorySegment, arg6: MemorySegment): Unit {
     try {
@@ -13963,8 +14015,8 @@ fun clang_getDefinitionSpellingAndExtent(arg0: MemorySegment, arg1: MemorySegmen
  * {@snippet lang=c : clang_enableStackTraces Void()
  */
 private val clang_enableStackTraces_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid()
-private val clang_enableStackTraces_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_enableStackTraces")
-private val clang_enableStackTraces_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_enableStackTraces_ADDR, clang_enableStackTraces_DESC)
+private val clang_enableStackTraces_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_enableStackTraces") }
+private val clang_enableStackTraces_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_enableStackTraces_ADDR, clang_enableStackTraces_DESC) }
 
 fun clang_enableStackTraces(): Unit {
     try {
@@ -13982,8 +14034,8 @@ fun clang_enableStackTraces(): Unit {
  * {@snippet lang=c : clang_executeOnThread Void((Void((Void)*))*,(Void)*,UNSIGNED = Int)
  */
 private val clang_executeOnThread_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_executeOnThread_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_executeOnThread")
-private val clang_executeOnThread_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_executeOnThread_ADDR, clang_executeOnThread_DESC)
+private val clang_executeOnThread_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_executeOnThread") }
+private val clang_executeOnThread_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_executeOnThread_ADDR, clang_executeOnThread_DESC) }
 
 fun clang_executeOnThread(arg0: MemorySegment, arg1: MemorySegment, arg2: Int): Unit {
     try {
@@ -14160,8 +14212,8 @@ fun CXCompletionChunk_VerticalSpace(): Int = 20
  * {@snippet lang=c : clang_getCompletionChunkKind Declared(CXCompletionChunkKind)(typedef CXCompletionString = (Void)*,UNSIGNED = Int)
  */
 private val clang_getCompletionChunkKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getCompletionChunkKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionChunkKind")
-private val clang_getCompletionChunkKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionChunkKind_ADDR, clang_getCompletionChunkKind_DESC)
+private val clang_getCompletionChunkKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionChunkKind") }
+private val clang_getCompletionChunkKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionChunkKind_ADDR, clang_getCompletionChunkKind_DESC) }
 
 fun clang_getCompletionChunkKind(arg0: MemorySegment, arg1: Int): Int {
     try {
@@ -14179,8 +14231,8 @@ fun clang_getCompletionChunkKind(arg0: MemorySegment, arg1: Int): Int {
  * {@snippet lang=c : clang_getCompletionChunkText typedef CXString = Declared(CXString)(typedef CXCompletionString = (Void)*,UNSIGNED = Int)
  */
 private val clang_getCompletionChunkText_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getCompletionChunkText_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionChunkText")
-private val clang_getCompletionChunkText_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionChunkText_ADDR, clang_getCompletionChunkText_DESC)
+private val clang_getCompletionChunkText_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionChunkText") }
+private val clang_getCompletionChunkText_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionChunkText_ADDR, clang_getCompletionChunkText_DESC) }
 
 fun clang_getCompletionChunkText(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -14198,8 +14250,8 @@ fun clang_getCompletionChunkText(allocator: SegmentAllocator, arg0: MemorySegmen
  * {@snippet lang=c : clang_getCompletionChunkCompletionString typedef CXCompletionString = (Void)*(typedef CXCompletionString = (Void)*,UNSIGNED = Int)
  */
 private val clang_getCompletionChunkCompletionString_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getCompletionChunkCompletionString_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionChunkCompletionString")
-private val clang_getCompletionChunkCompletionString_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionChunkCompletionString_ADDR, clang_getCompletionChunkCompletionString_DESC)
+private val clang_getCompletionChunkCompletionString_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionChunkCompletionString") }
+private val clang_getCompletionChunkCompletionString_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionChunkCompletionString_ADDR, clang_getCompletionChunkCompletionString_DESC) }
 
 fun clang_getCompletionChunkCompletionString(arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -14217,8 +14269,8 @@ fun clang_getCompletionChunkCompletionString(arg0: MemorySegment, arg1: Int): Me
  * {@snippet lang=c : clang_getNumCompletionChunks UNSIGNED = Int(typedef CXCompletionString = (Void)*)
  */
 private val clang_getNumCompletionChunks_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getNumCompletionChunks_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getNumCompletionChunks")
-private val clang_getNumCompletionChunks_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getNumCompletionChunks_ADDR, clang_getNumCompletionChunks_DESC)
+private val clang_getNumCompletionChunks_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getNumCompletionChunks") }
+private val clang_getNumCompletionChunks_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getNumCompletionChunks_ADDR, clang_getNumCompletionChunks_DESC) }
 
 fun clang_getNumCompletionChunks(arg0: MemorySegment): Int {
     try {
@@ -14236,8 +14288,8 @@ fun clang_getNumCompletionChunks(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCompletionPriority UNSIGNED = Int(typedef CXCompletionString = (Void)*)
  */
 private val clang_getCompletionPriority_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getCompletionPriority_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionPriority")
-private val clang_getCompletionPriority_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionPriority_ADDR, clang_getCompletionPriority_DESC)
+private val clang_getCompletionPriority_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionPriority") }
+private val clang_getCompletionPriority_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionPriority_ADDR, clang_getCompletionPriority_DESC) }
 
 fun clang_getCompletionPriority(arg0: MemorySegment): Int {
     try {
@@ -14255,8 +14307,8 @@ fun clang_getCompletionPriority(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCompletionAvailability Declared(CXAvailabilityKind)(typedef CXCompletionString = (Void)*)
  */
 private val clang_getCompletionAvailability_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getCompletionAvailability_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionAvailability")
-private val clang_getCompletionAvailability_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionAvailability_ADDR, clang_getCompletionAvailability_DESC)
+private val clang_getCompletionAvailability_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionAvailability") }
+private val clang_getCompletionAvailability_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionAvailability_ADDR, clang_getCompletionAvailability_DESC) }
 
 fun clang_getCompletionAvailability(arg0: MemorySegment): Int {
     try {
@@ -14274,8 +14326,8 @@ fun clang_getCompletionAvailability(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCompletionNumAnnotations UNSIGNED = Int(typedef CXCompletionString = (Void)*)
  */
 private val clang_getCompletionNumAnnotations_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getCompletionNumAnnotations_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionNumAnnotations")
-private val clang_getCompletionNumAnnotations_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionNumAnnotations_ADDR, clang_getCompletionNumAnnotations_DESC)
+private val clang_getCompletionNumAnnotations_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionNumAnnotations") }
+private val clang_getCompletionNumAnnotations_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionNumAnnotations_ADDR, clang_getCompletionNumAnnotations_DESC) }
 
 fun clang_getCompletionNumAnnotations(arg0: MemorySegment): Int {
     try {
@@ -14293,8 +14345,8 @@ fun clang_getCompletionNumAnnotations(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_getCompletionAnnotation typedef CXString = Declared(CXString)(typedef CXCompletionString = (Void)*,UNSIGNED = Int)
  */
 private val clang_getCompletionAnnotation_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getCompletionAnnotation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionAnnotation")
-private val clang_getCompletionAnnotation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionAnnotation_ADDR, clang_getCompletionAnnotation_DESC)
+private val clang_getCompletionAnnotation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionAnnotation") }
+private val clang_getCompletionAnnotation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionAnnotation_ADDR, clang_getCompletionAnnotation_DESC) }
 
 fun clang_getCompletionAnnotation(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -14312,8 +14364,8 @@ fun clang_getCompletionAnnotation(allocator: SegmentAllocator, arg0: MemorySegme
  * {@snippet lang=c : clang_getCompletionParent typedef CXString = Declared(CXString)(typedef CXCompletionString = (Void)*,(Declared(CXCursorKind))*)
  */
 private val clang_getCompletionParent_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getCompletionParent_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionParent")
-private val clang_getCompletionParent_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionParent_ADDR, clang_getCompletionParent_DESC)
+private val clang_getCompletionParent_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionParent") }
+private val clang_getCompletionParent_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionParent_ADDR, clang_getCompletionParent_DESC) }
 
 fun clang_getCompletionParent(allocator: SegmentAllocator, arg0: MemorySegment, arg1: MemorySegment): MemorySegment {
     try {
@@ -14331,8 +14383,8 @@ fun clang_getCompletionParent(allocator: SegmentAllocator, arg0: MemorySegment, 
  * {@snippet lang=c : clang_getCompletionBriefComment typedef CXString = Declared(CXString)(typedef CXCompletionString = (Void)*)
  */
 private val clang_getCompletionBriefComment_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_getCompletionBriefComment_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionBriefComment")
-private val clang_getCompletionBriefComment_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionBriefComment_ADDR, clang_getCompletionBriefComment_DESC)
+private val clang_getCompletionBriefComment_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionBriefComment") }
+private val clang_getCompletionBriefComment_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionBriefComment_ADDR, clang_getCompletionBriefComment_DESC) }
 
 fun clang_getCompletionBriefComment(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -14350,8 +14402,8 @@ fun clang_getCompletionBriefComment(allocator: SegmentAllocator, arg0: MemorySeg
  * {@snippet lang=c : clang_getCursorCompletionString typedef CXCompletionString = (Void)*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorCompletionString_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_getCursorCompletionString_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorCompletionString")
-private val clang_getCursorCompletionString_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorCompletionString_ADDR, clang_getCursorCompletionString_DESC)
+private val clang_getCursorCompletionString_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorCompletionString") }
+private val clang_getCursorCompletionString_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorCompletionString_ADDR, clang_getCursorCompletionString_DESC) }
 
 fun clang_getCursorCompletionString(arg0: MemorySegment): MemorySegment {
     try {
@@ -14418,8 +14470,8 @@ class CXCodeCompleteResults {
  * {@snippet lang=c : clang_getCompletionNumFixIts UNSIGNED = Int((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*,UNSIGNED = Int)
  */
 private val clang_getCompletionNumFixIts_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getCompletionNumFixIts_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionNumFixIts")
-private val clang_getCompletionNumFixIts_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionNumFixIts_ADDR, clang_getCompletionNumFixIts_DESC)
+private val clang_getCompletionNumFixIts_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionNumFixIts") }
+private val clang_getCompletionNumFixIts_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionNumFixIts_ADDR, clang_getCompletionNumFixIts_DESC) }
 
 fun clang_getCompletionNumFixIts(arg0: MemorySegment, arg1: Int): Int {
     try {
@@ -14437,8 +14489,8 @@ fun clang_getCompletionNumFixIts(arg0: MemorySegment, arg1: Int): Int {
  * {@snippet lang=c : clang_getCompletionFixIt typedef CXString = Declared(CXString)((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*,UNSIGNED = Int,UNSIGNED = Int,(typedef CXSourceRange = Declared(CXSourceRange))*)
  */
 private val clang_getCompletionFixIt_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_getCompletionFixIt_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCompletionFixIt")
-private val clang_getCompletionFixIt_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCompletionFixIt_ADDR, clang_getCompletionFixIt_DESC)
+private val clang_getCompletionFixIt_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCompletionFixIt") }
+private val clang_getCompletionFixIt_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCompletionFixIt_ADDR, clang_getCompletionFixIt_DESC) }
 
 fun clang_getCompletionFixIt(allocator: SegmentAllocator, arg0: MemorySegment, arg1: Int, arg2: Int, arg3: MemorySegment): MemorySegment {
     try {
@@ -14606,8 +14658,8 @@ fun CXCompletionContext_Unknown(): Int = 8388607
  * {@snippet lang=c : clang_defaultCodeCompleteOptions UNSIGNED = Int()
  */
 private val clang_defaultCodeCompleteOptions_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT)
-private val clang_defaultCodeCompleteOptions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_defaultCodeCompleteOptions")
-private val clang_defaultCodeCompleteOptions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_defaultCodeCompleteOptions_ADDR, clang_defaultCodeCompleteOptions_DESC)
+private val clang_defaultCodeCompleteOptions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_defaultCodeCompleteOptions") }
+private val clang_defaultCodeCompleteOptions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_defaultCodeCompleteOptions_ADDR, clang_defaultCodeCompleteOptions_DESC) }
 
 fun clang_defaultCodeCompleteOptions(): Int {
     try {
@@ -14625,8 +14677,8 @@ fun clang_defaultCodeCompleteOptions(): Int {
  * {@snippet lang=c : clang_codeCompleteAt (typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,(Char)*,UNSIGNED = Int,UNSIGNED = Int,(Declared(CXUnsavedFile))*,UNSIGNED = Int,UNSIGNED = Int)
  */
 private val clang_codeCompleteAt_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_codeCompleteAt_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_codeCompleteAt")
-private val clang_codeCompleteAt_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_codeCompleteAt_ADDR, clang_codeCompleteAt_DESC)
+private val clang_codeCompleteAt_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_codeCompleteAt") }
+private val clang_codeCompleteAt_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_codeCompleteAt_ADDR, clang_codeCompleteAt_DESC) }
 
 fun clang_codeCompleteAt(arg0: MemorySegment, arg1: MemorySegment, arg2: Int, arg3: Int, arg4: MemorySegment, arg5: Int, arg6: Int): MemorySegment {
     try {
@@ -14644,8 +14696,8 @@ fun clang_codeCompleteAt(arg0: MemorySegment, arg1: MemorySegment, arg2: Int, ar
  * {@snippet lang=c : clang_sortCodeCompletionResults Void((typedef CXCompletionResult = Declared(CXCompletionResult))*,UNSIGNED = Int)
  */
 private val clang_sortCodeCompletionResults_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_sortCodeCompletionResults_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_sortCodeCompletionResults")
-private val clang_sortCodeCompletionResults_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_sortCodeCompletionResults_ADDR, clang_sortCodeCompletionResults_DESC)
+private val clang_sortCodeCompletionResults_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_sortCodeCompletionResults") }
+private val clang_sortCodeCompletionResults_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_sortCodeCompletionResults_ADDR, clang_sortCodeCompletionResults_DESC) }
 
 fun clang_sortCodeCompletionResults(arg0: MemorySegment, arg1: Int): Unit {
     try {
@@ -14663,8 +14715,8 @@ fun clang_sortCodeCompletionResults(arg0: MemorySegment, arg1: Int): Unit {
  * {@snippet lang=c : clang_disposeCodeCompleteResults Void((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*)
  */
 private val clang_disposeCodeCompleteResults_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_disposeCodeCompleteResults_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_disposeCodeCompleteResults")
-private val clang_disposeCodeCompleteResults_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_disposeCodeCompleteResults_ADDR, clang_disposeCodeCompleteResults_DESC)
+private val clang_disposeCodeCompleteResults_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_disposeCodeCompleteResults") }
+private val clang_disposeCodeCompleteResults_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_disposeCodeCompleteResults_ADDR, clang_disposeCodeCompleteResults_DESC) }
 
 fun clang_disposeCodeCompleteResults(arg0: MemorySegment): Unit {
     try {
@@ -14682,8 +14734,8 @@ fun clang_disposeCodeCompleteResults(arg0: MemorySegment): Unit {
  * {@snippet lang=c : clang_codeCompleteGetNumDiagnostics UNSIGNED = Int((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*)
  */
 private val clang_codeCompleteGetNumDiagnostics_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_codeCompleteGetNumDiagnostics_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_codeCompleteGetNumDiagnostics")
-private val clang_codeCompleteGetNumDiagnostics_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_codeCompleteGetNumDiagnostics_ADDR, clang_codeCompleteGetNumDiagnostics_DESC)
+private val clang_codeCompleteGetNumDiagnostics_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_codeCompleteGetNumDiagnostics") }
+private val clang_codeCompleteGetNumDiagnostics_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_codeCompleteGetNumDiagnostics_ADDR, clang_codeCompleteGetNumDiagnostics_DESC) }
 
 fun clang_codeCompleteGetNumDiagnostics(arg0: MemorySegment): Int {
     try {
@@ -14701,8 +14753,8 @@ fun clang_codeCompleteGetNumDiagnostics(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_codeCompleteGetDiagnostic typedef CXDiagnostic = (Void)*((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*,UNSIGNED = Int)
  */
 private val clang_codeCompleteGetDiagnostic_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_codeCompleteGetDiagnostic_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_codeCompleteGetDiagnostic")
-private val clang_codeCompleteGetDiagnostic_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_codeCompleteGetDiagnostic_ADDR, clang_codeCompleteGetDiagnostic_DESC)
+private val clang_codeCompleteGetDiagnostic_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_codeCompleteGetDiagnostic") }
+private val clang_codeCompleteGetDiagnostic_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_codeCompleteGetDiagnostic_ADDR, clang_codeCompleteGetDiagnostic_DESC) }
 
 fun clang_codeCompleteGetDiagnostic(arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -14720,8 +14772,8 @@ fun clang_codeCompleteGetDiagnostic(arg0: MemorySegment, arg1: Int): MemorySegme
  * {@snippet lang=c : clang_codeCompleteGetContexts UNSIGNED = LongLong((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*)
  */
 private val clang_codeCompleteGetContexts_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val clang_codeCompleteGetContexts_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_codeCompleteGetContexts")
-private val clang_codeCompleteGetContexts_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_codeCompleteGetContexts_ADDR, clang_codeCompleteGetContexts_DESC)
+private val clang_codeCompleteGetContexts_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_codeCompleteGetContexts") }
+private val clang_codeCompleteGetContexts_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_codeCompleteGetContexts_ADDR, clang_codeCompleteGetContexts_DESC) }
 
 fun clang_codeCompleteGetContexts(arg0: MemorySegment): Long {
     try {
@@ -14739,8 +14791,8 @@ fun clang_codeCompleteGetContexts(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_codeCompleteGetContainerKind Declared(CXCursorKind)((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*,(UNSIGNED = Int)*)
  */
 private val clang_codeCompleteGetContainerKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_codeCompleteGetContainerKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_codeCompleteGetContainerKind")
-private val clang_codeCompleteGetContainerKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_codeCompleteGetContainerKind_ADDR, clang_codeCompleteGetContainerKind_DESC)
+private val clang_codeCompleteGetContainerKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_codeCompleteGetContainerKind") }
+private val clang_codeCompleteGetContainerKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_codeCompleteGetContainerKind_ADDR, clang_codeCompleteGetContainerKind_DESC) }
 
 fun clang_codeCompleteGetContainerKind(arg0: MemorySegment, arg1: MemorySegment): Int {
     try {
@@ -14758,8 +14810,8 @@ fun clang_codeCompleteGetContainerKind(arg0: MemorySegment, arg1: MemorySegment)
  * {@snippet lang=c : clang_codeCompleteGetContainerUSR typedef CXString = Declared(CXString)((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*)
  */
 private val clang_codeCompleteGetContainerUSR_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_codeCompleteGetContainerUSR_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_codeCompleteGetContainerUSR")
-private val clang_codeCompleteGetContainerUSR_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_codeCompleteGetContainerUSR_ADDR, clang_codeCompleteGetContainerUSR_DESC)
+private val clang_codeCompleteGetContainerUSR_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_codeCompleteGetContainerUSR") }
+private val clang_codeCompleteGetContainerUSR_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_codeCompleteGetContainerUSR_ADDR, clang_codeCompleteGetContainerUSR_DESC) }
 
 fun clang_codeCompleteGetContainerUSR(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -14777,8 +14829,8 @@ fun clang_codeCompleteGetContainerUSR(allocator: SegmentAllocator, arg0: MemoryS
  * {@snippet lang=c : clang_codeCompleteGetObjCSelector typedef CXString = Declared(CXString)((typedef CXCodeCompleteResults = Declared(CXCodeCompleteResults))*)
  */
 private val clang_codeCompleteGetObjCSelector_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.ADDRESS)
-private val clang_codeCompleteGetObjCSelector_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_codeCompleteGetObjCSelector")
-private val clang_codeCompleteGetObjCSelector_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_codeCompleteGetObjCSelector_ADDR, clang_codeCompleteGetObjCSelector_DESC)
+private val clang_codeCompleteGetObjCSelector_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_codeCompleteGetObjCSelector") }
+private val clang_codeCompleteGetObjCSelector_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_codeCompleteGetObjCSelector_ADDR, clang_codeCompleteGetObjCSelector_DESC) }
 
 fun clang_codeCompleteGetObjCSelector(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -14796,8 +14848,8 @@ fun clang_codeCompleteGetObjCSelector(allocator: SegmentAllocator, arg0: MemoryS
  * {@snippet lang=c : clang_getClangVersion typedef CXString = Declared(CXString)()
  */
 private val clang_getClangVersion_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout)
-private val clang_getClangVersion_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getClangVersion")
-private val clang_getClangVersion_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getClangVersion_ADDR, clang_getClangVersion_DESC)
+private val clang_getClangVersion_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getClangVersion") }
+private val clang_getClangVersion_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getClangVersion_ADDR, clang_getClangVersion_DESC) }
 
 fun clang_getClangVersion(allocator: SegmentAllocator): MemorySegment {
     try {
@@ -14815,8 +14867,8 @@ fun clang_getClangVersion(allocator: SegmentAllocator): MemorySegment {
  * {@snippet lang=c : clang_toggleCrashRecovery Void(UNSIGNED = Int)
  */
 private val clang_toggleCrashRecovery_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.JAVA_INT)
-private val clang_toggleCrashRecovery_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_toggleCrashRecovery")
-private val clang_toggleCrashRecovery_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_toggleCrashRecovery_ADDR, clang_toggleCrashRecovery_DESC)
+private val clang_toggleCrashRecovery_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_toggleCrashRecovery") }
+private val clang_toggleCrashRecovery_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_toggleCrashRecovery_ADDR, clang_toggleCrashRecovery_DESC) }
 
 fun clang_toggleCrashRecovery(arg0: Int): Unit {
     try {
@@ -14839,8 +14891,8 @@ typealias CXInclusionVisitor = MemorySegment?
  * {@snippet lang=c : clang_getInclusions Void(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXInclusionVisitor = (Void((Void)*,(Declared(CXSourceLocation))*,UNSIGNED = Int,(Void)*))*,typedef CXClientData = (Void)*)
  */
 private val clang_getInclusions_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getInclusions_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getInclusions")
-private val clang_getInclusions_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getInclusions_ADDR, clang_getInclusions_DESC)
+private val clang_getInclusions_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getInclusions") }
+private val clang_getInclusions_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getInclusions_ADDR, clang_getInclusions_DESC) }
 
 fun clang_getInclusions(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Unit {
     try {
@@ -14898,8 +14950,8 @@ typealias CXEvalResult = MemorySegment?
  * {@snippet lang=c : clang_Cursor_Evaluate typedef CXEvalResult = (Void)*(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_Cursor_Evaluate_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, CXCursor.layout)
-private val clang_Cursor_Evaluate_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Cursor_Evaluate")
-private val clang_Cursor_Evaluate_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Cursor_Evaluate_ADDR, clang_Cursor_Evaluate_DESC)
+private val clang_Cursor_Evaluate_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Cursor_Evaluate") }
+private val clang_Cursor_Evaluate_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Cursor_Evaluate_ADDR, clang_Cursor_Evaluate_DESC) }
 
 fun clang_Cursor_Evaluate(arg0: MemorySegment): MemorySegment {
     try {
@@ -14917,8 +14969,8 @@ fun clang_Cursor_Evaluate(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_EvalResult_getKind typedef CXEvalResultKind = Declared(CXEvalResultKind)(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_getKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_EvalResult_getKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_getKind")
-private val clang_EvalResult_getKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_getKind_ADDR, clang_EvalResult_getKind_DESC)
+private val clang_EvalResult_getKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_getKind") }
+private val clang_EvalResult_getKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_getKind_ADDR, clang_EvalResult_getKind_DESC) }
 
 fun clang_EvalResult_getKind(arg0: MemorySegment): Int {
     try {
@@ -14936,8 +14988,8 @@ fun clang_EvalResult_getKind(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_EvalResult_getAsInt Int(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_getAsInt_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_EvalResult_getAsInt_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_getAsInt")
-private val clang_EvalResult_getAsInt_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsInt_ADDR, clang_EvalResult_getAsInt_DESC)
+private val clang_EvalResult_getAsInt_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_getAsInt") }
+private val clang_EvalResult_getAsInt_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsInt_ADDR, clang_EvalResult_getAsInt_DESC) }
 
 fun clang_EvalResult_getAsInt(arg0: MemorySegment): Int {
     try {
@@ -14955,8 +15007,8 @@ fun clang_EvalResult_getAsInt(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_EvalResult_getAsLongLong LongLong(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_getAsLongLong_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val clang_EvalResult_getAsLongLong_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_getAsLongLong")
-private val clang_EvalResult_getAsLongLong_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsLongLong_ADDR, clang_EvalResult_getAsLongLong_DESC)
+private val clang_EvalResult_getAsLongLong_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_getAsLongLong") }
+private val clang_EvalResult_getAsLongLong_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsLongLong_ADDR, clang_EvalResult_getAsLongLong_DESC) }
 
 fun clang_EvalResult_getAsLongLong(arg0: MemorySegment): Long {
     try {
@@ -14974,8 +15026,8 @@ fun clang_EvalResult_getAsLongLong(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_EvalResult_isUnsignedInt UNSIGNED = Int(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_isUnsignedInt_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_EvalResult_isUnsignedInt_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_isUnsignedInt")
-private val clang_EvalResult_isUnsignedInt_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_isUnsignedInt_ADDR, clang_EvalResult_isUnsignedInt_DESC)
+private val clang_EvalResult_isUnsignedInt_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_isUnsignedInt") }
+private val clang_EvalResult_isUnsignedInt_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_isUnsignedInt_ADDR, clang_EvalResult_isUnsignedInt_DESC) }
 
 fun clang_EvalResult_isUnsignedInt(arg0: MemorySegment): Int {
     try {
@@ -14993,8 +15045,8 @@ fun clang_EvalResult_isUnsignedInt(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_EvalResult_getAsUnsigned UNSIGNED = LongLong(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_getAsUnsigned_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.ADDRESS)
-private val clang_EvalResult_getAsUnsigned_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_getAsUnsigned")
-private val clang_EvalResult_getAsUnsigned_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsUnsigned_ADDR, clang_EvalResult_getAsUnsigned_DESC)
+private val clang_EvalResult_getAsUnsigned_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_getAsUnsigned") }
+private val clang_EvalResult_getAsUnsigned_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsUnsigned_ADDR, clang_EvalResult_getAsUnsigned_DESC) }
 
 fun clang_EvalResult_getAsUnsigned(arg0: MemorySegment): Long {
     try {
@@ -15012,8 +15064,8 @@ fun clang_EvalResult_getAsUnsigned(arg0: MemorySegment): Long {
  * {@snippet lang=c : clang_EvalResult_getAsDouble Double(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_getAsDouble_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE, ValueLayout.ADDRESS)
-private val clang_EvalResult_getAsDouble_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_getAsDouble")
-private val clang_EvalResult_getAsDouble_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsDouble_ADDR, clang_EvalResult_getAsDouble_DESC)
+private val clang_EvalResult_getAsDouble_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_getAsDouble") }
+private val clang_EvalResult_getAsDouble_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsDouble_ADDR, clang_EvalResult_getAsDouble_DESC) }
 
 fun clang_EvalResult_getAsDouble(arg0: MemorySegment): Double {
     try {
@@ -15031,8 +15083,8 @@ fun clang_EvalResult_getAsDouble(arg0: MemorySegment): Double {
  * {@snippet lang=c : clang_EvalResult_getAsStr (Char)*(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_getAsStr_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_EvalResult_getAsStr_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_getAsStr")
-private val clang_EvalResult_getAsStr_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsStr_ADDR, clang_EvalResult_getAsStr_DESC)
+private val clang_EvalResult_getAsStr_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_getAsStr") }
+private val clang_EvalResult_getAsStr_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_getAsStr_ADDR, clang_EvalResult_getAsStr_DESC) }
 
 fun clang_EvalResult_getAsStr(arg0: MemorySegment): MemorySegment {
     try {
@@ -15050,8 +15102,8 @@ fun clang_EvalResult_getAsStr(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_EvalResult_dispose Void(typedef CXEvalResult = (Void)*)
  */
 private val clang_EvalResult_dispose_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_EvalResult_dispose_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_EvalResult_dispose")
-private val clang_EvalResult_dispose_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_EvalResult_dispose_ADDR, clang_EvalResult_dispose_DESC)
+private val clang_EvalResult_dispose_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_EvalResult_dispose") }
+private val clang_EvalResult_dispose_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_EvalResult_dispose_ADDR, clang_EvalResult_dispose_DESC) }
 
 fun clang_EvalResult_dispose(arg0: MemorySegment): Unit {
     try {
@@ -15142,8 +15194,8 @@ fun CXResult_VisitBreak(): Int = 2
  * {@snippet lang=c : clang_findReferencesInFile typedef CXResult = Declared(CXResult)(typedef CXCursor = Declared(CXCursor),typedef CXFile = (Void)*,typedef CXCursorAndRangeVisitor = Declared(CXCursorAndRangeVisitor))
  */
 private val clang_findReferencesInFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.ADDRESS, CXCursorAndRangeVisitor.layout)
-private val clang_findReferencesInFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_findReferencesInFile")
-private val clang_findReferencesInFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_findReferencesInFile_ADDR, clang_findReferencesInFile_DESC)
+private val clang_findReferencesInFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_findReferencesInFile") }
+private val clang_findReferencesInFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_findReferencesInFile_ADDR, clang_findReferencesInFile_DESC) }
 
 fun clang_findReferencesInFile(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -15161,8 +15213,8 @@ fun clang_findReferencesInFile(arg0: MemorySegment, arg1: MemorySegment, arg2: M
  * {@snippet lang=c : clang_findIncludesInFile typedef CXResult = Declared(CXResult)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*,typedef CXCursorAndRangeVisitor = Declared(CXCursorAndRangeVisitor))
  */
 private val clang_findIncludesInFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, CXCursorAndRangeVisitor.layout)
-private val clang_findIncludesInFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_findIncludesInFile")
-private val clang_findIncludesInFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_findIncludesInFile_ADDR, clang_findIncludesInFile_DESC)
+private val clang_findIncludesInFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_findIncludesInFile") }
+private val clang_findIncludesInFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_findIncludesInFile_ADDR, clang_findIncludesInFile_DESC) }
 
 fun clang_findIncludesInFile(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -15185,8 +15237,8 @@ typealias CXCursorAndRangeVisitorBlock = MemorySegment?
  * {@snippet lang=c : clang_findReferencesInFileWithBlock typedef CXResult = Declared(CXResult)(typedef CXCursor = Declared(CXCursor),typedef CXFile = (Void)*,typedef CXCursorAndRangeVisitorBlock = (Declared(CXVisitorResult)(Declared(CXCursor),Declared(CXSourceRange)))*)
  */
 private val clang_findReferencesInFileWithBlock_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_findReferencesInFileWithBlock_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_findReferencesInFileWithBlock")
-private val clang_findReferencesInFileWithBlock_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_findReferencesInFileWithBlock_ADDR, clang_findReferencesInFileWithBlock_DESC)
+private val clang_findReferencesInFileWithBlock_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_findReferencesInFileWithBlock") }
+private val clang_findReferencesInFileWithBlock_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_findReferencesInFileWithBlock_ADDR, clang_findReferencesInFileWithBlock_DESC) }
 
 fun clang_findReferencesInFileWithBlock(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -15204,8 +15256,8 @@ fun clang_findReferencesInFileWithBlock(arg0: MemorySegment, arg1: MemorySegment
  * {@snippet lang=c : clang_findIncludesInFileWithBlock typedef CXResult = Declared(CXResult)(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*,typedef CXFile = (Void)*,typedef CXCursorAndRangeVisitorBlock = (Declared(CXVisitorResult)(Declared(CXCursor),Declared(CXSourceRange)))*)
  */
 private val clang_findIncludesInFileWithBlock_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_findIncludesInFileWithBlock_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_findIncludesInFileWithBlock")
-private val clang_findIncludesInFileWithBlock_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_findIncludesInFileWithBlock_ADDR, clang_findIncludesInFileWithBlock_DESC)
+private val clang_findIncludesInFileWithBlock_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_findIncludesInFileWithBlock") }
+private val clang_findIncludesInFileWithBlock_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_findIncludesInFileWithBlock_ADDR, clang_findIncludesInFileWithBlock_DESC) }
 
 fun clang_findIncludesInFileWithBlock(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -16768,8 +16820,8 @@ class IndexerCallbacks {
  * {@snippet lang=c : clang_index_isEntityObjCContainerKind Int(typedef CXIdxEntityKind = Declared(CXIdxEntityKind))
  */
 private val clang_index_isEntityObjCContainerKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private val clang_index_isEntityObjCContainerKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_isEntityObjCContainerKind")
-private val clang_index_isEntityObjCContainerKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_isEntityObjCContainerKind_ADDR, clang_index_isEntityObjCContainerKind_DESC)
+private val clang_index_isEntityObjCContainerKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_isEntityObjCContainerKind") }
+private val clang_index_isEntityObjCContainerKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_isEntityObjCContainerKind_ADDR, clang_index_isEntityObjCContainerKind_DESC) }
 
 fun clang_index_isEntityObjCContainerKind(arg0: Int): Int {
     try {
@@ -16787,8 +16839,8 @@ fun clang_index_isEntityObjCContainerKind(arg0: Int): Int {
  * {@snippet lang=c : clang_index_getObjCContainerDeclInfo (typedef CXIdxObjCContainerDeclInfo = Declared(CXIdxObjCContainerDeclInfo))*((typedef CXIdxDeclInfo = Declared(CXIdxDeclInfo))*)
  */
 private val clang_index_getObjCContainerDeclInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getObjCContainerDeclInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getObjCContainerDeclInfo")
-private val clang_index_getObjCContainerDeclInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getObjCContainerDeclInfo_ADDR, clang_index_getObjCContainerDeclInfo_DESC)
+private val clang_index_getObjCContainerDeclInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getObjCContainerDeclInfo") }
+private val clang_index_getObjCContainerDeclInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getObjCContainerDeclInfo_ADDR, clang_index_getObjCContainerDeclInfo_DESC) }
 
 fun clang_index_getObjCContainerDeclInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -16806,8 +16858,8 @@ fun clang_index_getObjCContainerDeclInfo(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_getObjCInterfaceDeclInfo (typedef CXIdxObjCInterfaceDeclInfo = Declared(CXIdxObjCInterfaceDeclInfo))*((typedef CXIdxDeclInfo = Declared(CXIdxDeclInfo))*)
  */
 private val clang_index_getObjCInterfaceDeclInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getObjCInterfaceDeclInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getObjCInterfaceDeclInfo")
-private val clang_index_getObjCInterfaceDeclInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getObjCInterfaceDeclInfo_ADDR, clang_index_getObjCInterfaceDeclInfo_DESC)
+private val clang_index_getObjCInterfaceDeclInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getObjCInterfaceDeclInfo") }
+private val clang_index_getObjCInterfaceDeclInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getObjCInterfaceDeclInfo_ADDR, clang_index_getObjCInterfaceDeclInfo_DESC) }
 
 fun clang_index_getObjCInterfaceDeclInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -16825,8 +16877,8 @@ fun clang_index_getObjCInterfaceDeclInfo(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_getObjCCategoryDeclInfo (typedef CXIdxObjCCategoryDeclInfo = Declared(CXIdxObjCCategoryDeclInfo))*((typedef CXIdxDeclInfo = Declared(CXIdxDeclInfo))*)
  */
 private val clang_index_getObjCCategoryDeclInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getObjCCategoryDeclInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getObjCCategoryDeclInfo")
-private val clang_index_getObjCCategoryDeclInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getObjCCategoryDeclInfo_ADDR, clang_index_getObjCCategoryDeclInfo_DESC)
+private val clang_index_getObjCCategoryDeclInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getObjCCategoryDeclInfo") }
+private val clang_index_getObjCCategoryDeclInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getObjCCategoryDeclInfo_ADDR, clang_index_getObjCCategoryDeclInfo_DESC) }
 
 fun clang_index_getObjCCategoryDeclInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -16844,8 +16896,8 @@ fun clang_index_getObjCCategoryDeclInfo(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_getObjCProtocolRefListInfo (typedef CXIdxObjCProtocolRefListInfo = Declared(CXIdxObjCProtocolRefListInfo))*((typedef CXIdxDeclInfo = Declared(CXIdxDeclInfo))*)
  */
 private val clang_index_getObjCProtocolRefListInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getObjCProtocolRefListInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getObjCProtocolRefListInfo")
-private val clang_index_getObjCProtocolRefListInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getObjCProtocolRefListInfo_ADDR, clang_index_getObjCProtocolRefListInfo_DESC)
+private val clang_index_getObjCProtocolRefListInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getObjCProtocolRefListInfo") }
+private val clang_index_getObjCProtocolRefListInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getObjCProtocolRefListInfo_ADDR, clang_index_getObjCProtocolRefListInfo_DESC) }
 
 fun clang_index_getObjCProtocolRefListInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -16863,8 +16915,8 @@ fun clang_index_getObjCProtocolRefListInfo(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_getObjCPropertyDeclInfo (typedef CXIdxObjCPropertyDeclInfo = Declared(CXIdxObjCPropertyDeclInfo))*((typedef CXIdxDeclInfo = Declared(CXIdxDeclInfo))*)
  */
 private val clang_index_getObjCPropertyDeclInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getObjCPropertyDeclInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getObjCPropertyDeclInfo")
-private val clang_index_getObjCPropertyDeclInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getObjCPropertyDeclInfo_ADDR, clang_index_getObjCPropertyDeclInfo_DESC)
+private val clang_index_getObjCPropertyDeclInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getObjCPropertyDeclInfo") }
+private val clang_index_getObjCPropertyDeclInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getObjCPropertyDeclInfo_ADDR, clang_index_getObjCPropertyDeclInfo_DESC) }
 
 fun clang_index_getObjCPropertyDeclInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -16882,8 +16934,8 @@ fun clang_index_getObjCPropertyDeclInfo(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_getIBOutletCollectionAttrInfo (typedef CXIdxIBOutletCollectionAttrInfo = Declared(CXIdxIBOutletCollectionAttrInfo))*((typedef CXIdxAttrInfo = Declared(CXIdxAttrInfo))*)
  */
 private val clang_index_getIBOutletCollectionAttrInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getIBOutletCollectionAttrInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getIBOutletCollectionAttrInfo")
-private val clang_index_getIBOutletCollectionAttrInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getIBOutletCollectionAttrInfo_ADDR, clang_index_getIBOutletCollectionAttrInfo_DESC)
+private val clang_index_getIBOutletCollectionAttrInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getIBOutletCollectionAttrInfo") }
+private val clang_index_getIBOutletCollectionAttrInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getIBOutletCollectionAttrInfo_ADDR, clang_index_getIBOutletCollectionAttrInfo_DESC) }
 
 fun clang_index_getIBOutletCollectionAttrInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -16901,8 +16953,8 @@ fun clang_index_getIBOutletCollectionAttrInfo(arg0: MemorySegment): MemorySegmen
  * {@snippet lang=c : clang_index_getCXXClassDeclInfo (typedef CXIdxCXXClassDeclInfo = Declared(CXIdxCXXClassDeclInfo))*((typedef CXIdxDeclInfo = Declared(CXIdxDeclInfo))*)
  */
 private val clang_index_getCXXClassDeclInfo_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getCXXClassDeclInfo_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getCXXClassDeclInfo")
-private val clang_index_getCXXClassDeclInfo_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getCXXClassDeclInfo_ADDR, clang_index_getCXXClassDeclInfo_DESC)
+private val clang_index_getCXXClassDeclInfo_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getCXXClassDeclInfo") }
+private val clang_index_getCXXClassDeclInfo_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getCXXClassDeclInfo_ADDR, clang_index_getCXXClassDeclInfo_DESC) }
 
 fun clang_index_getCXXClassDeclInfo(arg0: MemorySegment): MemorySegment {
     try {
@@ -16920,8 +16972,8 @@ fun clang_index_getCXXClassDeclInfo(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_getClientContainer typedef CXIdxClientContainer = (Void)*((typedef CXIdxContainerInfo = Declared(CXIdxContainerInfo))*)
  */
 private val clang_index_getClientContainer_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getClientContainer_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getClientContainer")
-private val clang_index_getClientContainer_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getClientContainer_ADDR, clang_index_getClientContainer_DESC)
+private val clang_index_getClientContainer_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getClientContainer") }
+private val clang_index_getClientContainer_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getClientContainer_ADDR, clang_index_getClientContainer_DESC) }
 
 fun clang_index_getClientContainer(arg0: MemorySegment): MemorySegment {
     try {
@@ -16939,8 +16991,8 @@ fun clang_index_getClientContainer(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_setClientContainer Void((typedef CXIdxContainerInfo = Declared(CXIdxContainerInfo))*,typedef CXIdxClientContainer = (Void)*)
  */
 private val clang_index_setClientContainer_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_setClientContainer_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_setClientContainer")
-private val clang_index_setClientContainer_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_setClientContainer_ADDR, clang_index_setClientContainer_DESC)
+private val clang_index_setClientContainer_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_setClientContainer") }
+private val clang_index_setClientContainer_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_setClientContainer_ADDR, clang_index_setClientContainer_DESC) }
 
 fun clang_index_setClientContainer(arg0: MemorySegment, arg1: MemorySegment): Unit {
     try {
@@ -16958,8 +17010,8 @@ fun clang_index_setClientContainer(arg0: MemorySegment, arg1: MemorySegment): Un
  * {@snippet lang=c : clang_index_getClientEntity typedef CXIdxClientEntity = (Void)*((typedef CXIdxEntityInfo = Declared(CXIdxEntityInfo))*)
  */
 private val clang_index_getClientEntity_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_getClientEntity_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_getClientEntity")
-private val clang_index_getClientEntity_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_getClientEntity_ADDR, clang_index_getClientEntity_DESC)
+private val clang_index_getClientEntity_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_getClientEntity") }
+private val clang_index_getClientEntity_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_getClientEntity_ADDR, clang_index_getClientEntity_DESC) }
 
 fun clang_index_getClientEntity(arg0: MemorySegment): MemorySegment {
     try {
@@ -16977,8 +17029,8 @@ fun clang_index_getClientEntity(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_index_setClientEntity Void((typedef CXIdxEntityInfo = Declared(CXIdxEntityInfo))*,typedef CXIdxClientEntity = (Void)*)
  */
 private val clang_index_setClientEntity_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_index_setClientEntity_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_index_setClientEntity")
-private val clang_index_setClientEntity_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_index_setClientEntity_ADDR, clang_index_setClientEntity_DESC)
+private val clang_index_setClientEntity_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_index_setClientEntity") }
+private val clang_index_setClientEntity_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_index_setClientEntity_ADDR, clang_index_setClientEntity_DESC) }
 
 fun clang_index_setClientEntity(arg0: MemorySegment, arg1: MemorySegment): Unit {
     try {
@@ -17001,8 +17053,8 @@ typealias CXIndexAction = MemorySegment?
  * {@snippet lang=c : clang_IndexAction_create typedef CXIndexAction = (Void)*(typedef CXIndex = (Void)*)
  */
 private val clang_IndexAction_create_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_IndexAction_create_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_IndexAction_create")
-private val clang_IndexAction_create_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_IndexAction_create_ADDR, clang_IndexAction_create_DESC)
+private val clang_IndexAction_create_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_IndexAction_create") }
+private val clang_IndexAction_create_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_IndexAction_create_ADDR, clang_IndexAction_create_DESC) }
 
 fun clang_IndexAction_create(arg0: MemorySegment): MemorySegment {
     try {
@@ -17020,8 +17072,8 @@ fun clang_IndexAction_create(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_IndexAction_dispose Void(typedef CXIndexAction = (Void)*)
  */
 private val clang_IndexAction_dispose_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_IndexAction_dispose_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_IndexAction_dispose")
-private val clang_IndexAction_dispose_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_IndexAction_dispose_ADDR, clang_IndexAction_dispose_DESC)
+private val clang_IndexAction_dispose_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_IndexAction_dispose") }
+private val clang_IndexAction_dispose_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_IndexAction_dispose_ADDR, clang_IndexAction_dispose_DESC) }
 
 fun clang_IndexAction_dispose(arg0: MemorySegment): Unit {
     try {
@@ -17069,8 +17121,8 @@ fun CXIndexOpt_SkipParsedBodiesInSession(): Int = 16
  * {@snippet lang=c : clang_indexSourceFile Int(typedef CXIndexAction = (Void)*,typedef CXClientData = (Void)*,(typedef IndexerCallbacks = Declared(IndexerCallbacks))*,UNSIGNED = Int,UNSIGNED = Int,(Char)*,((Char)*)*,Int,(Declared(CXUnsavedFile))*,UNSIGNED = Int,(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)*,UNSIGNED = Int)
  */
 private val clang_indexSourceFile_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_indexSourceFile_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_indexSourceFile")
-private val clang_indexSourceFile_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_indexSourceFile_ADDR, clang_indexSourceFile_DESC)
+private val clang_indexSourceFile_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_indexSourceFile") }
+private val clang_indexSourceFile_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_indexSourceFile_ADDR, clang_indexSourceFile_DESC) }
 
 fun clang_indexSourceFile(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: Int, arg4: Int, arg5: MemorySegment, arg6: MemorySegment, arg7: Int, arg8: MemorySegment, arg9: Int, arg10: MemorySegment, arg11: Int): Int {
     try {
@@ -17088,8 +17140,8 @@ fun clang_indexSourceFile(arg0: MemorySegment, arg1: MemorySegment, arg2: Memory
  * {@snippet lang=c : clang_indexSourceFileFullArgv Int(typedef CXIndexAction = (Void)*,typedef CXClientData = (Void)*,(typedef IndexerCallbacks = Declared(IndexerCallbacks))*,UNSIGNED = Int,UNSIGNED = Int,(Char)*,((Char)*)*,Int,(Declared(CXUnsavedFile))*,UNSIGNED = Int,(typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)*,UNSIGNED = Int)
  */
 private val clang_indexSourceFileFullArgv_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_indexSourceFileFullArgv_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_indexSourceFileFullArgv")
-private val clang_indexSourceFileFullArgv_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_indexSourceFileFullArgv_ADDR, clang_indexSourceFileFullArgv_DESC)
+private val clang_indexSourceFileFullArgv_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_indexSourceFileFullArgv") }
+private val clang_indexSourceFileFullArgv_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_indexSourceFileFullArgv_ADDR, clang_indexSourceFileFullArgv_DESC) }
 
 fun clang_indexSourceFileFullArgv(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: Int, arg4: Int, arg5: MemorySegment, arg6: MemorySegment, arg7: Int, arg8: MemorySegment, arg9: Int, arg10: MemorySegment, arg11: Int): Int {
     try {
@@ -17107,8 +17159,8 @@ fun clang_indexSourceFileFullArgv(arg0: MemorySegment, arg1: MemorySegment, arg2
  * {@snippet lang=c : clang_indexTranslationUnit Int(typedef CXIndexAction = (Void)*,typedef CXClientData = (Void)*,(typedef IndexerCallbacks = Declared(IndexerCallbacks))*,UNSIGNED = Int,UNSIGNED = Int,typedef CXTranslationUnit = (Declared(CXTranslationUnitImpl))*)
  */
 private val clang_indexTranslationUnit_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_indexTranslationUnit_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_indexTranslationUnit")
-private val clang_indexTranslationUnit_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_indexTranslationUnit_ADDR, clang_indexTranslationUnit_DESC)
+private val clang_indexTranslationUnit_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_indexTranslationUnit") }
+private val clang_indexTranslationUnit_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_indexTranslationUnit_ADDR, clang_indexTranslationUnit_DESC) }
 
 fun clang_indexTranslationUnit(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: Int, arg4: Int, arg5: MemorySegment): Int {
     try {
@@ -17126,8 +17178,8 @@ fun clang_indexTranslationUnit(arg0: MemorySegment, arg1: MemorySegment, arg2: M
  * {@snippet lang=c : clang_indexLoc_getFileLocation Void(typedef CXIdxLoc = Declared(CXIdxLoc),(typedef CXIdxClientFile = (Void)*)*,(typedef CXFile = (Void)*)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*,(UNSIGNED = Int)*)
  */
 private val clang_indexLoc_getFileLocation_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(CXIdxLoc.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_indexLoc_getFileLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_indexLoc_getFileLocation")
-private val clang_indexLoc_getFileLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_indexLoc_getFileLocation_ADDR, clang_indexLoc_getFileLocation_DESC)
+private val clang_indexLoc_getFileLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_indexLoc_getFileLocation") }
+private val clang_indexLoc_getFileLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_indexLoc_getFileLocation_ADDR, clang_indexLoc_getFileLocation_DESC) }
 
 fun clang_indexLoc_getFileLocation(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment, arg5: MemorySegment): Unit {
     try {
@@ -17145,8 +17197,8 @@ fun clang_indexLoc_getFileLocation(arg0: MemorySegment, arg1: MemorySegment, arg
  * {@snippet lang=c : clang_indexLoc_getCXSourceLocation typedef CXSourceLocation = Declared(CXSourceLocation)(typedef CXIdxLoc = Declared(CXIdxLoc))
  */
 private val clang_indexLoc_getCXSourceLocation_DESC: FunctionDescriptor = FunctionDescriptor.of(CXSourceLocation.layout, CXIdxLoc.layout)
-private val clang_indexLoc_getCXSourceLocation_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_indexLoc_getCXSourceLocation")
-private val clang_indexLoc_getCXSourceLocation_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_indexLoc_getCXSourceLocation_ADDR, clang_indexLoc_getCXSourceLocation_DESC)
+private val clang_indexLoc_getCXSourceLocation_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_indexLoc_getCXSourceLocation") }
+private val clang_indexLoc_getCXSourceLocation_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_indexLoc_getCXSourceLocation_ADDR, clang_indexLoc_getCXSourceLocation_DESC) }
 
 fun clang_indexLoc_getCXSourceLocation(allocator: SegmentAllocator, arg0: MemorySegment): MemorySegment {
     try {
@@ -17169,8 +17221,8 @@ typealias CXFieldVisitor = MemorySegment?
  * {@snippet lang=c : clang_Type_visitFields UNSIGNED = Int(typedef CXType = Declared(CXType),typedef CXFieldVisitor = (Declared(CXVisitorResult)(Declared(CXCursor),(Void)*))*,typedef CXClientData = (Void)*)
  */
 private val clang_Type_visitFields_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_Type_visitFields_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_Type_visitFields")
-private val clang_Type_visitFields_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_Type_visitFields_ADDR, clang_Type_visitFields_DESC)
+private val clang_Type_visitFields_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_Type_visitFields") }
+private val clang_Type_visitFields_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_Type_visitFields_ADDR, clang_Type_visitFields_DESC) }
 
 fun clang_Type_visitFields(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -17188,8 +17240,8 @@ fun clang_Type_visitFields(arg0: MemorySegment, arg1: MemorySegment, arg2: Memor
  * {@snippet lang=c : clang_visitCXXBaseClasses UNSIGNED = Int(typedef CXType = Declared(CXType),typedef CXFieldVisitor = (Declared(CXVisitorResult)(Declared(CXCursor),(Void)*))*,typedef CXClientData = (Void)*)
  */
 private val clang_visitCXXBaseClasses_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_visitCXXBaseClasses_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_visitCXXBaseClasses")
-private val clang_visitCXXBaseClasses_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_visitCXXBaseClasses_ADDR, clang_visitCXXBaseClasses_DESC)
+private val clang_visitCXXBaseClasses_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_visitCXXBaseClasses") }
+private val clang_visitCXXBaseClasses_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_visitCXXBaseClasses_ADDR, clang_visitCXXBaseClasses_DESC) }
 
 fun clang_visitCXXBaseClasses(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -17207,8 +17259,8 @@ fun clang_visitCXXBaseClasses(arg0: MemorySegment, arg1: MemorySegment, arg2: Me
  * {@snippet lang=c : clang_visitCXXMethods UNSIGNED = Int(typedef CXType = Declared(CXType),typedef CXFieldVisitor = (Declared(CXVisitorResult)(Declared(CXCursor),(Void)*))*,typedef CXClientData = (Void)*)
  */
 private val clang_visitCXXMethods_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXType.layout, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_visitCXXMethods_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_visitCXXMethods")
-private val clang_visitCXXMethods_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_visitCXXMethods_ADDR, clang_visitCXXMethods_DESC)
+private val clang_visitCXXMethods_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_visitCXXMethods") }
+private val clang_visitCXXMethods_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_visitCXXMethods_ADDR, clang_visitCXXMethods_DESC) }
 
 fun clang_visitCXXMethods(arg0: MemorySegment, arg1: MemorySegment, arg2: MemorySegment): Int {
     try {
@@ -17401,8 +17453,8 @@ fun CXBinaryOperator_Last(): Int = 33
  * {@snippet lang=c : clang_getBinaryOperatorKindSpelling typedef CXString = Declared(CXString)(Declared(CXBinaryOperatorKind))
  */
 private val clang_getBinaryOperatorKindSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.JAVA_INT)
-private val clang_getBinaryOperatorKindSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getBinaryOperatorKindSpelling")
-private val clang_getBinaryOperatorKindSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getBinaryOperatorKindSpelling_ADDR, clang_getBinaryOperatorKindSpelling_DESC)
+private val clang_getBinaryOperatorKindSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getBinaryOperatorKindSpelling") }
+private val clang_getBinaryOperatorKindSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getBinaryOperatorKindSpelling_ADDR, clang_getBinaryOperatorKindSpelling_DESC) }
 
 fun clang_getBinaryOperatorKindSpelling(allocator: SegmentAllocator, arg0: Int): MemorySegment {
     try {
@@ -17420,8 +17472,8 @@ fun clang_getBinaryOperatorKindSpelling(allocator: SegmentAllocator, arg0: Int):
  * {@snippet lang=c : clang_getCursorBinaryOperatorKind Declared(CXBinaryOperatorKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorBinaryOperatorKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorBinaryOperatorKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorBinaryOperatorKind")
-private val clang_getCursorBinaryOperatorKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorBinaryOperatorKind_ADDR, clang_getCursorBinaryOperatorKind_DESC)
+private val clang_getCursorBinaryOperatorKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorBinaryOperatorKind") }
+private val clang_getCursorBinaryOperatorKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorBinaryOperatorKind_ADDR, clang_getCursorBinaryOperatorKind_DESC) }
 
 fun clang_getCursorBinaryOperatorKind(arg0: MemorySegment): Int {
     try {
@@ -17514,8 +17566,8 @@ fun CXUnaryOperator_Coawait(): Int = 14
  * {@snippet lang=c : clang_getUnaryOperatorKindSpelling typedef CXString = Declared(CXString)(Declared(CXUnaryOperatorKind))
  */
 private val clang_getUnaryOperatorKindSpelling_DESC: FunctionDescriptor = FunctionDescriptor.of(CXString.layout, ValueLayout.JAVA_INT)
-private val clang_getUnaryOperatorKindSpelling_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getUnaryOperatorKindSpelling")
-private val clang_getUnaryOperatorKindSpelling_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getUnaryOperatorKindSpelling_ADDR, clang_getUnaryOperatorKindSpelling_DESC)
+private val clang_getUnaryOperatorKindSpelling_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getUnaryOperatorKindSpelling") }
+private val clang_getUnaryOperatorKindSpelling_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getUnaryOperatorKindSpelling_ADDR, clang_getUnaryOperatorKindSpelling_DESC) }
 
 fun clang_getUnaryOperatorKindSpelling(allocator: SegmentAllocator, arg0: Int): MemorySegment {
     try {
@@ -17533,8 +17585,8 @@ fun clang_getUnaryOperatorKindSpelling(allocator: SegmentAllocator, arg0: Int): 
  * {@snippet lang=c : clang_getCursorUnaryOperatorKind Declared(CXUnaryOperatorKind)(typedef CXCursor = Declared(CXCursor))
  */
 private val clang_getCursorUnaryOperatorKind_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, CXCursor.layout)
-private val clang_getCursorUnaryOperatorKind_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getCursorUnaryOperatorKind")
-private val clang_getCursorUnaryOperatorKind_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getCursorUnaryOperatorKind_ADDR, clang_getCursorUnaryOperatorKind_DESC)
+private val clang_getCursorUnaryOperatorKind_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getCursorUnaryOperatorKind") }
+private val clang_getCursorUnaryOperatorKind_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getCursorUnaryOperatorKind_ADDR, clang_getCursorUnaryOperatorKind_DESC) }
 
 fun clang_getCursorUnaryOperatorKind(arg0: MemorySegment): Int {
     try {
@@ -17557,8 +17609,8 @@ typealias CXRemapping = MemorySegment?
  * {@snippet lang=c : clang_getRemappings typedef CXRemapping = (Void)*((Char)*)
  */
 private val clang_getRemappings_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_getRemappings_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getRemappings")
-private val clang_getRemappings_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getRemappings_ADDR, clang_getRemappings_DESC)
+private val clang_getRemappings_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getRemappings") }
+private val clang_getRemappings_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getRemappings_ADDR, clang_getRemappings_DESC) }
 
 fun clang_getRemappings(arg0: MemorySegment): MemorySegment {
     try {
@@ -17576,8 +17628,8 @@ fun clang_getRemappings(arg0: MemorySegment): MemorySegment {
  * {@snippet lang=c : clang_getRemappingsFromFileList typedef CXRemapping = (Void)*(((Char)*)*,UNSIGNED = Int)
  */
 private val clang_getRemappingsFromFileList_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private val clang_getRemappingsFromFileList_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_getRemappingsFromFileList")
-private val clang_getRemappingsFromFileList_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_getRemappingsFromFileList_ADDR, clang_getRemappingsFromFileList_DESC)
+private val clang_getRemappingsFromFileList_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_getRemappingsFromFileList") }
+private val clang_getRemappingsFromFileList_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_getRemappingsFromFileList_ADDR, clang_getRemappingsFromFileList_DESC) }
 
 fun clang_getRemappingsFromFileList(arg0: MemorySegment, arg1: Int): MemorySegment {
     try {
@@ -17595,8 +17647,8 @@ fun clang_getRemappingsFromFileList(arg0: MemorySegment, arg1: Int): MemorySegme
  * {@snippet lang=c : clang_remap_getNumFiles UNSIGNED = Int(typedef CXRemapping = (Void)*)
  */
 private val clang_remap_getNumFiles_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS)
-private val clang_remap_getNumFiles_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_remap_getNumFiles")
-private val clang_remap_getNumFiles_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_remap_getNumFiles_ADDR, clang_remap_getNumFiles_DESC)
+private val clang_remap_getNumFiles_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_remap_getNumFiles") }
+private val clang_remap_getNumFiles_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_remap_getNumFiles_ADDR, clang_remap_getNumFiles_DESC) }
 
 fun clang_remap_getNumFiles(arg0: MemorySegment): Int {
     try {
@@ -17614,8 +17666,8 @@ fun clang_remap_getNumFiles(arg0: MemorySegment): Int {
  * {@snippet lang=c : clang_remap_getFilenames Void(typedef CXRemapping = (Void)*,UNSIGNED = Int,(typedef CXString = Declared(CXString))*,(typedef CXString = Declared(CXString))*)
  */
 private val clang_remap_getFilenames_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
-private val clang_remap_getFilenames_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_remap_getFilenames")
-private val clang_remap_getFilenames_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_remap_getFilenames_ADDR, clang_remap_getFilenames_DESC)
+private val clang_remap_getFilenames_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_remap_getFilenames") }
+private val clang_remap_getFilenames_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_remap_getFilenames_ADDR, clang_remap_getFilenames_DESC) }
 
 fun clang_remap_getFilenames(arg0: MemorySegment, arg1: Int, arg2: MemorySegment, arg3: MemorySegment): Unit {
     try {
@@ -17633,8 +17685,8 @@ fun clang_remap_getFilenames(arg0: MemorySegment, arg1: Int, arg2: MemorySegment
  * {@snippet lang=c : clang_remap_dispose Void(typedef CXRemapping = (Void)*)
  */
 private val clang_remap_dispose_DESC: FunctionDescriptor = FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
-private val clang_remap_dispose_ADDR: MemorySegment = SymbolLookup.loaderLookup().findOrThrow("clang_remap_dispose")
-private val clang_remap_dispose_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(clang_remap_dispose_ADDR, clang_remap_dispose_DESC)
+private val clang_remap_dispose_ADDR: MemorySegment by lazy { kextract_runtime.lookup.findOrThrow("clang_remap_dispose") }
+private val clang_remap_dispose_HANDLE: MethodHandle by lazy { Linker.nativeLinker().downcallHandle(clang_remap_dispose_ADDR, clang_remap_dispose_DESC) }
 
 fun clang_remap_dispose(arg0: MemorySegment): Unit {
     try {

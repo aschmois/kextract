@@ -43,6 +43,8 @@ class ExamplesSmokeTest : FreeSpec({
 
     "helloworld-c" - {
         "generates and runs C bindings" {
+            assumeTrue(!System.getProperty("os.name", "").startsWith("Windows"),
+                "helloworld-c example requires a POSIX C compiler (cc) and bash")
             assumeTrue(kextractBinary.exists(),
                 "kextract binary not found — run ./gradlew createKextractImage")
             assumeTrue(findOnPath("kotlinc") != null,

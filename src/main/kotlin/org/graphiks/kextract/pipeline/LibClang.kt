@@ -38,11 +38,14 @@ object LibClang {
     private val disableCrashRecovery: MemorySegment
 
     init {
-        // Allocate crash recovery environment variable string
-        val implicitAllocator = SegmentAllocator { size, align ->
-            Arena.ofAuto().allocate(size, align)
-        }
-        disableCrashRecovery = implicitAllocator.allocateFrom("LIBCLANG_DISABLE_CRASH_RECOVERY=$CRASH_RECOVERY")
+        // POSIX putenv() does NOT copy its argument — it stores the caller's pointer
+        // directly in environ[]. The string must stay valid for the lifetime of the
+        // process; otherwise any later environ read (including those done by libc
+        // during JVM shutdown) dereferences freed memory and segfaults.
+        // We therefore allocate in Arena.global() (never released) rather than
+        // Arena.ofAuto() (released when the segment becomes unreachable).
+        disableCrashRecovery = Arena.global()
+            .allocateFrom("LIBCLANG_DISABLE_CRASH_RECOVERY=$CRASH_RECOVERY")
 
         if (!CRASH_RECOVERY) {
             // This is a hack - needed because clang_toggleCrashRecovery only takes effect _after_
@@ -64,6 +67,7 @@ object LibClang {
                 throw ExceptionInInitializerError(ex)
             }
         }
+
     }
 
     /**

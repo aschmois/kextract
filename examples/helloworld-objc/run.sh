@@ -8,8 +8,10 @@
 set -euo pipefail
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    echo "✗ This example requires macOS (Objective-C runtime)." >&2
-    exit 1
+    # Skip on non-macOS — Objective-C runtime is macOS-only.
+    # Exit 0 so this is treated as "skipped" rather than "failed" by ./gradlew verifyExamples.
+    echo "○ Skipped: this example requires macOS (Objective-C runtime)."
+    exit 0
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -87,6 +89,11 @@ rm -rf out && mkdir out
 echo "✓ out/app.jar"
 
 # ── 7. Run ──────────────────────────────────────────────────────────────────
+# SymbolLookup.libraryLookup(name, arena) bypasses java.library.path on Linux
+# (and on some macOS configurations) and goes straight to dlopen. Export the
+# loader search paths so libgreeter.dylib is findable at runtime.
+export LD_LIBRARY_PATH="$SCRIPT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export DYLD_LIBRARY_PATH="$SCRIPT_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 echo "▶ Running…"
 echo ""
 "$ROOT/build/kextract/runtime/bin/java" \

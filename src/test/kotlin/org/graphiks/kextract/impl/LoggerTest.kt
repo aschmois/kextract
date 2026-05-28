@@ -102,7 +102,10 @@ class LoggerTest {
     @Test
     fun `test Position toString`() {
         val pos = Position(Path.of("path/to/file.h"), 42, 10)
-        assertEquals("path/to/file.h:42:10", pos.toString())
+        // Use Path.toString() to produce the platform-appropriate separator so the
+        // assertion holds on both POSIX (/) and Windows (\).
+        val expected = "${Path.of("path/to/file.h")}:42:10"
+        assertEquals(expected, pos.toString())
     }
 
     @Test
