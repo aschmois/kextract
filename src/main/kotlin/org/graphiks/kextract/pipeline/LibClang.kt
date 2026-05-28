@@ -68,20 +68,6 @@ object LibClang {
             }
         }
 
-        // On Linux, libclang's atexit handler races with the JVM's shutdown
-        // sequence and produces a spurious SIGSEGV in libc syscall+0x1d after
-        // all tests have already passed. JVM shutdown hooks run BEFORE native
-        // `_fini` destructors, so a hook that calls Runtime.halt() bypasses
-        // libclang's destructor and lets the process exit cleanly. Test results
-        // have already been flushed to disk by the time hooks fire.
-        val osName = System.getProperty("os.name", "").lowercase()
-        if ("linux" in osName) {
-            Runtime.getRuntime().addShutdownHook(Thread {
-                System.out.flush()
-                System.err.flush()
-                Runtime.getRuntime().halt(0)
-            })
-        }
     }
 
     /**
