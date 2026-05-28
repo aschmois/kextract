@@ -37,8 +37,8 @@ class IncludeFilter(private val includeHelper: IncludeHelper) : Declaration.Visi
     }
 
     override fun visitTypedef(tree: Declaration.Typedef) {
-        // Always keep typedefs that alias primitive or struct types, even when filtering is active.
-        // These "foundational" typealiases (BOOL, CGFloat, NSInteger, NSRect, NSPoint, …) are
+        // Always keep typedefs that alias primitive types, even when filtering is active.
+        // These "foundational" typealiases (BOOL, CGFloat, NSInteger, NSUInteger, …) are
         // required by any generated ObjC binding that references them; they must survive
         // --include-objc-class filtering regardless of whether they were explicitly listed.
         if (!includeHelper.isIncluded(tree) && !isFoundationalTypealias(tree.type())) {
@@ -48,12 +48,18 @@ class IncludeFilter(private val includeHelper: IncludeHelper) : Declaration.Visi
 
     /**
      * Returns true when [type] resolves (through typedef/qualifier chains, not pointer
-     * indirections) to a primitive or struct type — i.e. the kind of type whose Kotlin
+     * indirections) to a non-void primitive — i.e. the kind of type whose Kotlin
      * typealias must always be emitted so that ObjC bindings compile.
+     *
+     * Struct-backed typedefs are intentionally excluded: system headers (Foundation,
+     * pthreads, Mach) expose struct typedefs whose underlying named structs are
+     * excluded by the filter. Keeping the typedef while its backing struct is excluded
+     * causes kextract to emit "TYPE depends on UNDERLYING which has been excluded" errors.
+     * Primitive-backed typedefs (BOOL, CGFloat, NSInteger, NSUInteger, …) never have
+     * this problem because primitives cannot be excluded.
      */
     private fun isFoundationalTypealias(type: Type): Boolean = when {
         type is Type.Primitive && type.kind() != Type.Primitive.Kind.Void -> true
-        type is Type.Declared && type.tree().kind() == Declaration.Scoped.Kind.STRUCT -> true
         type is Type.Delegated && type.kind() != Type.Delegated.Kind.POINTER ->
             isFoundationalTypealias(type.type())
         else -> false
