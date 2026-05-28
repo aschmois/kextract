@@ -7,8 +7,10 @@
 set -euo pipefail
 
 if [[ "$(uname)" != "Darwin" ]]; then
-    echo "✗ This example requires macOS (Objective-C runtime)." >&2
-    exit 1
+    # Skip on non-macOS — Objective-C runtime is macOS-only.
+    # Exit 0 so this is treated as "skipped" rather than "failed" by ./gradlew verifyExamples.
+    echo "○ Skipped: this example requires macOS (Objective-C runtime)."
+    exit 0
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
