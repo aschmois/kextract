@@ -24,6 +24,7 @@ import org.graphiks.kextract.DeclarationImpl.ClangOffsetOf
 import org.graphiks.kextract.DeclarationImpl.ClangSizeOf
 import org.graphiks.kextract.DeclarationImpl.NestedDeclarations
 import org.graphiks.kextract.DeclarationImpl.DeclarationString
+import org.graphiks.kextract.DeclarationImpl.SourceComment
 import org.graphiks.kextract.DeclarationImpl.TypedefEnumScoped
 
 import java.nio.file.Path
@@ -38,6 +39,11 @@ internal class TreeMaker {
 
     fun addAttributes(d: Declaration?, c: Cursor): Declaration? {
         if (d == null) return null
+        val rawComment = c.rawCommentText().trim()
+        val briefComment = ""
+        if (rawComment.isNotEmpty() || briefComment.isNotEmpty()) {
+            SourceComment.with(d, rawComment, briefComment)
+        }
         val attributes: MutableMap<String, MutableList<String>> = mutableMapOf()
         c.forEach { child ->
             if (child.isAttribute()) {

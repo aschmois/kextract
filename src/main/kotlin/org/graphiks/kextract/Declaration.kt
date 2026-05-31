@@ -561,4 +561,12 @@ internal abstract class DeclarationImpl(
             fun getOrThrow(declaration: Declaration): String = declaration.getAttribute<DeclarationString>()!!.declString
         }
     }
+
+    data class SourceComment(val raw: String, val brief: String) : Declaration.Attribute {
+        companion object {
+            fun with(declaration: Declaration, raw: String, brief: String) =
+                declaration.addAttribute(SourceComment(raw, brief))
+            fun get(declaration: Declaration): SourceComment? = declaration.getAttribute<SourceComment>()
+        }
+    }
 }
