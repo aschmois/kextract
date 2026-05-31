@@ -3,7 +3,7 @@ import java.net.URI
 
 plugins {
     java
-    id("org.jetbrains.kotlin.jvm") version "2.3.21"
+    id("org.jetbrains.kotlin.jvm")
 }
 
 kotlin { jvmToolchain(25) }

@@ -2,11 +2,15 @@ package org.graphiks.kextract.pipeline
 
 import com.github.ajalt.clikt.core.main
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.Position
+import org.graphiks.kextract.Type
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import java.io.File
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
+import kotlin.io.path.exists
+import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
@@ -97,7 +101,7 @@ class KextractTool(private val logger: Logger) {
             logger.err("kextract.parse.failed", e.message ?: "")
             if (DEBUG) e.printStackTrace()
             return FAILURE
-        }
+        }.withStaticConstDeclarations(headers)
 
         if (DEBUG) {
             System.err.println("Parsed ${decl.members().size} top-level declarations:")
@@ -121,7 +125,7 @@ class KextractTool(private val logger: Logger) {
             results.forEach { r -> System.err.println("  ${r.getPath()}") }
         }
 
-        return writeKotlin(results, outputDir)
+        return writeKotlin(results, outputDir, options)
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -141,14 +145,29 @@ class KextractTool(private val logger: Logger) {
         val transformed = NameMangler(headerName).scan(d)
         return KotlinGenerator().generate(
             transformed, headerName, options.targetPackage,
-            options.libraries, options.useSystemLoadLibrary
+            options.libraries, options.useSystemLoadLibrary,
+            options.multiplatform
         )
     }
 
-    private fun writeKotlin(results: List<KotlinSourceFile>, outputDir: Path): Int {
+    private fun writeKotlin(results: List<KotlinSourceFile>, outputDir: Path, options: Options): Int {
         return try {
             for (result in results) {
-                val outputPath = outputDir.resolve(result.getPath())
+                val fileSubpath = result.getPath()
+                val finalPath = if (options.multiplatform) {
+                    val className = result.className
+                    val targetDir = when {
+                        className.endsWith("_common") || className.endsWith("Common") -> "commonMain/kotlin"
+                        className.endsWith("_jvm") || className.endsWith("Jvm") -> "jvmMain/kotlin"
+                        className.endsWith("_android") || className.endsWith("Android") || result.packageName.endsWith(".android") -> "androidMain/kotlin"
+                        className.endsWith("_native") || className.endsWith("Native") -> "nativeMain/kotlin"
+                        else -> "commonMain/kotlin" // Default to commonMain
+                    }
+                    Path.of(targetDir).resolve(fileSubpath)
+                } else {
+                    fileSubpath
+                }
+                val outputPath = outputDir.resolve(finalPath)
                 outputPath.parent.createDirectories()
                 outputPath.writeText(result.contents)
             }
@@ -163,6 +182,71 @@ class KextractTool(private val logger: Logger) {
         headers.joinToString("\n") { header ->
             if (isSpecialHeaderName(header)) "#include $header" else "#include \"$header\""
         }
+
+    private fun Declaration.Scoped.withStaticConstDeclarations(headers: List<String>): Declaration.Scoped {
+        val existingConstants = members().filterIsInstance<Declaration.Constant>().map { it.name() }.toSet()
+        val constants = headers
+            .filterNot { isSpecialHeaderName(it) }
+            .flatMap { scanStaticConstDeclarations(Path.of(it), mutableSetOf()) }
+            .filterNot { it.name() in existingConstants }
+
+        if (constants.isEmpty()) return this
+
+        return Declaration.toplevel(pos(), *(members() + constants).toTypedArray())
+    }
+
+    private fun scanStaticConstDeclarations(path: Path, seen: MutableSet<Path>): List<Declaration.Constant> {
+        val normalized = path.toAbsolutePath().normalize()
+        if (!seen.add(normalized) || !normalized.exists()) return emptyList()
+
+        val source = normalized.readText()
+        val localIncludes = Regex("""#include\s+"([^"]+)"""")
+            .findAll(source)
+            .map { normalized.parent.resolve(it.groupValues[1]).normalize() }
+            .toList()
+
+        val constants = Regex("""static\s+const\s+(WGPU\w+)\s+(WGPU\w+)\s*=\s*([^;]+);""")
+            .findAll(source)
+            .mapNotNull { match ->
+                val typeName = match.groupValues[1]
+                val constantName = match.groupValues[2]
+                val value = evaluateIntegerExpression(match.groupValues[3]) ?: return@mapNotNull null
+                Declaration.constant(
+                    Position(normalized, 1, 1),
+                    constantName,
+                    value,
+                    Type.typedef(typeName, Type.primitive(Type.Primitive.Kind.LongLong))
+                )
+            }
+            .toList()
+
+        return constants + localIncludes.flatMap { scanStaticConstDeclarations(it, seen) }
+    }
+
+    private fun evaluateIntegerExpression(expression: String): Long? {
+        val cleaned = expression
+            .replace(Regex("""/\*.*?\*/"""), "")
+            .replace(Regex("""\b[UuLl]+\b"""), "")
+            .trim()
+
+        return cleaned
+            .split('|')
+            .map { it.trim().removeSurrounding("(", ")").trim() }
+            .fold(0L) { acc, part ->
+                val value = evaluateIntegerTerm(part) ?: return null
+                acc or value
+            }
+    }
+
+    private fun evaluateIntegerTerm(term: String): Long? {
+        val shift = Regex("""^1\s*<<\s*(\d+)$""").matchEntire(term)
+        if (shift != null) return 1L shl shift.groupValues[1].toInt()
+
+        return when {
+            term.startsWith("0x", ignoreCase = true) -> term.removePrefix("0x").removePrefix("0X").toULongOrNull(16)?.toLong()
+            else -> term.toLongOrNull()
+        }
+    }
 
     private fun hasObjCDeclarations(decl: Declaration.Scoped): Boolean =
         decl.members().any { it is Declaration.ObjCClass || it is Declaration.ObjCProtocol || it is Declaration.ObjCCategory }

@@ -90,6 +90,10 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Show warnings for skipped system declarations (default: suppressed)"
     ).flag()
 
+    val multiplatform by option("-m", "--multiplatform",
+        help = "Generate Kotlin Multiplatform bindings using kffi runtime"
+    ).flag()
+
     // ── Positional ───────────────────────────────────────────────────────────
 
     val headers by argument("headers", help = "C/ObjC header files to process").multiple(required = true)
@@ -139,7 +143,8 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             targetPackage      = targetPackage,
             outputDir          = outputDir,
             sharedClassName    = symbolsClass,
-            includeHelper      = includeHelper
+            includeHelper      = includeHelper,
+            multiplatform      = multiplatform
         )
 
         val exitCode = KextractTool(logger).runGeneration(headers, options)

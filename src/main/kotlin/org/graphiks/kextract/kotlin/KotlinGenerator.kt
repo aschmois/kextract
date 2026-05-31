@@ -31,16 +31,36 @@ class KotlinGenerator {
         headerName: String,
         targetPackage: String,
         libraries: List<Options.Library> = emptyList(),
-        useSystemLoadLibrary: Boolean = false
+        useSystemLoadLibrary: Boolean = false,
+        multiplatform: Boolean = false
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
-        val toplevel = KotlinToplevelBuilder(
-            targetPackage, className, headerName, libraries, useSystemLoadLibrary
-        )
-        scoped.accept(toplevel)
-        val files = toplevel.getFiles().toMutableList()
-        if (toplevel.needsObjCRuntime) {
-            files.add(ObjCRuntimeTemplate.generate(targetPackage))
+        val files = mutableListOf<KotlinSourceFile>()
+        if (multiplatform) {
+            val commonBuilder = org.graphiks.kextract.kotlin.builders.KotlinKmpCommonBuilder(targetPackage, className)
+            scoped.accept(commonBuilder)
+            files.addAll(commonBuilder.getFiles())
+
+            val jvmBuilder = org.graphiks.kextract.kotlin.builders.KotlinKmpJvmBuilder(targetPackage, className)
+            scoped.accept(jvmBuilder)
+            files.addAll(jvmBuilder.getFiles())
+
+            val androidBuilder = org.graphiks.kextract.kotlin.builders.KotlinKmpAndroidBuilder(targetPackage, className)
+            scoped.accept(androidBuilder)
+            files.addAll(androidBuilder.getFiles())
+
+            val nativeBuilder = org.graphiks.kextract.kotlin.builders.KotlinKmpNativeBuilder(targetPackage, className)
+            scoped.accept(nativeBuilder)
+            files.addAll(nativeBuilder.getFiles())
+        } else {
+            val toplevel = KotlinToplevelBuilder(
+                targetPackage, className, headerName, libraries, useSystemLoadLibrary
+            )
+            scoped.accept(toplevel)
+            files.addAll(toplevel.getFiles())
+            if (toplevel.needsObjCRuntime) {
+                files.add(ObjCRuntimeTemplate.generate(targetPackage))
+            }
         }
         return files
     }
