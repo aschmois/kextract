@@ -15,9 +15,15 @@ val explicitLlvmHome = (project.findProperty("llvm_home") as String?)
     ?.takeIf { it.isNotBlank() && File(it).exists() }
 val autoLlvmDir = layout.buildDirectory.dir("llvm/$llvmVersion").get().asFile.absolutePath
 val llvm_home: String = explicitLlvmHome ?: autoLlvmDir
-val jdk_home = project.property("jdk_home") as String
+val os_exe_suffix = if (Os.isFamily(Os.FAMILY_WINDOWS)) ".exe" else ""
+val jdk_home = listOfNotNull(
+    (project.findProperty("jdk_home") as String?)?.takeIf { it.isNotBlank() },
+    System.getenv("JAVA_HOME")?.takeIf { it.isNotBlank() },
+    System.getProperty("java.home")?.takeIf { it.isNotBlank() },
+).firstOrNull { candidate ->
+    File(candidate).exists() && File("$candidate/bin/javac$os_exe_suffix").exists()
+} ?: throw GradleException("No valid JDK home found from jdk_home, JAVA_HOME, or java.home")
 
-require(File(jdk_home).exists()) { "jdk_home not found: $jdk_home" }
 if (explicitLlvmHome != null) require(File("$llvm_home/lib/clang").exists()) {
     "llvm_home/lib/clang not found: $llvm_home/lib/clang"
 }
@@ -43,7 +49,6 @@ val kextract_rt_dir  = "$kextract_app_dir/runtime"
 val kextract_bin_dir = "$kextract_app_dir/bin"
 val os_lib_dir       = if (Os.isFamily(Os.FAMILY_WINDOWS)) "bin" else "lib"
 val os_script_ext    = if (Os.isFamily(Os.FAMILY_WINDOWS)) ".bat" else ""
-val os_exe_suffix    = if (Os.isFamily(Os.FAMILY_WINDOWS)) ".exe" else ""
 val libclang_dir     = "$llvm_home/$os_lib_dir"
 
 // ── downloadLLVM ──────────────────────────────────────────────────────────────
