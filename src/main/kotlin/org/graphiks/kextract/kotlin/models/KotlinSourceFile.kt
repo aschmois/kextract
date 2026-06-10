@@ -12,12 +12,16 @@ import java.nio.file.Path
 data class KotlinSourceFile(
     val packageName: String,
     val className: String,
-    val contents: String
+    val contents: String,
+    val subDirectory: String = ""
 ) {
     /**
      * Returns the file path (e.g., "org/mylib/mylib_h.kt").
      */
-    fun getPath(): Path = Path.of(packageName.replace('.', '/'), "$className.kt")
+    fun getPath(): Path = if (subDirectory.isEmpty())
+        Path.of(packageName.replace('.', '/'), "$className.kt")
+    else
+        Path.of(packageName.replace('.', '/'), subDirectory, "$className.kt")
 
     /**
      * Returns the full qualified name (e.g., "org.mylib.mylib_h").
