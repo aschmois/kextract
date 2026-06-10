@@ -10,6 +10,7 @@ data class Options(
     val targetPackage: String = "",
     val outputDir: String = ".",
     val sharedClassName: String? = null,
+    val splitOutput: Boolean = false,
     val includeHelper: IncludeHelper = IncludeHelper()
 ) {
     /** A shared library descriptor. */

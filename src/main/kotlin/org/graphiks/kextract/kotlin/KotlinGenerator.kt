@@ -31,7 +31,8 @@ class KotlinGenerator {
         headerName: String,
         targetPackage: String,
         libraries: List<Options.Library> = emptyList(),
-        useSystemLoadLibrary: Boolean = false
+        useSystemLoadLibrary: Boolean = false,
+        splitOutput: Boolean = false
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         val toplevel = KotlinToplevelBuilder(

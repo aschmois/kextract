@@ -86,6 +86,10 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Enable Objective-C parsing mode (-x objective-c -fobjc-arc); macOS only"
     ).flag()
 
+    val splitOutput by option("--split-output",
+        help = "Generate one file per ObjC class + separate files for enums/options/types"
+    ).flag()
+
     val verbose by option("--verbose",
         help = "Show warnings for skipped system declarations (default: suppressed)"
     ).flag()
@@ -139,6 +143,7 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             targetPackage      = targetPackage,
             outputDir          = outputDir,
             sharedClassName    = symbolsClass,
+            splitOutput        = splitOutput,
             includeHelper      = includeHelper
         )
 

@@ -141,7 +141,8 @@ class KextractTool(private val logger: Logger) {
         val transformed = NameMangler(headerName).scan(d)
         return KotlinGenerator().generate(
             transformed, headerName, options.targetPackage,
-            options.libraries, options.useSystemLoadLibrary
+            options.libraries, options.useSystemLoadLibrary,
+            options.splitOutput
         )
     }
 
