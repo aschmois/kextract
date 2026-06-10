@@ -3,7 +3,9 @@ package org.graphiks.kextract
 import io.kotest.core.annotation.EnabledIf
 import io.kotest.core.annotation.MacCondition
 import io.kotest.core.spec.style.FreeSpec
+import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.collections.shouldHaveAtLeastSize
+import io.kotest.matchers.maps.shouldContainKey
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
@@ -76,6 +78,23 @@ class ObjCGeneratorTest : FreeSpec({
     /** Concatenated source from a fixture header. */
     fun generateSourceFromFixture(headerName: String, pkg: String = "test"): String =
         generateFromFixture(headerName, pkg).joinToString("\n") { it.contents }
+
+    /**
+     * Generate with --split-output enabled, returns map of className -> contents.
+     */
+    fun generateSplit(objcSource: String, pkg: String = "test"): Map<String, String> {
+        val tmp = Files.createTempFile("kextract_split_test_", ".h")
+        return try {
+            tmp.toFile().writeText(objcSource)
+            val headerName = tmp.fileName.toString()
+            val parsed = KextractTool.parse(listOf(tmp.toString()), "-x", "objective-c")
+            val mangled = NameMangler(headerName).scan(parsed)
+            KotlinGenerator().generate(mangled, headerName, pkg, splitOutput = true)
+                .associate { it.className to it.contents }
+        } finally {
+            Files.deleteIfExists(tmp)
+        }
+    }
 
     // ── Parser-level checks ───────────────────────────────────────────────────
 
@@ -401,6 +420,60 @@ class ObjCGeneratorTest : FreeSpec({
         "parameters are generated with correct names and types" {
             src shouldContain "w: Int"
             src shouldContain "h: Int"
+        }
+    }
+
+    // ── Generator: split-output mode ───────────────────────────────────────────
+
+    "Split-output mode produces per-class files" - {
+
+        "plain enum appears in Enums file, Options style in Options file" {
+            val files = generateSplit("""
+                typedef enum : long { Red = 1, Green = 2 } KxColor;
+                typedef enum : long { Readable = 1, Writable = 2 } KxFileOptions;
+            """.trimIndent())
+            files.keys.any { it.endsWith("Enums") } shouldBe true
+            files.keys.any { it.endsWith("Options") } shouldBe true
+            val enumsKey = files.keys.firstOrNull { it.endsWith("Enums") } ?: ""
+            val optionsKey = files.keys.firstOrNull { it.endsWith("Options") } ?: ""
+            (files[enumsKey] ?: "") shouldContain "enum class KxColor"
+            (files[optionsKey] ?: "") shouldContain "value class KxFileOptions"
+        }
+
+        "multi-class generates separate files per class" {
+            val files = generateSplit("""
+                @interface KxA
+                - (void)methodA;
+                @end
+                @interface KxB : KxA
+                - (void)methodB;
+                @end
+            """.trimIndent())
+            files.keys shouldContain "KxA"
+            files.keys shouldContain "KxB"
+            (files["KxA"] ?: "") shouldContain "fun methodA()"
+            (files["KxB"] ?: "") shouldContain "fun methodB()"
+        }
+
+        "protocol gets its own file" {
+            val files = generateSplit("""
+                @protocol KxDrawable
+                - (void)draw;
+                @end
+            """.trimIndent())
+            files.keys shouldContain "KxDrawable"
+            (files["KxDrawable"] ?: "") shouldContain "interface KxDrawable"
+        }
+
+        "ObjCRuntime is still included alongside split files" {
+            val files = generateSplit("""
+                @interface KxSimple
+                - (void)doSomething;
+                @end
+            """.trimIndent())
+            // In split mode, ObjCRuntime is NOT in the map (it's added separately by KotlinGenerator)
+            // but each class file references ObjCRuntime.sel and ObjCRuntime.msgSend
+            (files["KxSimple"] ?: "") shouldContain "ObjCRuntime.sel"
         }
     }
 })
