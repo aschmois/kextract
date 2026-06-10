@@ -36,7 +36,7 @@ class KotlinGenerator {
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         val toplevel = KotlinToplevelBuilder(
-            targetPackage, className, headerName, libraries, useSystemLoadLibrary
+            targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput
         )
         scoped.accept(toplevel)
         val files = toplevel.getFiles().toMutableList()

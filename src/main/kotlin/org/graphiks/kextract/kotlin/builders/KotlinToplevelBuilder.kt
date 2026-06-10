@@ -16,7 +16,8 @@ class KotlinToplevelBuilder(
     val className: String,
     private val headerName: String,
     private val libraries: List<Options.Library> = emptyList(),
-    private val useSystemLoadLibrary: Boolean = false
+    private val useSystemLoadLibrary: Boolean = false,
+    private val splitOutput: Boolean = false
 ) : Declaration.Visitor<Unit> {
     private val builder = SourceBuilder()
     private val files = mutableListOf<KotlinSourceFile>()
