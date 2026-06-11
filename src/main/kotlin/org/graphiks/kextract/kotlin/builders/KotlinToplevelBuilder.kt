@@ -16,18 +16,29 @@ class KotlinToplevelBuilder(
     val className: String,
     private val headerName: String,
     private val libraries: List<Options.Library> = emptyList(),
-    private val useSystemLoadLibrary: Boolean = false
+    private val useSystemLoadLibrary: Boolean = false,
+    private val splitOutput: Boolean = false
 ) : Declaration.Visitor<Unit> {
-    private val builder = SourceBuilder()
+    private val slots = LinkedHashMap<String, SourceBuilder>()
     private val files = mutableListOf<KotlinSourceFile>()
-    private val headerBuilder = KotlinHeaderBuilder(builder, this)
-    private val structBuilder = KotlinStructBuilder(builder, this)
-    private val typedefBuilder = KotlinTypedefBuilder(builder, this)
-    // objcClassBuilder is initialised lazily after generatedObjCClassNames is populated
-    private var objcClassBuilder = KotlinObjCClassBuilder(builder, this)
-    private val objcProtocolBuilder = KotlinObjCProtocolBuilder(builder, this)
-    private val objcCategoryBuilder = KotlinObjCCategoryBuilder(builder, this)
-    private val enumBuilder = KotlinEnumBuilder(builder, this)
+
+    /** Base name derived from header filename (e.g. "AppKit" from "AppKit_h"). */
+    private val headerBaseName: String = className.removeSuffix("_h")
+
+    private val headerBuilder get() = KotlinHeaderBuilder(mainSlot, this)
+    private val structBuilder get() = KotlinStructBuilder(mainSlot, this)
+    private val typedefBuilder get() = KotlinTypedefBuilder(mainSlot, this)
+    private val enumBuilder get() = KotlinEnumBuilder(mainSlot, this)
+    private val objcProtocolBuilder get() = KotlinObjCProtocolBuilder(mainSlot, this)
+    private val objcCategoryBuilder get() = KotlinObjCCategoryBuilder(mainSlot, this)
+    // objcClassBuilder is recreated after the TOPLEVEL pre-scan populates generatedClassNames
+    private var objcClassBuilder: KotlinObjCClassBuilder = KotlinObjCClassBuilder(mainSlot, this)
+
+    /** Set after TOPLEVEL pre-scan for split-mode per-class builders. */
+    private var _generatedClassNames: Set<String> = emptySet()
+
+    private fun getOrCreateSlot(key: String): SourceBuilder = slots.getOrPut(key) { SourceBuilder() }
+    private val mainSlot: SourceBuilder get() = getOrCreateSlot("_main")
 
     /** True if any ObjC declaration was encountered — triggers ObjCRuntime.kt emission. */
     var needsObjCRuntime: Boolean = false
@@ -39,43 +50,43 @@ class KotlinToplevelBuilder(
     init {
         // Package declaration
         if (targetPackage.isNotEmpty()) {
-            builder.appendLine("package ${targetPackage}")
-            builder.appendLine()
+            mainSlot.appendLine("package ${targetPackage}")
+            mainSlot.appendLine()
         }
 
         // Standard imports
-        builder.appendLine("import java.lang.invoke.*")
-        builder.appendLine("import java.lang.foreign.*")
-        builder.appendLine("import java.lang.foreign.MemoryLayout.PathElement.*")
-        builder.appendLine()
+        mainSlot.appendLine("import java.lang.invoke.*")
+        mainSlot.appendLine("import java.lang.foreign.*")
+        mainSlot.appendLine("import java.lang.foreign.MemoryLayout.PathElement.*")
+        mainSlot.appendLine()
 
         // Helper constants for layouts
-        builder.appendLine("private object kextract_runtime {")
-        builder.indent()
-        builder.appendLine("val C_BOOL: ValueLayout = ValueLayout.JAVA_BOOLEAN")
-        builder.appendLine("val C_CHAR: ValueLayout = ValueLayout.JAVA_BYTE")
-        builder.appendLine("val C_SHORT: ValueLayout = ValueLayout.JAVA_SHORT")
-        builder.appendLine("val C_INT: ValueLayout = ValueLayout.JAVA_INT")
-        builder.appendLine("val C_LONG: ValueLayout = ValueLayout.JAVA_LONG")
-        builder.appendLine("val C_LONG_LONG: ValueLayout = ValueLayout.JAVA_LONG")
-        builder.appendLine("val C_FLOAT: ValueLayout = ValueLayout.JAVA_FLOAT")
-        builder.appendLine("val C_DOUBLE: ValueLayout = ValueLayout.JAVA_DOUBLE")
-        builder.appendLine("val C_POINTER: ValueLayout = ValueLayout.ADDRESS")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
+        mainSlot.appendLine("private object kextract_runtime {")
+        mainSlot.indent()
+        mainSlot.appendLine("val C_BOOL: ValueLayout = ValueLayout.JAVA_BOOLEAN")
+        mainSlot.appendLine("val C_CHAR: ValueLayout = ValueLayout.JAVA_BYTE")
+        mainSlot.appendLine("val C_SHORT: ValueLayout = ValueLayout.JAVA_SHORT")
+        mainSlot.appendLine("val C_INT: ValueLayout = ValueLayout.JAVA_INT")
+        mainSlot.appendLine("val C_LONG: ValueLayout = ValueLayout.JAVA_LONG")
+        mainSlot.appendLine("val C_LONG_LONG: ValueLayout = ValueLayout.JAVA_LONG")
+        mainSlot.appendLine("val C_FLOAT: ValueLayout = ValueLayout.JAVA_FLOAT")
+        mainSlot.appendLine("val C_DOUBLE: ValueLayout = ValueLayout.JAVA_DOUBLE")
+        mainSlot.appendLine("val C_POINTER: ValueLayout = ValueLayout.ADDRESS")
+        mainSlot.unindent()
+        mainSlot.appendLine("}")
+        mainSlot.appendLine()
 
         // Symbol lookup — loads native libraries and exposes a single LOOKUP
         if (libraries.isNotEmpty()) {
-            builder.appendLine("private val LOOKUP: SymbolLookup = run {")
-            builder.indent()
+            mainSlot.appendLine("private val LOOKUP: SymbolLookup = run {")
+            mainSlot.indent()
             if (useSystemLoadLibrary) {
                 for (lib in libraries) {
-                    builder.appendLine("System.loadLibrary(\"${lib.libSpec}\")")
+                    mainSlot.appendLine("System.loadLibrary(\"${lib.libSpec}\")")
                 }
-                builder.appendLine("SymbolLookup.loaderLookup()")
+                mainSlot.appendLine("SymbolLookup.loaderLookup()")
             } else {
-                builder.appendLine("var lu: SymbolLookup = SymbolLookup.loaderLookup()")
+                mainSlot.appendLine("var lu: SymbolLookup = SymbolLookup.loaderLookup()")
                 for (lib in libraries) {
                     val lookup = when (lib.specKind) {
                         Options.Library.SpecKind.PATH ->
@@ -83,21 +94,33 @@ class KotlinToplevelBuilder(
                         Options.Library.SpecKind.NAME ->
                             "SymbolLookup.libraryLookup(\"${lib.libSpec}\", Arena.global())"
                     }
-                    builder.appendLine("lu = $lookup.or(lu)")
+                    mainSlot.appendLine("lu = $lookup.or(lu)")
                 }
-                builder.appendLine("lu")
+                mainSlot.appendLine("lu")
             }
-            builder.unindent()
-            builder.appendLine("}")
-            builder.appendLine()
+            mainSlot.unindent()
+            mainSlot.appendLine("}")
+            mainSlot.appendLine()
         }
     }
 
     override fun visitScoped(decl: Declaration.Scoped) {
         if (Skip.isPresent(decl)) return
         when (decl.kind()) {
-            Declaration.Scoped.Kind.STRUCT -> structBuilder.visitStruct(decl)
-            Declaration.Scoped.Kind.UNION  -> structBuilder.visitUnion(decl)
+            Declaration.Scoped.Kind.STRUCT -> {
+                if (splitOutput) {
+                    KotlinStructBuilder(getOrCreateSlot("types"), this).visitStruct(decl)
+                } else {
+                    structBuilder.visitStruct(decl)
+                }
+            }
+            Declaration.Scoped.Kind.UNION  -> {
+                if (splitOutput) {
+                    KotlinStructBuilder(getOrCreateSlot("types"), this).visitUnion(decl)
+                } else {
+                    structBuilder.visitUnion(decl)
+                }
+            }
             Declaration.Scoped.Kind.ENUM   -> {
                 // Only generate for named enums with constants.
                 // Anonymous enums (name == "") appear only as typedef targets and are never
@@ -106,7 +129,12 @@ class KotlinToplevelBuilder(
                 // clang creates a named ENUM scoped with the typedef name, and the redundant
                 // typedef is filtered — so this is the only place we emit the enum class.
                 if (decl.name().isNotEmpty()) {
-                    enumBuilder.visitEnum(decl)
+                    if (splitOutput) {
+                        val slotKey = if (isOptionsStyle(decl.name())) "options" else "enums"
+                        KotlinEnumBuilder(getOrCreateSlot(slotKey), this).visitEnum(decl)
+                    } else {
+                        enumBuilder.visitEnum(decl)
+                    }
                 }
             }
             else -> {
@@ -145,7 +173,8 @@ class KotlinToplevelBuilder(
                         .filter { !Skip.isPresent(it) }
                         .map { it.name() }
                         .toSet()
-                    objcClassBuilder = KotlinObjCClassBuilder(builder, this, generatedObjCClassNames)
+                    _generatedClassNames = generatedObjCClassNames
+                    objcClassBuilder = KotlinObjCClassBuilder(mainSlot, this, generatedObjCClassNames)
                 }
                 // Process all members
                 for (d in decl.members()) {
@@ -156,49 +185,101 @@ class KotlinToplevelBuilder(
 
         // Only add file for TOPLEVEL scoped (not for nested structs/unions)
         if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
-            files.add(KotlinSourceFile(targetPackage, className, builder.toString()))
+            if (!splitOutput) {
+                files.add(KotlinSourceFile(targetPackage, className, mainSlot.toString()))
+            }
         }
     }
 
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
-        headerBuilder.visitFunction(decl)
+        if (splitOutput) {
+            KotlinHeaderBuilder(getOrCreateSlot("functions"), this).visitFunction(decl)
+        } else {
+            headerBuilder.visitFunction(decl)
+        }
     }
 
     override fun visitVariable(decl: Declaration.Variable) {
         if (Skip.isPresent(decl)) return
-        headerBuilder.visitVariable(decl)
+        if (splitOutput) {
+            KotlinHeaderBuilder(getOrCreateSlot("functions"), this).visitVariable(decl)
+        } else {
+            headerBuilder.visitVariable(decl)
+        }
     }
 
     override fun visitTypedef(decl: Declaration.Typedef) {
         if (Skip.isPresent(decl)) return
-        typedefBuilder.visitTypedef(decl)
+        val sb = if (splitOutput) getOrCreateSlot("types") else mainSlot
+        KotlinTypedefBuilder(sb, this).visitTypedef(decl)
     }
 
     override fun visitConstant(decl: Declaration.Constant) {
         if (Skip.isPresent(decl)) return
-        headerBuilder.visitConstant(decl)
+        if (splitOutput) {
+            KotlinHeaderBuilder(getOrCreateSlot("enums"), this).visitConstant(decl)
+        } else {
+            headerBuilder.visitConstant(decl)
+        }
     }
 
     override fun visitObjCClass(decl: Declaration.ObjCClass) {
         if (Skip.isPresent(decl)) return
         needsObjCRuntime = true
-        objcClassBuilder.visitClass(decl)
+        if (splitOutput) {
+            val sb = getOrCreateSlot("class.${decl.name()}")
+            KotlinObjCClassBuilder(sb, this, _generatedClassNames).visitClass(decl)
+        } else {
+            objcClassBuilder.visitClass(decl)
+        }
     }
 
     override fun visitObjCProtocol(decl: Declaration.ObjCProtocol) {
         if (Skip.isPresent(decl)) return
         needsObjCRuntime = true
-        objcProtocolBuilder.visitProtocol(decl)
+        if (splitOutput) {
+            val sb = getOrCreateSlot("protocol.${decl.name()}")
+            KotlinObjCProtocolBuilder(sb, this).visitProtocol(decl)
+        } else {
+            objcProtocolBuilder.visitProtocol(decl)
+        }
     }
 
     override fun visitObjCCategory(decl: Declaration.ObjCCategory) {
         if (Skip.isPresent(decl)) return
         needsObjCRuntime = true
-        objcCategoryBuilder.visitCategory(decl)
+        if (splitOutput) {
+            val sb = getOrCreateSlot("class.${decl.extendedClass()}")
+            KotlinObjCCategoryBuilder(sb, this).visitCategory(decl)
+        } else {
+            objcCategoryBuilder.visitCategory(decl)
+        }
     }
 
-    fun getFiles(): List<KotlinSourceFile> = files
+    fun getFiles(): List<KotlinSourceFile> {
+        if (splitOutput) {
+            return slots.map { (key, sb) ->
+                val (subdir, name) = slotToFile(key)
+                KotlinSourceFile(targetPackage, name, sb.toString(), subdir)
+            }
+        }
+        return files
+    }
+
+    private fun slotToFile(key: String): Pair<String, String> = when {
+        key == "_main" -> "" to className
+        key == "types" -> "types" to "${headerBaseName}Types"
+        key == "enums" -> "enums" to "${headerBaseName}Enums"
+        key == "options" -> "options" to "${headerBaseName}Options"
+        key == "functions" -> "functions" to "${headerBaseName}Functions"
+        key.startsWith("class.") -> "classes" to key.removePrefix("class.")
+        key.startsWith("protocol.") -> "protocols" to key.removePrefix("protocol.")
+        else -> "" to key.replace('.', '_')
+    }
+
+    private fun isOptionsStyle(name: String): Boolean =
+        name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
 
     fun javaName(name: String): String = KotlinNameMangler.mangle(name)
 
