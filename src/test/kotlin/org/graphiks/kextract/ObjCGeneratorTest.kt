@@ -96,6 +96,23 @@ class ObjCGeneratorTest : FreeSpec({
         }
     }
 
+    /**
+     * Generate with configurable options, returns map of className -> contents.
+     */
+    fun generateWithOptions(objcSource: String, pkg: String = "test", splitOutput: Boolean = false): Map<String, String> {
+        val tmp = Files.createTempFile("kextract_options_test_", ".h")
+        return try {
+            tmp.toFile().writeText(objcSource)
+            val headerName = tmp.fileName.toString()
+            val parsed = KextractTool.parse(listOf(tmp.toString()), "-x", "objective-c")
+            val mangled = NameMangler(headerName).scan(parsed)
+            KotlinGenerator().generate(mangled, headerName, pkg, splitOutput = splitOutput)
+                .associate { it.className to it.contents }
+        } finally {
+            Files.deleteIfExists(tmp)
+        }
+    }
+
     // ── Parser-level checks ───────────────────────────────────────────────────
 
     "Parser: Animal.h produces expected ObjC declarations" - {
@@ -474,6 +491,35 @@ class ObjCGeneratorTest : FreeSpec({
             // In split mode, ObjCRuntime is NOT in the map (it's added separately by KotlinGenerator)
             // but each class file references ObjCRuntime.sel and ObjCRuntime.msgSend
             (files["KxSimple"] ?: "") shouldContain "ObjCRuntime.sel"
+        }
+    }
+
+    // ── Generator: --include-framework ─────────────────────────────────────────
+
+    "Include-framework mode" - {
+
+        "class is generated in non-filtered mode (no --include-framework needed)" {
+            val src = generate("""
+                @interface KxFrameworkClass
+                - (void)frameworkMethod;
+                @end
+            """.trimIndent())
+            src shouldContain "fun frameworkMethod()"
+        }
+
+        "split-output with inline classes still generates per-class files" {
+            val files = generateSplit("""
+                @interface KxFwA
+                - (void)methodA;
+                @end
+                @interface KxFwB
+                - (void)methodB;
+                @end
+            """.trimIndent())
+            files.keys shouldContain "KxFwA"
+            files.keys shouldContain "KxFwB"
+            (files["KxFwA"] ?: "") shouldContain "fun methodA()"
+            (files["KxFwB"] ?: "") shouldContain "fun methodB()"
         }
     }
 })
