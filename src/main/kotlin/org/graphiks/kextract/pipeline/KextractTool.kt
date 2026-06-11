@@ -108,6 +108,8 @@ class KextractTool(private val logger: Logger) {
             logger.warn("kextract.objc.non.macos.warning")
         }
 
+        options.includeHelper.setFrameworkPaths(resolveFrameworkPaths(options.includeFrameworks))
+
         val results: List<KotlinSourceFile> = try {
             generate(decl, headers[0], options)
         } catch (e: Exception) {
@@ -122,6 +124,26 @@ class KextractTool(private val logger: Logger) {
         }
 
         return writeKotlin(results, outputDir)
+    }
+
+    private fun resolveFrameworkPaths(names: List<String>): List<Path> {
+        if (names.isEmpty()) return emptyList()
+        return try {
+            val proc = ProcessBuilder("xcrun", "--sdk", "macosx", "--show-sdk-path")
+                .redirectErrorStream(true)
+                .start()
+            val sdk = proc.inputStream.bufferedReader().readText().trim()
+            if (proc.waitFor() != 0) {
+                logger.warn("kextract.framework.sdk.not.found")
+                return emptyList()
+            }
+            names.map { name ->
+                Path.of(sdk, "System/Library/Frameworks", "${name}.framework", "Headers")
+            }
+        } catch (e: Exception) {
+            logger.warn("kextract.framework.sdk.error", e.message ?: "")
+            emptyList()
+        }
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

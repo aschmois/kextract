@@ -90,6 +90,10 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Generate one file per ObjC class + separate files for enums/options/types"
     ).flag()
 
+    val includeFrameworks by option("--include-framework", metavar = "NAME",
+        help = "Include all declarations from the named SDK framework (repeatable)"
+    ).multiple()
+
     val verbose by option("--verbose",
         help = "Show warnings for skipped system declarations (default: suppressed)"
     ).flag()
@@ -144,6 +148,7 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             outputDir          = outputDir,
             sharedClassName    = symbolsClass,
             splitOutput        = splitOutput,
+            includeFrameworks  = includeFrameworks,
             includeHelper      = includeHelper
         )
 

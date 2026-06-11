@@ -42,13 +42,19 @@ class IncludeHelper {
         EnumMap(IncludeKind::class.java)
     private val usedDeclarations: MutableSet<Declaration> = mutableSetOf()
     var dumpIncludesFile: String? = null
+    private var frameworkPaths: List<Path> = emptyList()
+
+    fun setFrameworkPaths(paths: List<Path>) {
+        frameworkPaths = paths
+    }
 
     fun addSymbol(kind: IncludeKind, symbolName: String) {
         includesSymbolNamesByKind.getOrPut(kind) { mutableSetOf() }.add(symbolName)
     }
 
     fun isIncludedAsTypedef(name: String): Boolean {
-        if (!isEnabled()) return true
+        if (!isEnabled() && frameworkPaths.isEmpty()) return true
+        if (!isEnabled() && frameworkPaths.isNotEmpty()) return false
         val names = includesSymbolNamesByKind[IncludeKind.TYPEDEF] ?: return false
         return names.contains(name)
     }
@@ -86,9 +92,21 @@ class IncludeHelper {
     }
 
     private fun isIncludedInternal(kind: IncludeKind, declaration: Declaration): Boolean {
-        if (!isEnabled()) return true
-        val names = includesSymbolNamesByKind[kind] ?: return false
-        return names.contains(declaration.name())
+        if (!isEnabled() && frameworkPaths.isEmpty()) return true
+
+        // Explicit --include-* name match (takes priority)
+        if (isEnabled()) {
+            val names = includesSymbolNamesByKind[kind]
+            if (names != null && names.contains(declaration.name())) return true
+        }
+
+        // Framework source location match
+        if (frameworkPaths.isNotEmpty()) {
+            val declPath = declaration.pos().path ?: return false
+            return frameworkPaths.any { declPath.startsWith(it) }
+        }
+
+        return false
     }
 
     fun isEnabled(): Boolean = includesSymbolNamesByKind.isNotEmpty()
