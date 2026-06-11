@@ -135,7 +135,7 @@ class KotlinObjCClassBuilder(
         val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
@@ -154,7 +154,7 @@ class KotlinObjCClassBuilder(
         // Unbox enum/value-class arguments so ObjCRuntime.layoutFor() sees a primitive.
         // NS_ENUM → `.value`; NS_OPTIONS (ends with Options/Flags/Mask) → `.rawValue`.
         val argsList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             unboxedArgExpr(p.type(), pName)
         }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
@@ -219,19 +219,19 @@ class KotlinObjCClassBuilder(
 
         // Raw param list — MemorySegment for NSString params (same as base method)
         val rawParamList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             "$pName: ${TypeMapper.map(p.type())}"
         }.joinToString(", ")
-        val rawArgs = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        val rawArgs = params.mapIndexed { i, p -> escapeIdentifier(p.name().ifEmpty { "arg$i" }) }.joinToString(", ")
 
         // String param list — String for NSString params, MemorySegment for the rest
         val stringParamList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = if (nsStringParams[i]) "String" else TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
         val wrappedArgs = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             if (nsStringParams[i]) "ObjCRuntime.newNSString(Arena.global(), $pName)" else pName
         }.joinToString(", ")
 
@@ -352,6 +352,18 @@ class KotlinObjCClassBuilder(
     }
 
     companion object {
+        /** Kotlin hard keywords that cannot be used as identifiers without backtick escaping. */
+        private val HARD_KEYWORDS = setOf(
+            "package", "import", "class", "interface", "object", "data", "sealed",
+            "fun", "val", "var", "typealias", "constructor", "by", "get", "set", "where",
+            "if", "else", "when", "try", "catch", "finally", "for", "while", "do", "continue",
+            "break", "return", "throw", "is", "in", "as", "this", "super", "null", "true", "false"
+        )
+
+        /** Wraps a Kotlin hard keyword in backticks so it can be used as an identifier. */
+        fun escapeIdentifier(name: String): String =
+            if (name in HARD_KEYWORDS) "`$name`" else name
+
         /** Maps an ObjC return type to the Kotlin type name. */
         fun returnTypeKotlin(type: Type): String = when {
             type is Type.Primitive && type.kind() == Type.Primitive.Kind.Void -> "Unit"
@@ -433,7 +445,7 @@ class KotlinObjCClassBuilder(
          * "setLength:" → "setLength"
          */
         fun kotlinName(selector: String): String =
-            selector.replace(":", "_").trimEnd('_')
+            escapeIdentifier(selector.replace(":", "_").trimEnd('_'))
 
         /**
          * Returns the expression to pass for [name] when dispatching via ObjCRuntime.msgSend.

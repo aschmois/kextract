@@ -73,14 +73,14 @@ class KotlinObjCCategoryBuilder(
         val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
 
         val retDecl  = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
 
-        val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        val argsList = params.mapIndexed { i, p -> KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" }) }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
         // Emit a KDoc comment when the original ObjC return type carries generic information
@@ -115,13 +115,13 @@ class KotlinObjCCategoryBuilder(
         val retLayout = returnLayout(method.returnType())
 
         val paramList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
 
         val retDecl  = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
-        val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        val argsList = params.mapIndexed { i, p -> KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" }) }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
         builder.appendLine("// Class method: +[$extClass $selector]")

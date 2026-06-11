@@ -67,7 +67,7 @@ class KotlinObjCProtocolBuilder(
         val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
