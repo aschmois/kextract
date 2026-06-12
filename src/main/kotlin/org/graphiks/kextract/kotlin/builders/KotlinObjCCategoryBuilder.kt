@@ -34,7 +34,13 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
  */
 class KotlinObjCCategoryBuilder(
     private val builder: SourceBuilder,
-    @Suppress("unused") private val toplevel: KotlinToplevelBuilder
+    @Suppress("unused") private val toplevel: KotlinToplevelBuilder,
+    /**
+     * Kotlin method/property signatures already emitted by the extended class's own interface.
+     * Any category method or property with a matching signature is skipped to avoid
+     * "conflicting overloads" — the class interface takes precedence.
+     */
+    private val existingSignatures: Set<String> = emptySet()
 ) {
 
     fun visitCategory(decl: Declaration.ObjCCategory) {
@@ -49,6 +55,8 @@ class KotlinObjCCategoryBuilder(
         val (classMethods, instanceMethods) = decl.methods().partition { it.isClassMethod() }
 
         for (method in instanceMethods) {
+            val sig = kotlinName(method.selector())
+            if (sig in existingSignatures) continue
             emitInstanceMethod(extClass, method)
         }
 
@@ -57,6 +65,8 @@ class KotlinObjCCategoryBuilder(
         }
 
         for (prop in decl.properties()) {
+            val getterSig = kotlinName(prop.getterSelector())
+            if (getterSig in existingSignatures) continue
             emitProperty(extClass, prop)
         }
     }
@@ -92,9 +102,9 @@ class KotlinObjCCategoryBuilder(
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
         if (retKotlin == "Unit") {
-            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel$argsExpr)")
+            builder.appendLine("ObjCRuntime.msgSend(null, this.ptr, sel$argsExpr)")
         } else {
-            builder.appendLine("return ObjCRuntime.msgSend($retLayout, ptr, sel$argsExpr) as $retKotlin")
+            builder.appendLine("return ObjCRuntime.msgSend($retLayout, this.ptr, sel$argsExpr) as $retKotlin")
         }
         builder.unindent()
         builder.appendLine("}")
@@ -163,9 +173,9 @@ class KotlinObjCCategoryBuilder(
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")
         if (retKotlin == "Unit") {
-            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel)")
+            builder.appendLine("ObjCRuntime.msgSend(null, this.ptr, sel)")
         } else {
-            builder.appendLine("return ObjCRuntime.msgSend($retLayout, ptr, sel) as $retKotlin")
+            builder.appendLine("return ObjCRuntime.msgSend($retLayout, this.ptr, sel) as $retKotlin")
         }
         builder.unindent()
         builder.appendLine("}")
@@ -176,7 +186,7 @@ class KotlinObjCCategoryBuilder(
             builder.appendLine("fun $extClass.${kotlinName(setter.removeSuffix(":"))}(value: $paramType) {")
             builder.indent()
             builder.appendLine("val sel = ObjCRuntime.sel(\"$setter\")")
-            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel, value)")
+            builder.appendLine("ObjCRuntime.msgSend(null, this.ptr, sel, value)")
             builder.unindent()
             builder.appendLine("}")
         }

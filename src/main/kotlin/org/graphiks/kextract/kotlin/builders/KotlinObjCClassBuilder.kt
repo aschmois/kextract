@@ -22,16 +22,35 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
  * When a superclass is also being generated in the same run its name will appear in
  * [generatedClassNames] and the Kotlin class will extend it, passing `ptr` to `super`.
  */
+/**
+ * Map from class name to its superclass name (only for classes being generated in this run).
+ * Built during the TOPLEVEL prescan and used to detect method overrides.
+ */
+typealias ClassHierarchy = Map<String, String?>
+
 class KotlinObjCClassBuilder(
     private val builder: SourceBuilder,
     private val toplevel: KotlinToplevelBuilder,
-    private val generatedClassNames: Set<String> = emptySet()
+    private val generatedClassNames: Set<String> = emptySet(),
+    private val classHierarchy: ClassHierarchy = emptyMap(),
+    /**
+     * Map from class name to the set of Kotlin method / property accessor signatures
+     * declared directly (not inherited) on that class.  Used to detect overrides so that
+     * `override` is emitted only when the method exists in a (non-NSObject) superclass.
+     */
+    private val classMethodSignatures: Map<String, Set<String>> = emptyMap(),
+    /**
+     * The name of the ObjC class currently being generated, set at the start of
+     * [visitClass] so that [isOverride] can walk the hierarchy.
+     */
+    private var _className: String = ""
 ) {
 
     fun visitClass(decl: Declaration.ObjCClass) {
         if (Skip.isPresent(decl)) return
 
         val className = decl.name()
+        _className = className
         val superClass = decl.superClass()
 
         // KDoc header
@@ -46,12 +65,11 @@ class KotlinObjCClassBuilder(
         // run (i.e. it is not Skip-marked and therefore present in generatedClassNames).
         // System-framework root classes such as NSObject are typically not generated, so we
         // fall back to a standalone wrapper in that case.
-        // Root classes declare `val ptr` as a property; derived classes just pass it through
-        // so they don't re-declare a property that is already inherited.
+        // Always declare `val ptr` so extension functions (from category builders) can
+        // access the underlying MemorySegment via `this.ptr`.
         val superExpr = if (superClass != null && superClass in generatedClassNames)
             " : $superClass(ptr)" else ""
-        val ptrParam = if (superExpr.isNotEmpty()) "ptr: MemorySegment" else "val ptr: MemorySegment"
-        builder.appendLine("open class $className($ptrParam)$superExpr {")
+        builder.appendLine("open class $className(val ptr: MemorySegment)$superExpr {")
         builder.indent()
 
         // Companion object for class-level methods and the Class reference
@@ -147,7 +165,11 @@ class KotlinObjCClassBuilder(
         if (retSpelling.contains('<')) {
             builder.appendLine("/** @return $retSpelling */")
         }
-        builder.appendLine("fun ${kotlinName(selector)}($paramList)$retDecl {")
+        // Instance methods (receiver == "ptr") are open to allow override in subclasses;
+        // class methods in the companion object remain non-open.
+        val fnName = kotlinName(selector)
+        val openMod = if (receiver == "ptr") { if (isOverride(fnName)) "override " else "open " } else ""
+        builder.appendLine("${openMod}fun $fnName($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
 
@@ -273,7 +295,9 @@ class KotlinObjCClassBuilder(
         if (propTypeSpelling.contains('<')) {
             builder.appendLine("/** @return $propTypeSpelling */")
         }
-        builder.appendLine("fun ${kotlinName(getter)}(): $retKotlin {")
+        val getterName = kotlinName(getter)
+        val getterMod = if (isOverride(getterName)) "override " else "open "
+        builder.appendLine("${getterMod}fun $getterName(): $retKotlin {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")
         when {
@@ -301,7 +325,9 @@ class KotlinObjCClassBuilder(
             val setter = prop.setterSelector()
             val paramType = TypeMapper.map(prop.type())
             val valueExpr = unboxedArgExpr(prop.type(), "value")
-            builder.appendLine("fun ${kotlinName(setter.removeSuffix(":"))}(value: $paramType) {")
+            val setterFnName = kotlinName(setter.removeSuffix(":"))
+            val setterMod = if (isOverride(setterFnName)) "override " else "open "
+            builder.appendLine("${setterMod}fun $setterFnName(value: $paramType) {")
             builder.indent()
             builder.appendLine("val sel = ObjCRuntime.sel(\"$setter\")")
             builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel, $valueExpr)")
@@ -488,5 +514,22 @@ class KotlinObjCClassBuilder(
 
         private fun isOptionsStyle(name: String): Boolean =
             name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
+    }
+
+    /**
+     * Returns true when [kotlinName] exists in a (non-NSObject) superclass of the current
+     * [_className].  Walks up the [classHierarchy] until it finds the signature in
+     * [classMethodSignatures] or reaches a root.
+     */
+    private fun isOverride(kotlinName: String): Boolean {
+        var current: String? = _className
+        while (current != null) {
+            val name = current
+            current = classHierarchy[name]
+            if (current == null || current == "NSObject") return false
+            val parentMethods = classMethodSignatures[current]
+            if (parentMethods != null && kotlinName in parentMethods) return true
+        }
+        return false
     }
 }
