@@ -37,7 +37,23 @@ class KotlinToplevelBuilder(
     /** Set after TOPLEVEL pre-scan for split-mode per-class builders. */
     private var _generatedClassNames: Set<String> = emptySet()
 
-    private fun getOrCreateSlot(key: String): SourceBuilder = slots.getOrPut(key) { SourceBuilder() }
+    private fun getOrCreateSlot(key: String): SourceBuilder = slots.getOrPut(key) {
+        val sb = SourceBuilder()
+        // When splitting output into multiple compilation units, every file needs its own
+        // package declaration and FFM imports.  The main slot gets these in the init block
+        // below; sub-slots get them here.
+        if (splitOutput && key != "_main") {
+            if (targetPackage.isNotEmpty()) {
+                sb.appendLine("package ${targetPackage}")
+                sb.appendLine()
+            }
+            sb.appendLine("import java.lang.invoke.*")
+            sb.appendLine("import java.lang.foreign.*")
+            sb.appendLine("import java.lang.foreign.MemoryLayout.PathElement.*")
+            sb.appendLine()
+        }
+        sb
+    }
     private val mainSlot: SourceBuilder get() = getOrCreateSlot("_main")
 
     /** True if any ObjC declaration was encountered — triggers ObjCRuntime.kt emission. */

@@ -28,7 +28,11 @@ object TypeMapper {
                 "MemorySegment"
             } else {
                 val name = type.name() ?: "Any"
-                sanitizeName(name)
+                // ObjC `Class` is a typedef (struct objc_class *); if the pointer check
+                // above somehow missed it, map to MemorySegment so that generated code
+                // compiles (raw `Class` is invalid Kotlin — requires `Class<*>`),
+                // and semantically a Class pointer IS a MemorySegment at the FFM level.
+                if (name == "Class") "MemorySegment" else sanitizeName(name)
             }
         }
 
@@ -38,9 +42,6 @@ object TypeMapper {
                 Declaration.Scoped.Kind.STRUCT,
                 Declaration.Scoped.Kind.UNION -> "MemorySegment"
                 Declaration.Scoped.Kind.ENUM ->
-                    // Named enums map to the generated Kotlin enum class.
-                    // Anonymous enums are accessed via a typedef name (handled by the TYPEDEF
-                    // branch above), so we fall back to the raw Long type here.
                     if (tree.name().isNotEmpty()) tree.name() else "Long"
                 else -> "Long"
             }

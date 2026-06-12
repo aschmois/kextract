@@ -124,8 +124,15 @@ class KotlinObjCCategoryBuilder(
         val argsList = params.mapIndexed { i, p -> KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" }) }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
+        // Use the raw selector→name conversion (without backtick-escaping via kotlinName)
+        // because the extClass_ prefix already prevents collision with Kotlin hard keywords.
+        // kotlinName(selector) applied when selector IS a keyword returns `` `keyword` ``
+        // and concatenating extClass_ + `keyword` produces extClass_`keyword` which is
+        // syntactically invalid (two adjacent identifiers).
+        val classFnName = "${extClass}_${selector.replace(":", "_").trimEnd('_')}"
+        val escapedClassFnName = KotlinObjCClassBuilder.escapeIdentifier(classFnName)
         builder.appendLine("// Class method: +[$extClass $selector]")
-        builder.appendLine("fun ${extClass}_${kotlinName(selector)}($paramList)$retDecl {")
+        builder.appendLine("fun $escapedClassFnName($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
         builder.appendLine("val cls = ObjCRuntime.getClass(\"$extClass\")")
