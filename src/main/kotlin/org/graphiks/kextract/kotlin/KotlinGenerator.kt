@@ -5,6 +5,7 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.kotlin.builders.KotlinToplevelBuilder
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.objc.ObjCRuntimeTemplate
+import org.graphiks.kextract.kotlin.objc.ObjCSubclassingTemplate
 import org.graphiks.kextract.pipeline.Options
 
 /**
@@ -42,6 +43,7 @@ class KotlinGenerator {
         val files = toplevel.getFiles().toMutableList()
         if (toplevel.needsObjCRuntime) {
             files.add(ObjCRuntimeTemplate.generate(targetPackage))
+            files.add(ObjCSubclassingTemplate.generate(targetPackage))
         }
         return files
     }
