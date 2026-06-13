@@ -37,7 +37,36 @@ class KotlinToplevelBuilder(
     /** Set after TOPLEVEL pre-scan for split-mode per-class builders. */
     private var _generatedClassNames: Set<String> = emptySet()
 
-    private fun getOrCreateSlot(key: String): SourceBuilder = slots.getOrPut(key) { SourceBuilder() }
+    /**
+     * Maps each generated class name → superclass name (or null if root).
+     * Built during the TOPLEVEL prescan.
+     */
+    private var _classHierarchy: ClassHierarchy = emptyMap()
+
+    /**
+     * Maps each generated class name → set of Kotlin method / property accessor signatures
+     * declared directly on that class.  Built during the TOPLEVEL prescan and used for
+     * override detection.
+     */
+    private var _classMethodSignatures: Map<String, Set<String>> = emptyMap()
+
+    private fun getOrCreateSlot(key: String): SourceBuilder = slots.getOrPut(key) {
+        val sb = SourceBuilder()
+        // When splitting output into multiple compilation units, every file needs its own
+        // package declaration and FFM imports.  The main slot gets these in the init block
+        // below; sub-slots get them here.
+        if (splitOutput && key != "_main") {
+            if (targetPackage.isNotEmpty()) {
+                sb.appendLine("package ${targetPackage}")
+                sb.appendLine()
+            }
+            sb.appendLine("import java.lang.invoke.*")
+            sb.appendLine("import java.lang.foreign.*")
+            sb.appendLine("import java.lang.foreign.MemoryLayout.PathElement.*")
+            sb.appendLine()
+        }
+        sb
+    }
     private val mainSlot: SourceBuilder get() = getOrCreateSlot("_main")
 
     /** True if any ObjC declaration was encountered — triggers ObjCRuntime.kt emission. */
@@ -174,7 +203,20 @@ class KotlinToplevelBuilder(
                         .map { it.name() }
                         .toSet()
                     _generatedClassNames = generatedObjCClassNames
-                    objcClassBuilder = KotlinObjCClassBuilder(mainSlot, this, generatedObjCClassNames)
+
+                    // Build class hierarchy and method-signature maps for override detection.
+                    val hierarchy = mutableMapOf<String, String?>()
+                    val methodSigs = mutableMapOf<String, Set<String>>()
+                    for (cls in decl.members().filterIsInstance<Declaration.ObjCClass>().filter { !Skip.isPresent(it) }) {
+                        hierarchy[cls.name()] = cls.superClass()
+                        methodSigs[cls.name()] = extractClassSignatures(cls)
+                    }
+                    _classHierarchy = hierarchy
+                    _classMethodSignatures = methodSigs
+                    objcClassBuilder = KotlinObjCClassBuilder(
+                        mainSlot, this, generatedObjCClassNames,
+                        hierarchy, methodSigs
+                    )
                 }
                 // Process all members
                 for (d in decl.members()) {
@@ -229,7 +271,7 @@ class KotlinToplevelBuilder(
         needsObjCRuntime = true
         if (splitOutput) {
             val sb = getOrCreateSlot("class.${decl.name()}")
-            KotlinObjCClassBuilder(sb, this, _generatedClassNames).visitClass(decl)
+            KotlinObjCClassBuilder(sb, this, _generatedClassNames, _classHierarchy, _classMethodSignatures).visitClass(decl)
         } else {
             objcClassBuilder.visitClass(decl)
         }
@@ -251,7 +293,8 @@ class KotlinToplevelBuilder(
         needsObjCRuntime = true
         if (splitOutput) {
             val sb = getOrCreateSlot("class.${decl.extendedClass()}")
-            KotlinObjCCategoryBuilder(sb, this).visitCategory(decl)
+            val classSigs = _classMethodSignatures[decl.extendedClass()] ?: emptySet()
+            KotlinObjCCategoryBuilder(sb, this, classSigs).visitCategory(decl)
         } else {
             objcCategoryBuilder.visitCategory(decl)
         }
@@ -284,4 +327,22 @@ class KotlinToplevelBuilder(
     fun javaName(name: String): String = KotlinNameMangler.mangle(name)
 
     fun lookupName(decl: Declaration): String = decl.name()
+
+    /**
+     * Extracts the set of Kotlin method and property-accessor signatures from an ObjC class
+     * declaration.  These are used downstream to detect method overrides.
+     */
+    private fun extractClassSignatures(decl: Declaration.ObjCClass): Set<String> {
+        val sigs = mutableSetOf<String>()
+        for (method in decl.methods()) {
+            sigs.add(KotlinObjCClassBuilder.kotlinName(method.selector()))
+        }
+        for (prop in decl.properties()) {
+            sigs.add(KotlinObjCClassBuilder.kotlinName(prop.getterSelector()))
+            if (!prop.isReadOnly()) {
+                sigs.add(KotlinObjCClassBuilder.kotlinName(prop.setterSelector().removeSuffix(":")))
+            }
+        }
+        return sigs
+    }
 }

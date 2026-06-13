@@ -21,14 +21,27 @@ object TypeMapper {
         }
 
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> {
-            // If the typedef wraps a pointer (e.g. instancetype, id, NSObject*),
-            // return MemorySegment directly rather than the typedef name (which is not generated).
+            // Unwrap typedef to its inner type.
             val inner = type.type()
             if (inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER) {
+                // Typedef wraps a pointer (e.g. instancetype, id, NSObject*)
                 "MemorySegment"
             } else {
-                val name = type.name() ?: "Any"
-                sanitizeName(name)
+                var name = type.name() ?: "Any"
+                // For typedefs wrapping a struct/union (e.g. CGPoint = struct CGPoint),
+                // the generated ObjC wrapper class uses that struct name — but at the
+                // FFM calling convention we need raw MemorySegment, not the struct class.
+                if (inner is Type.Declared) {
+                    val tk = inner.tree().kind()
+                    if (tk == Declaration.Scoped.Kind.STRUCT || tk == Declaration.Scoped.Kind.UNION) {
+                        return "MemorySegment"
+                    }
+                }
+                // ObjC `Class` is a typedef (struct objc_class *); if the pointer check
+                // above somehow missed it, map to MemorySegment so that generated code
+                // compiles (raw `Class` is invalid Kotlin — requires `Class<*>`),
+                // and semantically a Class pointer IS a MemorySegment at the FFM level.
+                if (name == "Class") "MemorySegment" else sanitizeName(name)
             }
         }
 
@@ -38,9 +51,6 @@ object TypeMapper {
                 Declaration.Scoped.Kind.STRUCT,
                 Declaration.Scoped.Kind.UNION -> "MemorySegment"
                 Declaration.Scoped.Kind.ENUM ->
-                    // Named enums map to the generated Kotlin enum class.
-                    // Anonymous enums are accessed via a typedef name (handled by the TYPEDEF
-                    // branch above), so we fall back to the raw Long type here.
                     if (tree.name().isNotEmpty()) tree.name() else "Long"
                 else -> "Long"
             }

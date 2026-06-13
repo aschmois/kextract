@@ -22,16 +22,35 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
  * When a superclass is also being generated in the same run its name will appear in
  * [generatedClassNames] and the Kotlin class will extend it, passing `ptr` to `super`.
  */
+/**
+ * Map from class name to its superclass name (only for classes being generated in this run).
+ * Built during the TOPLEVEL prescan and used to detect method overrides.
+ */
+typealias ClassHierarchy = Map<String, String?>
+
 class KotlinObjCClassBuilder(
     private val builder: SourceBuilder,
     private val toplevel: KotlinToplevelBuilder,
-    private val generatedClassNames: Set<String> = emptySet()
+    private val generatedClassNames: Set<String> = emptySet(),
+    private val classHierarchy: ClassHierarchy = emptyMap(),
+    /**
+     * Map from class name to the set of Kotlin method / property accessor signatures
+     * declared directly (not inherited) on that class.  Used to detect overrides so that
+     * `override` is emitted only when the method exists in a (non-NSObject) superclass.
+     */
+    private val classMethodSignatures: Map<String, Set<String>> = emptyMap(),
+    /**
+     * The name of the ObjC class currently being generated, set at the start of
+     * [visitClass] so that [isOverride] can walk the hierarchy.
+     */
+    private var _className: String = ""
 ) {
 
     fun visitClass(decl: Declaration.ObjCClass) {
         if (Skip.isPresent(decl)) return
 
         val className = decl.name()
+        _className = className
         val superClass = decl.superClass()
 
         // KDoc header
@@ -46,12 +65,14 @@ class KotlinObjCClassBuilder(
         // run (i.e. it is not Skip-marked and therefore present in generatedClassNames).
         // System-framework root classes such as NSObject are typically not generated, so we
         // fall back to a standalone wrapper in that case.
-        // Root classes declare `val ptr` as a property; derived classes just pass it through
-        // so they don't re-declare a property that is already inherited.
-        val superExpr = if (superClass != null && superClass in generatedClassNames)
-            " : $superClass(ptr)" else ""
-        val ptrParam = if (superExpr.isNotEmpty()) "ptr: MemorySegment" else "val ptr: MemorySegment"
-        builder.appendLine("open class $className($ptrParam)$superExpr {")
+        // Always declare `val ptr` so extension functions (from category builders) can
+        // access the underlying MemorySegment via `this.ptr`.
+        // Root classes declare `open val` to permit override in subclasses; subclasses
+        // must use `override val` to avoid "hides member of supertype" errors.
+        val hasSuper = superClass != null && superClass in generatedClassNames
+        val superExpr = if (hasSuper) " : $superClass(ptr)" else ""
+        val ptrMod = if (hasSuper) "override val" else "open val"
+        builder.appendLine("open class $className($ptrMod ptr: MemorySegment)$superExpr {")
         builder.indent()
 
         // Companion object for class-level methods and the Class reference
@@ -135,7 +156,7 @@ class KotlinObjCClassBuilder(
         val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
@@ -147,14 +168,18 @@ class KotlinObjCClassBuilder(
         if (retSpelling.contains('<')) {
             builder.appendLine("/** @return $retSpelling */")
         }
-        builder.appendLine("fun ${kotlinName(selector)}($paramList)$retDecl {")
+        // Instance methods (receiver == "ptr") are open to allow override in subclasses;
+        // class methods in the companion object remain non-open.
+        val fnName = kotlinName(selector)
+        val openMod = if (receiver == "ptr") { if (isOverride(fnName)) "override " else "open " } else ""
+        builder.appendLine("${openMod}fun $fnName($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
 
         // Unbox enum/value-class arguments so ObjCRuntime.layoutFor() sees a primitive.
         // NS_ENUM → `.value`; NS_OPTIONS (ends with Options/Flags/Mask) → `.rawValue`.
         val argsList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             unboxedArgExpr(p.type(), pName)
         }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
@@ -219,19 +244,19 @@ class KotlinObjCClassBuilder(
 
         // Raw param list — MemorySegment for NSString params (same as base method)
         val rawParamList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             "$pName: ${TypeMapper.map(p.type())}"
         }.joinToString(", ")
-        val rawArgs = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        val rawArgs = params.mapIndexed { i, p -> escapeIdentifier(p.name().ifEmpty { "arg$i" }) }.joinToString(", ")
 
         // String param list — String for NSString params, MemorySegment for the rest
         val stringParamList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = if (nsStringParams[i]) "String" else TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
         val wrappedArgs = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = escapeIdentifier(p.name().ifEmpty { "arg$i" })
             if (nsStringParams[i]) "ObjCRuntime.newNSString(Arena.global(), $pName)" else pName
         }.joinToString(", ")
 
@@ -273,7 +298,9 @@ class KotlinObjCClassBuilder(
         if (propTypeSpelling.contains('<')) {
             builder.appendLine("/** @return $propTypeSpelling */")
         }
-        builder.appendLine("fun ${kotlinName(getter)}(): $retKotlin {")
+        val getterName = kotlinName(getter)
+        val getterMod = if (isOverride(getterName)) "override " else "open "
+        builder.appendLine("${getterMod}fun $getterName(): $retKotlin {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")
         when {
@@ -301,7 +328,9 @@ class KotlinObjCClassBuilder(
             val setter = prop.setterSelector()
             val paramType = TypeMapper.map(prop.type())
             val valueExpr = unboxedArgExpr(prop.type(), "value")
-            builder.appendLine("fun ${kotlinName(setter.removeSuffix(":"))}(value: $paramType) {")
+            val setterFnName = kotlinName(setter.removeSuffix(":"))
+            val setterMod = if (isOverride(setterFnName)) "override " else "open "
+            builder.appendLine("${setterMod}fun $setterFnName(value: $paramType) {")
             builder.indent()
             builder.appendLine("val sel = ObjCRuntime.sel(\"$setter\")")
             builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel, $valueExpr)")
@@ -352,6 +381,18 @@ class KotlinObjCClassBuilder(
     }
 
     companion object {
+        /** Kotlin hard keywords that cannot be used as identifiers without backtick escaping. */
+        private val HARD_KEYWORDS = setOf(
+            "package", "import", "class", "interface", "object", "data", "sealed",
+            "fun", "val", "var", "typealias", "constructor", "by", "get", "set", "where",
+            "if", "else", "when", "try", "catch", "finally", "for", "while", "do", "continue",
+            "break", "return", "throw", "is", "in", "as", "this", "super", "null", "true", "false"
+        )
+
+        /** Wraps a Kotlin hard keyword in backticks so it can be used as an identifier. */
+        fun escapeIdentifier(name: String): String =
+            if (name in HARD_KEYWORDS) "`$name`" else name
+
         /** Maps an ObjC return type to the Kotlin type name. */
         fun returnTypeKotlin(type: Type): String = when {
             type is Type.Primitive && type.kind() == Type.Primitive.Kind.Void -> "Unit"
@@ -433,7 +474,7 @@ class KotlinObjCClassBuilder(
          * "setLength:" → "setLength"
          */
         fun kotlinName(selector: String): String =
-            selector.replace(":", "_").trimEnd('_')
+            escapeIdentifier(selector.replace(":", "_").trimEnd('_'))
 
         /**
          * Returns the expression to pass for [name] when dispatching via ObjCRuntime.msgSend.
@@ -476,5 +517,22 @@ class KotlinObjCClassBuilder(
 
         private fun isOptionsStyle(name: String): Boolean =
             name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
+    }
+
+    /**
+     * Returns true when [kotlinName] exists in a (non-NSObject) superclass of the current
+     * [_className].  Walks up the [classHierarchy] until it finds the signature in
+     * [classMethodSignatures] or reaches a root.
+     */
+    private fun isOverride(kotlinName: String): Boolean {
+        var current: String? = _className
+        while (current != null) {
+            val name = current
+            current = classHierarchy[name]
+            if (current == null || current == "NSObject") return false
+            val parentMethods = classMethodSignatures[current]
+            if (parentMethods != null && kotlinName in parentMethods) return true
+        }
+        return false
     }
 }

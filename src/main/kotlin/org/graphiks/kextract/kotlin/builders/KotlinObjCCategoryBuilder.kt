@@ -34,7 +34,13 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
  */
 class KotlinObjCCategoryBuilder(
     private val builder: SourceBuilder,
-    @Suppress("unused") private val toplevel: KotlinToplevelBuilder
+    @Suppress("unused") private val toplevel: KotlinToplevelBuilder,
+    /**
+     * Kotlin method/property signatures already emitted by the extended class's own interface.
+     * Any category method or property with a matching signature is skipped to avoid
+     * "conflicting overloads" — the class interface takes precedence.
+     */
+    private val existingSignatures: Set<String> = emptySet()
 ) {
 
     fun visitCategory(decl: Declaration.ObjCCategory) {
@@ -49,6 +55,8 @@ class KotlinObjCCategoryBuilder(
         val (classMethods, instanceMethods) = decl.methods().partition { it.isClassMethod() }
 
         for (method in instanceMethods) {
+            val sig = kotlinName(method.selector())
+            if (sig in existingSignatures) continue
             emitInstanceMethod(extClass, method)
         }
 
@@ -57,6 +65,8 @@ class KotlinObjCCategoryBuilder(
         }
 
         for (prop in decl.properties()) {
+            val getterSig = kotlinName(prop.getterSelector())
+            if (getterSig in existingSignatures) continue
             emitProperty(extClass, prop)
         }
     }
@@ -73,14 +83,14 @@ class KotlinObjCCategoryBuilder(
         val retSpelling = method.returnTypeSpelling()
 
         val paramList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
 
         val retDecl  = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
 
-        val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        val argsList = params.mapIndexed { i, p -> KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" }) }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
         // Emit a KDoc comment when the original ObjC return type carries generic information
@@ -92,9 +102,9 @@ class KotlinObjCCategoryBuilder(
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
         if (retKotlin == "Unit") {
-            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel$argsExpr)")
+            builder.appendLine("ObjCRuntime.msgSend(null, this.ptr, sel$argsExpr)")
         } else {
-            builder.appendLine("return ObjCRuntime.msgSend($retLayout, ptr, sel$argsExpr) as $retKotlin")
+            builder.appendLine("return ObjCRuntime.msgSend($retLayout, this.ptr, sel$argsExpr) as $retKotlin")
         }
         builder.unindent()
         builder.appendLine("}")
@@ -115,17 +125,24 @@ class KotlinObjCCategoryBuilder(
         val retLayout = returnLayout(method.returnType())
 
         val paramList = params.mapIndexed { i, p ->
-            val pName = p.name().ifEmpty { "arg$i" }
+            val pName = KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" })
             val pType = TypeMapper.map(p.type())
             "$pName: $pType"
         }.joinToString(", ")
 
         val retDecl  = if (retKotlin == "Unit") ": Unit" else ": $retKotlin"
-        val argsList = params.mapIndexed { i, p -> p.name().ifEmpty { "arg$i" } }.joinToString(", ")
+        val argsList = params.mapIndexed { i, p -> KotlinObjCClassBuilder.escapeIdentifier(p.name().ifEmpty { "arg$i" }) }.joinToString(", ")
         val argsExpr = if (argsList.isEmpty()) "" else ", $argsList"
 
+        // Use the raw selector→name conversion (without backtick-escaping via kotlinName)
+        // because the extClass_ prefix already prevents collision with Kotlin hard keywords.
+        // kotlinName(selector) applied when selector IS a keyword returns `` `keyword` ``
+        // and concatenating extClass_ + `keyword` produces extClass_`keyword` which is
+        // syntactically invalid (two adjacent identifiers).
+        val classFnName = "${extClass}_${selector.replace(":", "_").trimEnd('_')}"
+        val escapedClassFnName = KotlinObjCClassBuilder.escapeIdentifier(classFnName)
         builder.appendLine("// Class method: +[$extClass $selector]")
-        builder.appendLine("fun ${extClass}_${kotlinName(selector)}($paramList)$retDecl {")
+        builder.appendLine("fun $escapedClassFnName($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
         builder.appendLine("val cls = ObjCRuntime.getClass(\"$extClass\")")
@@ -156,9 +173,9 @@ class KotlinObjCCategoryBuilder(
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")
         if (retKotlin == "Unit") {
-            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel)")
+            builder.appendLine("ObjCRuntime.msgSend(null, this.ptr, sel)")
         } else {
-            builder.appendLine("return ObjCRuntime.msgSend($retLayout, ptr, sel) as $retKotlin")
+            builder.appendLine("return ObjCRuntime.msgSend($retLayout, this.ptr, sel) as $retKotlin")
         }
         builder.unindent()
         builder.appendLine("}")
@@ -169,7 +186,7 @@ class KotlinObjCCategoryBuilder(
             builder.appendLine("fun $extClass.${kotlinName(setter.removeSuffix(":"))}(value: $paramType) {")
             builder.indent()
             builder.appendLine("val sel = ObjCRuntime.sel(\"$setter\")")
-            builder.appendLine("ObjCRuntime.msgSend(null, ptr, sel, value)")
+            builder.appendLine("ObjCRuntime.msgSend(null, this.ptr, sel, value)")
             builder.unindent()
             builder.appendLine("}")
         }
