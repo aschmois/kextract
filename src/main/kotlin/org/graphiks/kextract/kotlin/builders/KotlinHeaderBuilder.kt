@@ -82,12 +82,24 @@ class KotlinHeaderBuilder(private val builder: SourceBuilder, private val toplev
     fun visitVariable(decl: Declaration.Variable) {
         val name = toplevel.javaName(decl.name())
         val type = TypeMapper.map(decl.type())
-        val isStruct = isStructType(decl.type())
 
         // KDoc
         builder.appendLine("/**")
         builder.appendLine(" * {@snippet lang=c : ${decl.name()} ${decl.type()}")
         builder.appendLine(" */")
+
+        // Aggregate-typed global (struct/union/array) → expose its address segment directly,
+        // because a scalar VarHandle cannot get/set a whole record at once.
+        if (isAggregateGlobal(decl.type())) {
+            val varLookupExpr = if (toplevel.hasLookup) "LOOKUP" else "SymbolLookup.loaderLookup()"
+            builder.appendLine(
+                "val ${name}: MemorySegment = $varLookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow()"
+            )
+            builder.appendLine()
+            return
+        }
+
+        val isStruct = isStructType(decl.type())
 
         // Variable Layout, Segment and Handle (toplevel properties)
         // Struct types use MemoryLayout (GroupLayout) instead of ValueLayout
@@ -108,6 +120,26 @@ class KotlinHeaderBuilder(private val builder: SourceBuilder, private val toplev
         builder.appendLine("set(value) = ${name}_VH.set(${name}_SEGMENT, value)")
         builder.unindent()
         builder.appendLine()
+    }
+
+    /**
+     * True when a global variable's type is an aggregate (struct/union/array) rather than a
+     * scalar. Typedef / qualifier indirections are unwrapped; pointers stay scalar (a pointer
+     * global is a plain ADDRESS value). Aggregate globals are exposed as their address segment
+     * because a scalar VarHandle cannot get/set a whole record.
+     */
+    private fun isAggregateGlobal(type: Type): Boolean = when (type) {
+        is Type.Declared -> type.tree().kind().let {
+            it == Declaration.Scoped.Kind.STRUCT || it == Declaration.Scoped.Kind.UNION
+        }
+        is Type.Array -> true
+        is Type.Delegated -> when (type.kind()) {
+            Type.Delegated.Kind.TYPEDEF,
+            Type.Delegated.Kind.VOLATILE,
+            Type.Delegated.Kind.ATOMIC -> isAggregateGlobal(type.type())
+            else -> false
+        }
+        else -> false
     }
 
     fun visitConstant(decl: Declaration.Constant) {
