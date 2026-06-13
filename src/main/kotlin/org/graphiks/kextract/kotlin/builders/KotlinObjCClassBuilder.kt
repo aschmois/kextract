@@ -67,9 +67,12 @@ class KotlinObjCClassBuilder(
         // fall back to a standalone wrapper in that case.
         // Always declare `val ptr` so extension functions (from category builders) can
         // access the underlying MemorySegment via `this.ptr`.
-        val superExpr = if (superClass != null && superClass in generatedClassNames)
-            " : $superClass(ptr)" else ""
-        builder.appendLine("open class $className(val ptr: MemorySegment)$superExpr {")
+        // Root classes declare `open val` to permit override in subclasses; subclasses
+        // must use `override val` to avoid "hides member of supertype" errors.
+        val hasSuper = superClass != null && superClass in generatedClassNames
+        val superExpr = if (hasSuper) " : $superClass(ptr)" else ""
+        val ptrMod = if (hasSuper) "override val" else "open val"
+        builder.appendLine("open class $className($ptrMod ptr: MemorySegment)$superExpr {")
         builder.indent()
 
         // Companion object for class-level methods and the Class reference
