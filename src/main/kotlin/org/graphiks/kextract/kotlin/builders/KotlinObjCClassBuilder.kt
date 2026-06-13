@@ -172,7 +172,10 @@ class KotlinObjCClassBuilder(
         // class methods in the companion object remain non-open.
         val fnName = kotlinName(selector)
         val openMod = if (receiver == "ptr") { if (isOverride(fnName)) "override " else "open " } else ""
-        builder.appendLine("${openMod}fun $fnName($paramList)$retDecl {")
+        // Rename methods that collide with java.lang.Object methods (e.g. NSCondition.wait()
+        // vs Object.wait()) to avoid "Accidental override" at the JVM level.
+        val jvmSafe = if (fnName in JVM_OBJECT_METHODS && paramList.isEmpty() && retKotlin == "Unit") "${fnName}ObjC" else fnName
+        builder.appendLine("${openMod}fun $jvmSafe($paramList)$retDecl {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$selector\")")
 
@@ -212,7 +215,7 @@ class KotlinObjCClassBuilder(
         builder.appendLine()
 
         // Emit String convenience overloads for NSString parameters / return type
-        emitNSStringMethodOverloads(method, receiver)
+        emitNSStringMethodOverloads(method, receiver, fnName)
     }
 
     /**
@@ -232,15 +235,18 @@ class KotlinObjCClassBuilder(
      *
      * All overloads are skipped when neither condition applies.
      */
-    private fun emitNSStringMethodOverloads(method: Declaration.ObjCMethod, receiver: String) {
+    private fun emitNSStringMethodOverloads(method: Declaration.ObjCMethod, receiver: String, fnName: String) {
         val params = method.parameters()
         val retType = method.returnType()
-        val fnName = kotlinName(method.selector())
         val nsStringReturnType = isNSString(retType)
         val nsStringParams = params.map { isNSString(it.type()) }
         val hasNSStringParam = nsStringParams.any { it }
 
         if (!nsStringReturnType && !hasNSStringParam) return
+
+        // If the base method overrides a parent, the NSString convenience overloads
+        // are inherited via polymorphic dispatch — skip regenerating them.
+        if (receiver == "ptr" && isOverride(fnName)) return
 
         // Raw param list — MemorySegment for NSString params (same as base method)
         val rawParamList = params.mapIndexed { i, p ->
@@ -300,6 +306,7 @@ class KotlinObjCClassBuilder(
         }
         val getterName = kotlinName(getter)
         val getterMod = if (isOverride(getterName)) "override " else "open "
+        val isOvrd = getterMod.startsWith("override")
         builder.appendLine("${getterMod}fun $getterName(): $retKotlin {")
         builder.indent()
         builder.appendLine("val sel = ObjCRuntime.sel(\"$getter\")")
@@ -339,18 +346,20 @@ class KotlinObjCClassBuilder(
         }
         builder.appendLine()
 
-        // NSString convenience overloads for properties
-        if (isNSString(prop.type())) {
+        // NSString convenience overloads for properties.
+        // If the property is an override, the convenience overloads are inherited from
+        // the parent via polymorphic dispatch — skip regenerating them.
+        if (isNSString(prop.type()) && !isOvrd) {
             val getterFn = kotlinName(getter)
             // Getter: String overload
             builder.appendLine("/** Convenience overload — returns Kotlin [String] by converting the NSString via UTF8String. */")
-            builder.appendLine("fun ${getterFn}AsString(): String = ObjCRuntime.toJavaString($getterFn())")
+            builder.appendLine("open fun ${getterFn}AsString(): String = ObjCRuntime.toJavaString($getterFn())")
             builder.appendLine()
             // Setter: String overload (only for readwrite properties)
             if (!prop.isReadOnly()) {
                 val setterFn = kotlinName(prop.setterSelector().removeSuffix(":"))
                 builder.appendLine("/** Convenience overload — accepts Kotlin [String] for the NSString property. */")
-                builder.appendLine("fun $setterFn(value: String) = $setterFn(ObjCRuntime.newNSString(Arena.global(), value))")
+                builder.appendLine("open fun $setterFn(value: String) = $setterFn(ObjCRuntime.newNSString(Arena.global(), value))")
                 builder.appendLine()
             }
         }
@@ -392,6 +401,9 @@ class KotlinObjCClassBuilder(
         /** Wraps a Kotlin hard keyword in backticks so it can be used as an identifier. */
         fun escapeIdentifier(name: String): String =
             if (name in HARD_KEYWORDS) "`$name`" else name
+
+        /** java.lang.Object methods that cause "Accidental override" at the JVM level. */
+        private val JVM_OBJECT_METHODS = setOf("wait", "notify", "notifyAll", "getClass", "hashCode", "equals", "toString", "clone", "finalize")
 
         /** Maps an ObjC return type to the Kotlin type name. */
         fun returnTypeKotlin(type: Type): String = when {
@@ -529,7 +541,7 @@ class KotlinObjCClassBuilder(
         while (current != null) {
             val name = current
             current = classHierarchy[name]
-            if (current == null || current == "NSObject") return false
+            if (current == null) return false
             val parentMethods = classMethodSignatures[current]
             if (parentMethods != null && kotlinName in parentMethods) return true
         }

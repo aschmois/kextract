@@ -21,29 +21,27 @@ object TypeMapper {
         }
 
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> {
-            // Unwrap typedef to its inner type.
+            // Unwrap typedef: if inner type resolves (e.g. const_size_t → Long via UNSIGNED(Long)),
+            // use the resolved type. Otherwise fall through to the typedef-name logic.
+            val innerMapped = map(type.type())
+            if (innerMapped != "Any") return innerMapped
             val inner = type.type()
             if (inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER) {
-                // Typedef wraps a pointer (e.g. instancetype, id, NSObject*)
                 "MemorySegment"
             } else {
                 var name = type.name() ?: "Any"
-                // For typedefs wrapping a struct/union (e.g. CGPoint = struct CGPoint),
-                // the generated ObjC wrapper class uses that struct name — but at the
-                // FFM calling convention we need raw MemorySegment, not the struct class.
                 if (inner is Type.Declared) {
                     val tk = inner.tree().kind()
                     if (tk == Declaration.Scoped.Kind.STRUCT || tk == Declaration.Scoped.Kind.UNION) {
                         return "MemorySegment"
                     }
                 }
-                // ObjC `Class` is a typedef (struct objc_class *); if the pointer check
-                // above somehow missed it, map to MemorySegment so that generated code
-                // compiles (raw `Class` is invalid Kotlin — requires `Class<*>`),
-                // and semantically a Class pointer IS a MemorySegment at the FFM level.
                 if (name == "Class") "MemorySegment" else sanitizeName(name)
             }
         }
+
+        // Qualified types (CONST, UNSIGNED, SIGNED, VOLATILE, ATOMIC, COMPLEX) — unwrap to inner type
+        type is Type.Delegated -> map(type.type())
 
         type is Type.Declared -> {
             val tree = type.tree()
@@ -57,7 +55,7 @@ object TypeMapper {
         }
         type is Type.Function -> mapFunctionType(type)
         type is Type.Array -> "MemorySegment"
-        else -> "Any"
+        else -> "MemorySegment"
     }
 
     private fun mapPrimitive(kind: Type.Primitive.Kind): String = when (kind) {
@@ -69,7 +67,7 @@ object TypeMapper {
         Type.Primitive.Kind.Float -> "Float"
         Type.Primitive.Kind.Double -> "Double"
         Type.Primitive.Kind.Void -> "Unit"
-        else -> "Any"
+        else -> "MemorySegment"
     }
 
     private fun mapFunctionType(type: Type.Function): String {

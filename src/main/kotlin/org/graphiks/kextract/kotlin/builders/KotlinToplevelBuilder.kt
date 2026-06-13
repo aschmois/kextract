@@ -50,6 +50,22 @@ class KotlinToplevelBuilder(
      */
     private var _classMethodSignatures: Map<String, Set<String>> = emptyMap()
 
+    /** Counter for round-robin split across multiple function files (avoids <clinit> > 64KB). */
+    private var _functionBatch: Int = 0
+    private var _functionCount: Int = 0
+    private val FUNCTIONS_PER_BATCH = 300
+
+    /**
+     * Mutable set of Kotlin signatures already emitted by category extension functions,
+     * keyed by the extended class name.  Shared across all [KotlinObjCCategoryBuilder]
+     * instances for the same class so that two categories with overlapping method names
+     * do not produce "conflicting overloads".
+     */
+    private val _categorySignatures: MutableMap<String, MutableSet<String>> = mutableMapOf()
+
+    /** Set to true once we synthesise the NSObject root class. */
+    private var _nsObjectGenerated: Boolean = false
+
     private fun getOrCreateSlot(key: String): SourceBuilder = slots.getOrPut(key) {
         val sb = SourceBuilder()
         // When splitting output into multiple compilation units, every file needs its own
@@ -202,7 +218,22 @@ class KotlinToplevelBuilder(
                         .filter { !Skip.isPresent(it) }
                         .map { it.name() }
                         .toSet()
-                    _generatedClassNames = generatedObjCClassNames
+                    val modifiedClassNames = generatedObjCClassNames.toMutableSet()
+                    // If a generated class references NSObject as superclass but NSObject is
+                    // itself not being generated (it lives in the SDK but outside the
+                    // --include-framework filter), synthesize it so that:
+                    //   1. Subclasses can emit ": NSObject(ptr)" and "override val ptr"
+                    //   2. Categories on NSObject (extension functions) can resolve "this.ptr"
+                    val needsNSObject = generatedObjCClassNames.any { clsName ->
+                        decl.members()
+                            .filterIsInstance<Declaration.ObjCClass>()
+                            .firstOrNull { it.name() == clsName && !Skip.isPresent(it) }
+                            ?.superClass() == "NSObject"
+                    }
+                    if (needsNSObject && "NSObject" !in generatedObjCClassNames) {
+                        modifiedClassNames.add("NSObject")
+                    }
+                    _generatedClassNames = modifiedClassNames
 
                     // Build class hierarchy and method-signature maps for override detection.
                     val hierarchy = mutableMapOf<String, String?>()
@@ -222,6 +253,11 @@ class KotlinToplevelBuilder(
                 for (d in decl.members()) {
                     d.accept(this)
                 }
+                // After all ObjC classes have been visited, synthesise NSObject if it was
+                // added to _generatedClassNames during the prescan but never visited.
+                if ("NSObject" in _generatedClassNames && !_nsObjectGenerated) {
+                    generateNSObjectClass()
+                }
             }
         }
 
@@ -236,7 +272,13 @@ class KotlinToplevelBuilder(
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
         if (splitOutput) {
-            KotlinHeaderBuilder(getOrCreateSlot("functions"), this).visitFunction(decl)
+            val slotKey = if (_functionBatch == 0) "functions" else "functions$_functionBatch"
+            KotlinHeaderBuilder(getOrCreateSlot(slotKey), this).visitFunction(decl)
+            _functionCount++
+            if (_functionCount >= FUNCTIONS_PER_BATCH) {
+                _functionCount = 0
+                _functionBatch++
+            }
         } else {
             headerBuilder.visitFunction(decl)
         }
@@ -245,7 +287,13 @@ class KotlinToplevelBuilder(
     override fun visitVariable(decl: Declaration.Variable) {
         if (Skip.isPresent(decl)) return
         if (splitOutput) {
-            KotlinHeaderBuilder(getOrCreateSlot("functions"), this).visitVariable(decl)
+            val slotKey = if (_functionBatch == 0) "functions" else "functions$_functionBatch"
+            KotlinHeaderBuilder(getOrCreateSlot(slotKey), this).visitVariable(decl)
+            _functionCount++
+            if (_functionCount >= FUNCTIONS_PER_BATCH) {
+                _functionCount = 0
+                _functionBatch++
+            }
         } else {
             headerBuilder.visitVariable(decl)
         }
@@ -277,12 +325,37 @@ class KotlinToplevelBuilder(
         }
     }
 
+    private fun generateNSObjectClass() {
+        if (!splitOutput) return
+        _nsObjectGenerated = true
+        val sb = getOrCreateSlot("class.NSObject")
+        sb.appendLine("/**")
+        sb.appendLine(" * Kotlin/JVM wrapper for root class NSObject.")
+        sb.appendLine(" * Synthesised because it is referenced as a superclass by generated classes")
+        sb.appendLine(" * but was not included in the framework filter set.")
+        sb.appendLine(" */")
+        sb.appendLine("open class NSObject(open val ptr: MemorySegment) {")
+        sb.indent()
+        sb.appendLine("companion object {")
+        sb.indent()
+        sb.appendLine("private val _class: MemorySegment by lazy { ObjCRuntime.getClass(\"NSObject\") }")
+        sb.unindent()
+        sb.appendLine("}")
+        sb.appendLine()
+        sb.unindent()
+        sb.appendLine("}")
+        sb.appendLine()
+    }
+
     override fun visitObjCProtocol(decl: Declaration.ObjCProtocol) {
         if (Skip.isPresent(decl)) return
         needsObjCRuntime = true
+        // Skip protocols whose name collides with a generated class (e.g. NSAccessibilityElement
+        // exists as both @interface and @protocol) — the class takes precedence.
+        if (decl.name() in _generatedClassNames) return
         if (splitOutput) {
             val sb = getOrCreateSlot("protocol.${decl.name()}")
-            KotlinObjCProtocolBuilder(sb, this).visitProtocol(decl)
+            KotlinObjCProtocolBuilder(sb, this, _generatedClassNames).visitProtocol(decl)
         } else {
             objcProtocolBuilder.visitProtocol(decl)
         }
@@ -294,7 +367,10 @@ class KotlinToplevelBuilder(
         if (splitOutput) {
             val sb = getOrCreateSlot("class.${decl.extendedClass()}")
             val classSigs = _classMethodSignatures[decl.extendedClass()] ?: emptySet()
-            KotlinObjCCategoryBuilder(sb, this, classSigs).visitCategory(decl)
+            val shared = _categorySignatures.getOrPut(decl.extendedClass()) {
+                classSigs.toMutableSet()
+            }
+            KotlinObjCCategoryBuilder(sb, this, shared).visitCategory(decl)
         } else {
             objcCategoryBuilder.visitCategory(decl)
         }
@@ -316,6 +392,7 @@ class KotlinToplevelBuilder(
         key == "enums" -> "enums" to "${headerBaseName}Enums"
         key == "options" -> "options" to "${headerBaseName}Options"
         key == "functions" -> "functions" to "${headerBaseName}Functions"
+        key.startsWith("functions") -> "functions" to "${headerBaseName}Functions_${key.removePrefix("functions")}"
         key.startsWith("class.") -> "classes" to key.removePrefix("class.")
         key.startsWith("protocol.") -> "protocols" to key.removePrefix("protocol.")
         else -> "" to key.replace('.', '_')

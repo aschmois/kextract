@@ -36,11 +36,12 @@ class KotlinObjCCategoryBuilder(
     private val builder: SourceBuilder,
     @Suppress("unused") private val toplevel: KotlinToplevelBuilder,
     /**
-     * Kotlin method/property signatures already emitted by the extended class's own interface.
-     * Any category method or property with a matching signature is skipped to avoid
-     * "conflicting overloads" — the class interface takes precedence.
+     * Mutable set of Kotlin method/property signatures already emitted by the extended
+     * class's own interface AND by any other category on the same class.  Shared across
+     * all [KotlinObjCCategoryBuilder] instances for the same extended class to avoid
+     * "conflicting overloads".
      */
-    private val existingSignatures: Set<String> = emptySet()
+    private val existingSignatures: MutableSet<String> = mutableSetOf()
 ) {
 
     fun visitCategory(decl: Declaration.ObjCCategory) {
@@ -57,6 +58,7 @@ class KotlinObjCCategoryBuilder(
         for (method in instanceMethods) {
             val sig = kotlinName(method.selector())
             if (sig in existingSignatures) continue
+            existingSignatures.add(sig)
             emitInstanceMethod(extClass, method)
         }
 
@@ -67,6 +69,7 @@ class KotlinObjCCategoryBuilder(
         for (prop in decl.properties()) {
             val getterSig = kotlinName(prop.getterSelector())
             if (getterSig in existingSignatures) continue
+            existingSignatures.add(getterSig)
             emitProperty(extClass, prop)
         }
     }

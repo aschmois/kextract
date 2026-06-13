@@ -82,6 +82,7 @@ class KotlinHeaderBuilder(private val builder: SourceBuilder, private val toplev
     fun visitVariable(decl: Declaration.Variable) {
         val name = toplevel.javaName(decl.name())
         val type = TypeMapper.map(decl.type())
+        val isStruct = isStructType(decl.type())
 
         // KDoc
         builder.appendLine("/**")
@@ -89,18 +90,21 @@ class KotlinHeaderBuilder(private val builder: SourceBuilder, private val toplev
         builder.appendLine(" */")
 
         // Variable Layout, Segment and Handle (toplevel properties)
-        builder.appendLine("private val ${name}_LAYOUT: ValueLayout = ${layoutString(decl.type())}")
+        // Struct types use MemoryLayout (GroupLayout) instead of ValueLayout
+        // Use `by lazy` to keep <clinit> small.
+        val layoutType = if (isStruct) "MemoryLayout" else "ValueLayout"
+        builder.appendLine("private val ${name}_LAYOUT: $layoutType by lazy { ${layoutString(decl.type())} }")
         val varLookupExpr = if (toplevel.hasLookup) "LOOKUP" else "SymbolLookup.loaderLookup()"
         builder.appendLine(
-            "private val ${name}_SEGMENT: MemorySegment = $varLookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow()"
+            "private val ${name}_SEGMENT: MemorySegment by lazy { $varLookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow() }"
         )
-        builder.appendLine("private val ${name}_VH: VarHandle = ${name}_LAYOUT.varHandle()")
+        builder.appendLine("private val ${name}_VH: VarHandle by lazy { ${name}_LAYOUT.varHandle() }")
         builder.appendLine()
 
         // Property (getter/setter)
         builder.appendLine("var ${name}: ${type}")
         builder.indent()
-        builder.appendLine("get() = ${name}_VH.get(${name}_SEGMENT)")
+        builder.appendLine("get() = ${name}_VH.get(${name}_SEGMENT) as ${type}")
         builder.appendLine("set(value) = ${name}_VH.set(${name}_SEGMENT, value)")
         builder.unindent()
         builder.appendLine()
@@ -123,14 +127,50 @@ class KotlinHeaderBuilder(private val builder: SourceBuilder, private val toplev
 
         val type = TypeMapper.map(decl.type())
 
+        // Skip string-valued constants when the type is MemorySegment (e.g. char* macros):
+        // a Kotlin String literal cannot be assigned to a MemorySegment at compile time.
+        if (value is String && type == "MemorySegment") {
+            builder.appendLine("// Skipped constant ${decl.name()}: String value cannot be represented as MemorySegment")
+            builder.appendLine()
+            return
+        }
+
+        // Skip numeric-valued constants when the type is MemorySegment (e.g. function-pointer
+        // or opaque-pointer macros): a numeric literal cannot produce a MemorySegment.
+        if (type == "MemorySegment" && (value is Long || value is Int)) {
+            builder.appendLine("// Skipped constant ${decl.name()}: numeric value cannot be represented as MemorySegment")
+            builder.appendLine()
+            return
+        }
+
         // KDoc
         builder.appendLine("/**")
         builder.appendLine(" * {@snippet lang=c : #define ${decl.name()} ${value}")
         builder.appendLine(" */")
 
+        // Format the value as a valid Kotlin literal, fixing type mismatches with casts
+        val kotlinValue = constantKotlinLiteral(value, valueStr, type)
+
         // Constant
-        builder.appendLine("fun ${name}(): ${type} = ${value}")
+        builder.appendLine("fun ${name}(): ${type} = $kotlinValue")
         builder.appendLine()
+    }
+
+    private fun constantKotlinLiteral(value: Any, valueStr: String, type: String): String = when (value) {
+        is String -> "\"${value}\""
+        is Long -> {
+            if (type == "Int") {
+                // Long value used in an Int constant → cast down
+                if (value == Long.MIN_VALUE) "Int.MIN_VALUE"
+                else "($valueStr).toInt()"
+            } else {
+                if (value == Long.MIN_VALUE) "Long.MIN_VALUE"
+                else valueStr
+            }
+        }
+        is Float -> if (type == "Double") "(${valueStr}f).toDouble()" else "${valueStr}f"
+        is Double -> if (type == "Float") "($valueStr).toFloat()" else valueStr
+        else -> valueStr
     }
 
     private fun isValidKotlinLiteral(value: Any): Boolean = when (value) {

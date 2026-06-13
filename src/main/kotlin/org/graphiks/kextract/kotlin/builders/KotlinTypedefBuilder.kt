@@ -24,6 +24,9 @@ class KotlinTypedefBuilder(private val builder: SourceBuilder, private val tople
         val name = toplevel.javaName(decl.name())
         val type = TypeMapper.map(decl.type())
 
+        // Skip self-referencing typealiases (e.g. `typedef unsigned char Byte` → typealias Byte = Byte)
+        if (name == type) return
+
         // KDoc
         builder.appendLine("/**")
         builder.appendLine(" * {@snippet lang=c : typedef ${decl.type()} ${decl.name()};}")

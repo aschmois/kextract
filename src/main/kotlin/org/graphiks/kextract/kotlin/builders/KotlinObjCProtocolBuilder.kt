@@ -26,8 +26,14 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
  */
 class KotlinObjCProtocolBuilder(
     private val builder: SourceBuilder,
-    @Suppress("unused") private val toplevel: KotlinToplevelBuilder
+    @Suppress("unused") private val toplevel: KotlinToplevelBuilder,
+    /** Set of class names that are generated in this run — used to filter out protocol
+     *  parents that are actually classes (e.g. NSAccessibilityElement). */
+    private val generatedClassNames: Set<String> = emptySet()
 ) {
+    /** Set of Kotlin signatures already emitted for this protocol — deduplicates methods vs
+     *  property accessors, and methods inherited from parent protocols. */
+    private val emitted = mutableSetOf<String>()
 
     fun visitProtocol(decl: Declaration.ObjCProtocol) {
         if (Skip.isPresent(decl)) return
@@ -41,17 +47,27 @@ class KotlinObjCProtocolBuilder(
             builder.appendLine(" * Inherits protocols: ${decl.protocols().joinToString()}")
         builder.appendLine(" */")
 
-        // Interface declaration with super-protocols as Kotlin supertypes
-        val superProtos = decl.protocols()
+        // Interface declaration with super-protocols as Kotlin supertypes.
+        // Filter out:
+        //   - NSObject (it is a class, not a protocol, in the generated Kotlin)
+        //   - NSObjectProtocol (implicit for all ObjC objects)
+        //   - Any name that is also a generated class (e.g. NSAccessibilityElement)
+        val superProtos = decl.protocols().filter { it !in generatedClassNames && it != "NSObject" && !it.endsWith("NSObjectProtocol") }
         val superExpr = if (superProtos.isEmpty()) "" else " : ${superProtos.joinToString(", ")}"
         builder.appendLine("interface $protoName$superExpr {")
         builder.indent()
 
         for (method in decl.methods()) {
+            val sig = kotlinName(method.selector())
+            if (sig in emitted) continue
+            emitted.add(sig)
             emitMethod(method)
         }
 
         for (prop in decl.properties()) {
+            val getterSig = kotlinName(prop.getterSelector())
+            if (getterSig in emitted) continue
+            emitted.add(getterSig)
             emitProperty(prop)
         }
 
@@ -72,7 +88,9 @@ class KotlinObjCProtocolBuilder(
             "$pName: $pType"
         }.joinToString(", ")
 
-        val retDecl = if (retKotlin == "Unit") "" else ": $retKotlin"
+        // Always emit explicit return type, even for Unit: Kotlin infers Nothing from
+        // "throw UnsupportedOperationException(...)" when the : Unit is omitted.
+        val retDecl = ": $retKotlin"
 
         // Emit a KDoc comment when the original ObjC return type carries generic information
         // (e.g. "NSArray<NSString *> *") that is erased to MemorySegment in the Kotlin binding.

@@ -57,15 +57,15 @@ class KotlinStructBuilder(private val builder: SourceBuilder, private val toplev
 
         // asSlice
         builder.appendLine("fun asSlice(array: MemorySegment, index: Long): MemorySegment =")
-        builder.appendLine("    array.asSlice(layout.byteSize * index)")
+        builder.appendLine("    array.asSlice(byteSize * index)")
         builder.appendLine()
 
         // reinterpret
         builder.appendLine("fun reinterpret(addr: MemorySegment): MemorySegment =")
-        builder.appendLine("    addr.reinterpret(layout.byteSize)")
+        builder.appendLine("    addr.reinterpret(byteSize)")
         builder.appendLine()
         builder.appendLine("fun reinterpret(addr: MemorySegment, elementCount: Long): MemorySegment =")
-        builder.appendLine("    addr.reinterpret(layout.byteSize * elementCount)")
+        builder.appendLine("    addr.reinterpret(byteSize * elementCount)")
         builder.appendLine()
 
         builder.unindent()
