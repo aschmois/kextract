@@ -144,8 +144,8 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             if (colon < 1) throw IllegalArgumentException(
                 "Invalid --variadic-args format: '$arg'. Expected NAME:COUNT (e.g. XCreateIC:11)"
             )
-            val name = arg.substring(0, colon)
-            val countStr = arg.substring(colon + 1)
+            val name = arg.substring(0, colon).trim()
+            val countStr = arg.substring(colon + 1).trim()
             val count = countStr.toIntOrNull() ?: throw IllegalArgumentException(
                 "Invalid count in --variadic-args '$arg': '$countStr' is not an integer"
             )
