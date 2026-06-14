@@ -41,7 +41,17 @@ class KextractTool(private val logger: Logger) {
         @JvmStatic
         fun main(args: Array<String>) {
             val preprocessed = CommandLine.parse(expandGnuArgs(args.toList()))
-            KextractCommand(Logger.DEFAULT).main(preprocessed)
+            try {
+                KextractCommand(Logger.DEFAULT).main(preprocessed)
+            } catch (e: Throwable) {
+                System.err.println("kextract.fatal: ${e.message}")
+                e.printStackTrace(System.err)
+                if (e.cause != null) {
+                    System.err.println("kextract.fatal.cause: ${e.cause!!.message}")
+                    e.cause!!.printStackTrace(System.err)
+                }
+                System.exit(1)
+            }
         }
 
         /**
