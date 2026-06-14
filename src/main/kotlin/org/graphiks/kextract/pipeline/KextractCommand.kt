@@ -90,6 +90,10 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Generate one file per ObjC class + separate files for enums/options/types"
     ).flag()
 
+    val variadicArgs by option("--variadic-args", metavar = "NAME:COUNT",
+        help = "Number of ADDRESS variadic slots for a function (repeatable, e.g. XCreateIC:11)"
+    ).multiple()
+
     val includeFrameworks by option("--include-framework", metavar = "NAME",
         help = "Include all declarations from the named SDK framework (repeatable)"
     ).multiple()
@@ -135,6 +139,22 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             inclObjcCat.forEach   { h.addSymbol(IncludeHelper.IncludeKind.OBJC_CATEGORY,  it) }
         }
 
+        val variadicArgsMap: Map<String, Int> = variadicArgs.associate { arg ->
+            val colon = arg.lastIndexOf(':')
+            if (colon < 1) throw IllegalArgumentException(
+                "Invalid --variadic-args format: '$arg'. Expected NAME:COUNT (e.g. XCreateIC:11)"
+            )
+            val name = arg.substring(0, colon).trim()
+            val countStr = arg.substring(colon + 1).trim()
+            val count = countStr.toIntOrNull() ?: throw IllegalArgumentException(
+                "Invalid count in --variadic-args '$arg': '$countStr' is not an integer"
+            )
+            if (count < 1) throw IllegalArgumentException(
+                "Invalid count in --variadic-args '$arg': count must be >= 1"
+            )
+            name to count
+        }
+
         val options = Options(
             clangArgs = buildList {
                 includePaths.forEach { add("-I$it") }
@@ -148,6 +168,7 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             outputDir          = outputDir,
             sharedClassName    = symbolsClass,
             splitOutput        = splitOutput,
+            variadicArgs       = variadicArgsMap,
             includeFrameworks  = includeFrameworks,
             includeHelper      = includeHelper
         )

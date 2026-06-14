@@ -33,11 +33,12 @@ class KotlinGenerator {
         targetPackage: String,
         libraries: List<Options.Library> = emptyList(),
         useSystemLoadLibrary: Boolean = false,
-        splitOutput: Boolean = false
+        splitOutput: Boolean = false,
+        variadicArgs: Map<String, Int> = emptyMap(),
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         val toplevel = KotlinToplevelBuilder(
-            targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput
+            targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput, variadicArgs
         )
         scoped.accept(toplevel)
         val files = toplevel.getFiles().toMutableList()

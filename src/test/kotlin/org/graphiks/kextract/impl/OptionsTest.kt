@@ -63,4 +63,41 @@ class OptionsTest {
         val lib = Options.Library("path\\to\\lib", Options.Library.SpecKind.PATH)
         assertEquals("path\\\\to\\\\lib", Options.Library.toQuotedName(lib))
     }
+
+    @Test
+    fun `default variadicArgs is empty`() {
+        val opts = Options()
+        assertTrue(opts.variadicArgs.isEmpty())
+    }
+
+    @Test
+    fun `variadicArgs stores provided map`() {
+        val map = mapOf("XCreateIC" to 11, "XSetICValues" to 3)
+        val opts = Options(variadicArgs = map)
+        assertEquals(11, opts.variadicArgs["XCreateIC"])
+        assertEquals(3, opts.variadicArgs["XSetICValues"])
+    }
+
+    @Test
+    fun `parseVariadicArgs valid input`() {
+        val input = listOf("XCreateIC:11", "XSetICValues:3")
+        val result = input.associate { arg ->
+            val colon = arg.lastIndexOf(':')
+            arg.substring(0, colon).trim() to arg.substring(colon + 1).trim().toInt()
+        }
+        assertEquals(11, result["XCreateIC"])
+        assertEquals(3, result["XSetICValues"])
+    }
+
+    @Test
+    fun `parseVariadicArgs missing colon throws`() {
+        val input = listOf("BadFormat")
+        assertThrows<IllegalArgumentException> {
+            input.associate { arg ->
+                val colon = arg.lastIndexOf(':')
+                if (colon < 1) throw IllegalArgumentException("Invalid format")
+                arg.substring(0, colon) to arg.substring(colon + 1).toInt()
+            }
+        }
+    }
 }

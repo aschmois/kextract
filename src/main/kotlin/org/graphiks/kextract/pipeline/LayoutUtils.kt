@@ -12,9 +12,9 @@ object LayoutUtils {
 
     fun layoutString(type: Type): String = fieldLayoutString(type, -1, -1)
 
-    fun functionDescriptorString(functionType: Type.Function): String {
+    fun functionDescriptorString(functionType: Type.Function, variadicCount: Int = 0): String {
         val type = functionType.methodType()
-        val noArgs = type.parameterCount() == 0
+        val noArgs = type.parameterCount() == 0 && variadicCount == 0
         return buildString {
             if (type.returnType() != Void.TYPE) {
                 append("FunctionDescriptor.of(")
@@ -23,8 +23,12 @@ object LayoutUtils {
             } else {
                 append("FunctionDescriptor.ofVoid(")
             }
-            if (!noArgs) {
+            if (type.parameterCount() > 0) {
                 append(functionType.argumentTypes().joinToString(", ") { layoutString(it) })
+            }
+            if (variadicCount > 0) {
+                if (type.parameterCount() > 0) append(", ")
+                append((0 until variadicCount).joinToString(", ") { "ValueLayout.ADDRESS" })
             }
             append(")")
         }

@@ -21,14 +21,14 @@ class GeneratorIntegrationTest : FreeSpec({
 
     // Helper: parse an inline C source and run the Kotlin generator.
     // Mirrors the full pipeline: parse → NameMangler → KotlinGenerator.
-    fun generate(csource: String, pkg: String = "test"): String {
+    fun generate(csource: String, pkg: String = "test", variadicArgs: Map<String, Int> = emptyMap()): String {
         val tmp = Files.createTempFile("kextract_test_", ".h")
         try {
             tmp.toFile().writeText(csource)
             val headerName = tmp.fileName.toString()
             val parsed = KextractTool.parse(listOf(tmp.toString()))
             val mangled = NameMangler(headerName).scan(parsed)
-            val files = KotlinGenerator().generate(mangled, headerName, pkg)
+            val files = KotlinGenerator().generate(mangled, headerName, pkg, variadicArgs = variadicArgs)
             return files.firstOrNull()?.contents ?: ""
         } finally {
             Files.deleteIfExists(tmp)
@@ -148,6 +148,36 @@ class GeneratorIntegrationTest : FreeSpec({
             src shouldContain "_DESC: FunctionDescriptor"
             src shouldContain "_ADDR: MemorySegment"
             src shouldContain "_HANDLE: MethodHandle"
+        }
+
+        "variadic function with configured slots generates firstVariadicArg and extra MemorySegment params" {
+            val src = generate("""
+                void* variadic_fn(int fixed1, long fixed2, ...);
+            """.trimIndent(), variadicArgs = mapOf("variadic_fn" to 3))
+
+            // FunctionDescriptor should include: return ADDRESS + 2 fixed + 3 variadic ADDRESS
+            src shouldContain "ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS"
+            // firstVariadicArg(2) because 2 fixed args before variadic
+            src shouldContain "Linker.Option.firstVariadicArg(2)"
+            // Function signature should have 5 params: 2 typed + 3 MemorySegment
+            src shouldContain "arg0: Int"
+            src shouldContain "arg1: Long"
+            src shouldContain "arg2: MemorySegment, arg3: MemorySegment, arg4: MemorySegment"
+            // invokeExact should pass all 5 args
+            src shouldContain "invokeExact(arg0, arg1, arg2, arg3, arg4)"
+        }
+
+        "variadic function without config keeps current behavior (no firstVariadicArg)" {
+            val src = generate("""
+                void* raw_varargs(int fixed, ...);
+            """.trimIndent())
+
+            // Without --variadic-args config, no extra ADDRESS slots
+            src shouldContain "FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT)"
+            // No firstVariadicArg option
+            src shouldNotContain "firstVariadicArg"
+            // No variadic MemorySegment params
+            src shouldNotContain "arg1: MemorySegment"
         }
     }
 
