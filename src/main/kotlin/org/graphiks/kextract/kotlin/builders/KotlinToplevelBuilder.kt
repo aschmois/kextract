@@ -17,7 +17,8 @@ class KotlinToplevelBuilder(
     private val headerName: String,
     private val libraries: List<Options.Library> = emptyList(),
     private val useSystemLoadLibrary: Boolean = false,
-    private val splitOutput: Boolean = false
+    private val splitOutput: Boolean = false,
+    private val variadicArgs: Map<String, Int> = emptyMap(),
 ) : Declaration.Visitor<Unit> {
     private val slots = LinkedHashMap<String, SourceBuilder>()
     private val files = mutableListOf<KotlinSourceFile>()
@@ -25,7 +26,7 @@ class KotlinToplevelBuilder(
     /** Base name derived from header filename (e.g. "AppKit" from "AppKit_h"). */
     private val headerBaseName: String = className.removeSuffix("_h")
 
-    private val headerBuilder get() = KotlinHeaderBuilder(mainSlot, this)
+    private val headerBuilder get() = KotlinHeaderBuilder(mainSlot, this, variadicArgs)
     private val structBuilder get() = KotlinStructBuilder(mainSlot, this)
     private val typedefBuilder get() = KotlinTypedefBuilder(mainSlot, this)
     private val enumBuilder get() = KotlinEnumBuilder(mainSlot, this)
@@ -273,7 +274,7 @@ class KotlinToplevelBuilder(
         if (Skip.isPresent(decl)) return
         if (splitOutput) {
             val slotKey = if (_functionBatch == 0) "functions" else "functions$_functionBatch"
-            KotlinHeaderBuilder(getOrCreateSlot(slotKey), this).visitFunction(decl)
+            KotlinHeaderBuilder(getOrCreateSlot(slotKey), this, variadicArgs).visitFunction(decl)
             _functionCount++
             if (_functionCount >= FUNCTIONS_PER_BATCH) {
                 _functionCount = 0
@@ -288,7 +289,7 @@ class KotlinToplevelBuilder(
         if (Skip.isPresent(decl)) return
         if (splitOutput) {
             val slotKey = if (_functionBatch == 0) "functions" else "functions$_functionBatch"
-            KotlinHeaderBuilder(getOrCreateSlot(slotKey), this).visitVariable(decl)
+            KotlinHeaderBuilder(getOrCreateSlot(slotKey), this, variadicArgs).visitVariable(decl)
             _functionCount++
             if (_functionCount >= FUNCTIONS_PER_BATCH) {
                 _functionCount = 0
@@ -308,7 +309,7 @@ class KotlinToplevelBuilder(
     override fun visitConstant(decl: Declaration.Constant) {
         if (Skip.isPresent(decl)) return
         if (splitOutput) {
-            KotlinHeaderBuilder(getOrCreateSlot("enums"), this).visitConstant(decl)
+            KotlinHeaderBuilder(getOrCreateSlot("enums"), this, variadicArgs).visitConstant(decl)
         } else {
             headerBuilder.visitConstant(decl)
         }

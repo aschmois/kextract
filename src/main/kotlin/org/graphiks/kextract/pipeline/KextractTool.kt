@@ -164,7 +164,7 @@ class KextractTool(private val logger: Logger) {
         return KotlinGenerator().generate(
             transformed, headerName, options.targetPackage,
             options.libraries, options.useSystemLoadLibrary,
-            options.splitOutput
+            options.splitOutput, options.variadicArgs
         )
     }
 

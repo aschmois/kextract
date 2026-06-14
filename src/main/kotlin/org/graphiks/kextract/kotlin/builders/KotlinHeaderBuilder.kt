@@ -9,7 +9,11 @@ import org.graphiks.kextract.kotlin.utils.TypeMapper
 /**
  * Generates Kotlin code for functions, variables, and constants.
  */
-class KotlinHeaderBuilder(private val builder: SourceBuilder, private val toplevel: KotlinToplevelBuilder) {
+class KotlinHeaderBuilder(
+    private val builder: SourceBuilder,
+    private val toplevel: KotlinToplevelBuilder,
+    private val variadicArgs: Map<String, Int> = emptyMap(),
+) {
 
     fun visitFunction(decl: Declaration.Function) {
         val name = toplevel.javaName(decl.name())
@@ -215,7 +219,7 @@ class KotlinHeaderBuilder(private val builder: SourceBuilder, private val toplev
     fun layoutString(type: Type): String = LayoutUtils.layoutString(type)
 
     fun functionDescriptorString(decl: Declaration.Function): String =
-        LayoutUtils.functionDescriptorString(decl.type())
+        LayoutUtils.functionDescriptorString(decl.type(), variadicArgs[decl.name()] ?: 0)
 
     private fun paramString(decl: Declaration.Function, prependAllocator: Boolean = false): String {
         val args = decl.type().argumentTypes().mapIndexed { index, arg ->
