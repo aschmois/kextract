@@ -2,6 +2,7 @@
 package org.graphiks.kextract.kotlin
 
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.builders.KotlinToplevelBuilder
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.objc.ObjCRuntimeTemplate
@@ -35,10 +36,13 @@ class KotlinGenerator {
         useSystemLoadLibrary: Boolean = false,
         splitOutput: Boolean = false,
         variadicArgs: Map<String, Int> = emptyMap(),
+        win32Mode: Boolean = false,
+        dllMap: DllMap? = null,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         val toplevel = KotlinToplevelBuilder(
-            targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput, variadicArgs
+            targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput, variadicArgs,
+            win32Mode, dllMap
         )
         scoped.accept(toplevel)
         val files = toplevel.getFiles().toMutableList()
