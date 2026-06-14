@@ -94,8 +94,9 @@ class KextractTool(private val logger: Logger) {
         val effectiveClangArgs = withBuiltinResourceDir(options.clangArgs)
         val decl: Declaration.Scoped = try {
             Parser(logger).parse("kextract\$tmp.h", generateTmpSource(headers), effectiveClangArgs)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             logger.err("kextract.parse.failed", e.message ?: "")
+            if (e.cause != null) logger.err("kextract.parse.cause", e.cause!!.message ?: "")
             if (DEBUG) e.printStackTrace()
             return FAILURE
         }
