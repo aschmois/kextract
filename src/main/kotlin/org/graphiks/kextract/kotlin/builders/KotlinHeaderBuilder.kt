@@ -21,7 +21,9 @@ class KotlinHeaderBuilder(
         val returnsStruct = isStructType(decl.type().returnType())
         val params = paramString(decl, returnsStruct)
         val allocatorPrefix = if (returnsStruct) "allocator, " else ""
-        val paramNames = allocatorPrefix + decl.type().argumentTypes().indices.joinToString(", ") { "arg$it" }
+        val fixedCount = decl.type().argumentTypes().size
+        val variadicCount = if (decl.type().varargs()) variadicArgs[decl.name()] ?: 0 else 0
+        val paramNames = allocatorPrefix + (0 until fixedCount + variadicCount).joinToString(", ") { "arg$it" }
 
         // KDoc
         builder.appendLine("/**")
@@ -36,7 +38,14 @@ class KotlinHeaderBuilder(
         builder.appendLine(
             "private val ${name}_ADDR: MemorySegment = $lookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow()"
         )
-        builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC)")
+        if (variadicCount > 0) {
+            builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(")
+            builder.appendLine("    ${name}_ADDR, ${name}_DESC,")
+            builder.appendLine("    Linker.Option.firstVariadicArg(${fixedCount}),")
+            builder.appendLine(")")
+        } else {
+            builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC)")
+        }
         builder.appendLine()
 
         // Function
@@ -222,9 +231,15 @@ class KotlinHeaderBuilder(
         LayoutUtils.functionDescriptorString(decl.type(), variadicArgs[decl.name()] ?: 0)
 
     private fun paramString(decl: Declaration.Function, prependAllocator: Boolean = false): String {
-        val args = decl.type().argumentTypes().mapIndexed { index, arg ->
-            val type = TypeMapper.map(arg)
-            "arg${index}: ${type}"
+        val fixedCount = decl.type().argumentTypes().size
+        val variadicCount = if (decl.type().varargs()) variadicArgs[decl.name()] ?: 0 else 0
+        val totalArgs = fixedCount + variadicCount
+        val args = (0 until totalArgs).map { i ->
+            if (i < fixedCount) {
+                "arg${i}: ${TypeMapper.map(decl.type().argumentTypes()[i])}"
+            } else {
+                "arg${i}: MemorySegment"
+            }
         }
         return if (prependAllocator) {
             listOf("allocator: SegmentAllocator") + args
