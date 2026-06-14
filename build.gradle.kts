@@ -15,9 +15,10 @@ val explicitLlvmHome = (project.findProperty("llvm_home") as String?)
     ?.takeIf { it.isNotBlank() && File(it).exists() }
 val autoLlvmDir = layout.buildDirectory.dir("llvm/$llvmVersion").get().asFile.absolutePath
 val llvm_home: String = explicitLlvmHome ?: autoLlvmDir
-val jdk_home = project.property("jdk_home") as String
-
-require(File(jdk_home).exists()) { "jdk_home not found: $jdk_home" }
+val jdk_home = (project.findProperty("jdk_home") as? String)
+    ?.takeIf { File(it).exists() }
+    ?: System.getProperty("java.home")
+    ?: error("jdk_home not set and java.home not available")
 if (explicitLlvmHome != null) require(File("$llvm_home/lib/clang").exists()) {
     "llvm_home/lib/clang not found: $llvm_home/lib/clang"
 }
