@@ -2,6 +2,7 @@ package org.graphiks.kextract.pipeline
 
 import com.github.ajalt.clikt.core.main
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import java.io.File
@@ -164,7 +165,8 @@ class KextractTool(private val logger: Logger) {
         return KotlinGenerator().generate(
             transformed, headerName, options.targetPackage,
             options.libraries, options.useSystemLoadLibrary,
-            options.splitOutput, options.variadicArgs
+            options.splitOutput, options.variadicArgs,
+            options.win32Mode, options.dllMap
         )
     }
 

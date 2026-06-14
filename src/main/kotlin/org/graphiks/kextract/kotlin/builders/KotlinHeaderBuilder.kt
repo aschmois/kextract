@@ -32,7 +32,11 @@ class KotlinHeaderBuilder(
 
         // Function descriptor, address and handle (toplevel properties)
         builder.appendLine("private val ${name}_DESC: FunctionDescriptor = ${functionDescriptorString(decl)}")
-        val lookupExpr = if (toplevel.hasLookup) "LOOKUP" else "SymbolLookup.loaderLookup()"
+        val lookupExpr = when {
+            toplevel.isWin32Mode -> "_lookup(\"${toplevel.lookupName(decl)}\")"
+            toplevel.hasLookup -> "LOOKUP"
+            else -> "SymbolLookup.loaderLookup()"
+        }
         // Use find(name).orElseThrow() rather than findOrThrow(name) for compatibility with
         // older Kotlin/JDK toolchains that haven't seen SymbolLookup.findOrThrow (added JDK 22).
         builder.appendLine(
@@ -104,7 +108,11 @@ class KotlinHeaderBuilder(
         // Aggregate-typed global (struct/union/array) → expose its address segment directly,
         // because a scalar VarHandle cannot get/set a whole record at once.
         if (isAggregateGlobal(decl.type())) {
-            val varLookupExpr = if (toplevel.hasLookup) "LOOKUP" else "SymbolLookup.loaderLookup()"
+            val varLookupExpr = when {
+                toplevel.isWin32Mode -> "_lookup(\"${toplevel.lookupName(decl)}\")"
+                toplevel.hasLookup -> "LOOKUP"
+                else -> "SymbolLookup.loaderLookup()"
+            }
             builder.appendLine(
                 "val ${name}: MemorySegment = $varLookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow()"
             )
@@ -119,7 +127,11 @@ class KotlinHeaderBuilder(
         // Use `by lazy` to keep <clinit> small.
         val layoutType = if (isStruct) "MemoryLayout" else "ValueLayout"
         builder.appendLine("private val ${name}_LAYOUT: $layoutType by lazy { ${layoutString(decl.type())} }")
-        val varLookupExpr = if (toplevel.hasLookup) "LOOKUP" else "SymbolLookup.loaderLookup()"
+        val varLookupExpr = when {
+            toplevel.isWin32Mode -> "_lookup(\"${toplevel.lookupName(decl)}\")"
+            toplevel.hasLookup -> "LOOKUP"
+            else -> "SymbolLookup.loaderLookup()"
+        }
         builder.appendLine(
             "private val ${name}_SEGMENT: MemorySegment by lazy { $varLookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow() }"
         )

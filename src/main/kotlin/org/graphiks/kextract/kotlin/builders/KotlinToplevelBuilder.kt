@@ -3,6 +3,7 @@ package org.graphiks.kextract.kotlin.builders
 
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
+import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.utils.KotlinNameMangler
 import org.graphiks.kextract.pipeline.Options
@@ -19,6 +20,8 @@ class KotlinToplevelBuilder(
     private val useSystemLoadLibrary: Boolean = false,
     private val splitOutput: Boolean = false,
     private val variadicArgs: Map<String, Int> = emptyMap(),
+    private val win32Mode: Boolean = false,
+    private val dllMap: DllMap? = null,
 ) : Declaration.Visitor<Unit> {
     private val slots = LinkedHashMap<String, SourceBuilder>()
     private val files = mutableListOf<KotlinSourceFile>()
@@ -91,7 +94,10 @@ class KotlinToplevelBuilder(
         private set
 
     /** True when a LOOKUP val was generated (libraries were provided). */
-    val hasLookup: Boolean get() = libraries.isNotEmpty()
+    val hasLookup: Boolean get() = libraries.isNotEmpty() || win32Mode
+
+    /** True when generating Win32 bindings with per-DLL lookups. */
+    val isWin32Mode: Boolean get() = win32Mode
 
     init {
         // Package declaration
@@ -144,6 +150,47 @@ class KotlinToplevelBuilder(
                 }
                 mainSlot.appendLine("lu")
             }
+            mainSlot.unindent()
+            mainSlot.appendLine("}")
+            mainSlot.appendLine()
+        }
+
+        // Win32 mode: generate per-DLL lookups with cross-platform try/catch safety
+        if (win32Mode && dllMap != null) {
+            val dllNames = dllMap.dllMap.keys.toSortedSet()
+            for (dllName in dllNames) {
+                val varName = dllLookupVarName(dllName)
+                mainSlot.appendLine("private val $varName: SymbolLookup? = try {")
+                mainSlot.indent()
+                mainSlot.appendLine("SymbolLookup.libraryLookup(\"$dllName\", Arena.global())")
+                mainSlot.unindent()
+                mainSlot.appendLine("} catch (ex: Throwable) {")
+                mainSlot.indent()
+                mainSlot.appendLine("null")
+                mainSlot.unindent()
+                mainSlot.appendLine("}")
+            }
+            mainSlot.appendLine()
+
+            // Build symbol→DLL mapping for the _lookup helper
+            val dllSymbols = linkedMapOf<String, MutableList<String>>()
+            for ((dll, entry) in dllMap.dllMap) {
+                val syms = dllSymbols.getOrPut(dll) { mutableListOf() }
+                syms.addAll(entry.functions)
+                syms.addAll(entry.constants)
+            }
+
+            mainSlot.appendLine("private fun _lookup(symbol: String): SymbolLookup {")
+            mainSlot.indent()
+            mainSlot.appendLine("return when (symbol) {")
+            mainSlot.indent()
+            for ((dll, syms) in dllSymbols) {
+                val varName = dllLookupVarName(dll)
+                mainSlot.appendLine("${syms.joinToString(", ") { "\"$it\"" }} -> $varName ?: SymbolLookup.loaderLookup()")
+            }
+            mainSlot.appendLine("else -> SymbolLookup.loaderLookup()")
+            mainSlot.unindent()
+            mainSlot.appendLine("}")
             mainSlot.unindent()
             mainSlot.appendLine("}")
             mainSlot.appendLine()
@@ -405,6 +452,10 @@ class KotlinToplevelBuilder(
     fun javaName(name: String): String = KotlinNameMangler.mangle(name)
 
     fun lookupName(decl: Declaration): String = decl.name()
+
+    /** Converts a DLL filename to a valid Kotlin identifier for the lookup variable. */
+    private fun dllLookupVarName(dll: String): String =
+        "_DLL_" + dll.uppercase().replace(Regex("[^A-Z0-9_]"), "_")
 
     /**
      * Extracts the set of Kotlin method and property-accessor signatures from an ObjC class

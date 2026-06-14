@@ -153,6 +153,7 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
     "kmainImplementation"("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
     "kmainImplementation"("com.github.ajalt.clikt:clikt:5.0.3")
+    "kmainImplementation"("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.0")
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.14.4")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.14.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

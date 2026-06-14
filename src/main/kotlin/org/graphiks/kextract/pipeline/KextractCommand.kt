@@ -1,5 +1,7 @@
 package org.graphiks.kextract.pipeline
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.Context
 import com.github.ajalt.clikt.core.ProgramResult
@@ -9,6 +11,7 @@ import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.multiple
 import com.github.ajalt.clikt.parameters.options.option
+import org.graphiks.kextract.cli.DllMap
 
 /**
  * Clikt command for kextract.
@@ -102,6 +105,14 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Show warnings for skipped system declarations (default: suppressed)"
     ).flag()
 
+    val win32Mode by option("--win32",
+        help = "Enable Win32 mode: libraryLookup, cross-platform try/catch safety, per-DLL files"
+    ).flag()
+
+    val dllMapPath by option("--dll-map", metavar = "FILE",
+        help = "YAML file mapping symbols to DLLs (required with --win32)"
+    )
+
     // ── Positional ───────────────────────────────────────────────────────────
 
     val headers by argument("headers", help = "C/ObjC header files to process").multiple(required = true)
@@ -155,6 +166,15 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             name to count
         }
 
+        // Validate --win32 + --dll-map
+        val dllMap: DllMap? = if (win32Mode) {
+            val path = dllMapPath ?: throw IllegalArgumentException("--win32 requires --dll-map <file>")
+            loadDllMap(path)
+        } else {
+            if (dllMapPath != null) throw IllegalArgumentException("--dll-map requires --win32")
+            null
+        }
+
         val options = Options(
             clangArgs = buildList {
                 includePaths.forEach { add("-I$it") }
@@ -170,10 +190,17 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             splitOutput        = splitOutput,
             variadicArgs       = variadicArgsMap,
             includeFrameworks  = includeFrameworks,
-            includeHelper      = includeHelper
+            includeHelper      = includeHelper,
+            win32Mode          = win32Mode,
+            dllMap             = dllMap
         )
 
         val exitCode = KextractTool(logger).runGeneration(headers, options)
         if (exitCode != KextractTool.SUCCESS) throw ProgramResult(exitCode)
     }
+}
+
+private fun loadDllMap(path: String): DllMap {
+    val mapper = ObjectMapper(YAMLFactory())
+    return mapper.readValue(java.nio.file.Path.of(path).toFile(), DllMap::class.java)
 }

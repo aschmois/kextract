@@ -1,5 +1,7 @@
 package org.graphiks.kextract.pipeline
 
+import org.graphiks.kextract.cli.DllMap
+
 /**
  * Immutable configuration snapshot passed through the generation pipeline.
  */
@@ -13,7 +15,9 @@ data class Options(
     val splitOutput: Boolean = false,
     val variadicArgs: Map<String, Int> = emptyMap(),
     val includeFrameworks: List<String> = emptyList(),
-    val includeHelper: IncludeHelper = IncludeHelper()
+    val includeHelper: IncludeHelper = IncludeHelper(),
+    val win32Mode: Boolean = false,
+    val dllMap: DllMap? = null,
 ) {
     /** A shared library descriptor. */
     data class Library(val libSpec: String, val specKind: SpecKind) {
