@@ -232,7 +232,7 @@ internal class TreeMaker {
         var result: Long? = null
         record.forEachShortCircuit { fc ->
             if (fc.isFlattenable()) {
-                if (fc.spelling().isNotEmpty()) {
+                if (fc.spelling().isNotEmpty() && !fc.spelling().startsWith("struct (anonymous") && !fc.spelling().startsWith("union (anonymous")) {
                     val offsetToOutermost = outermostParent.type().getOffsetOf(fc.spelling())
                     val offsetToAnon = anonRecord.type().getOffsetOf(fc.spelling())
                     result = offsetToOutermost - offsetToAnon
