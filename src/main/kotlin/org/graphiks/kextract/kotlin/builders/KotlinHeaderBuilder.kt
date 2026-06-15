@@ -37,31 +37,54 @@ class KotlinHeaderBuilder(
             toplevel.hasLookup -> "LOOKUP"
             else -> "SymbolLookup.loaderLookup()"
         }
-        // Use find(name).orElseThrow() rather than findOrThrow(name) for compatibility with
-        // older Kotlin/JDK toolchains that haven't seen SymbolLookup.findOrThrow (added JDK 22).
-        builder.appendLine(
-            "private val ${name}_ADDR: MemorySegment = $lookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow()"
-        )
-        if (variadicCount > 0) {
-            builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(")
-            builder.appendLine("    ${name}_ADDR, ${name}_DESC,")
-            builder.appendLine("    Linker.Option.firstVariadicArg(${fixedCount}),")
-            builder.appendLine(")")
+        val lookupName = toplevel.lookupName(decl)
+
+        if (toplevel.isInitMethod) {
+            builder.appendLine("private var ${name}_HANDLE: MethodHandle? = null")
+            builder.appendLine()
+            toplevel.initSlot.appendLine(
+                "${name}_HANDLE = $lookupExpr.find(\"$lookupName\")" +
+                ".map { Linker.nativeLinker().downcallHandle(it, ${name}_DESC) }.orElse(null)"
+            )
         } else {
-            builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC)")
+            // Use find(name).orElseThrow() rather than findOrThrow(name) for compatibility with
+            // older Kotlin/JDK toolchains that haven't seen SymbolLookup.findOrThrow (added JDK 22).
+            builder.appendLine(
+                "private val ${name}_ADDR: MemorySegment = $lookupExpr.find(\"$lookupName\").orElseThrow()"
+            )
+            if (variadicCount > 0) {
+                builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(")
+                builder.appendLine("    ${name}_ADDR, ${name}_DESC,")
+                builder.appendLine("    Linker.Option.firstVariadicArg(${fixedCount}),")
+                builder.appendLine(")")
+            } else {
+                builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC)")
+            }
+            builder.appendLine()
         }
-        builder.appendLine()
 
         // Function
         val isVoid = returnType == "Unit"
         builder.appendLine("fun ${name}(${params}): ${returnType} {")
         builder.indent()
+        if (toplevel.isInitMethod) {
+            builder.appendLine("check(_initialized) { \"Win32 $name called before init()\" }")
+            builder.appendLine("val _handle = ${name}_HANDLE ?: return${if (isVoid) "" else " ${returnDefault(returnType)}"}")
+        }
         builder.appendLine("try {")
         builder.indent()
-        if (isVoid) {
-            builder.appendLine("${name}_HANDLE.invokeExact(${paramNames})")
+        if (toplevel.isInitMethod) {
+            if (isVoid) {
+                builder.appendLine("_handle.invokeExact(${paramNames})")
+            } else {
+                builder.appendLine("return _handle.invokeExact(${paramNames}) as ${returnType}")
+            }
         } else {
-            builder.appendLine("return ${name}_HANDLE.invokeExact(${paramNames}) as ${returnType}")
+            if (isVoid) {
+                builder.appendLine("${name}_HANDLE.invokeExact(${paramNames})")
+            } else {
+                builder.appendLine("return ${name}_HANDLE.invokeExact(${paramNames}) as ${returnType}")
+            }
         }
         builder.unindent()
         builder.appendLine("} catch (ex: Error) {")
@@ -74,7 +97,13 @@ class KotlinHeaderBuilder(
         builder.unindent()
         builder.appendLine("} catch (ex: Throwable) {")
         builder.indent()
-        builder.appendLine("throw AssertionError(\"should not reach here\", ex)")
+        if (toplevel.isInitMethod && isVoid) {
+            builder.appendLine("// ignore — null handle on non-Windows")
+        } else if (toplevel.isInitMethod) {
+            builder.appendLine("return ${returnDefault(returnType)}")
+        } else {
+            builder.appendLine("throw AssertionError(\"should not reach here\", ex)")
+        }
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
@@ -99,24 +128,34 @@ class KotlinHeaderBuilder(
     fun visitVariable(decl: Declaration.Variable) {
         val name = toplevel.javaName(decl.name())
         val type = TypeMapper.map(decl.type())
+        val lookupName = toplevel.lookupName(decl)
 
         // KDoc
         builder.appendLine("/**")
         builder.appendLine(" * {@snippet lang=c : ${decl.name()} ${decl.type()}")
         builder.appendLine(" */")
 
+        val varLookupExpr = when {
+            toplevel.isWin32Mode -> "_lookup(\"$lookupName\")"
+            toplevel.hasLookup -> "LOOKUP"
+            else -> "SymbolLookup.loaderLookup()"
+        }
+
         // Aggregate-typed global (struct/union/array) → expose its address segment directly,
         // because a scalar VarHandle cannot get/set a whole record at once.
         if (isAggregateGlobal(decl.type())) {
-            val varLookupExpr = when {
-                toplevel.isWin32Mode -> "_lookup(\"${toplevel.lookupName(decl)}\")"
-                toplevel.hasLookup -> "LOOKUP"
-                else -> "SymbolLookup.loaderLookup()"
+            if (toplevel.isInitMethod) {
+                builder.appendLine("private var ${name}: MemorySegment? = null")
+                builder.appendLine()
+                toplevel.initSlot.appendLine(
+                    "${name} = $varLookupExpr.find(\"$lookupName\").orElse(null)"
+                )
+            } else {
+                builder.appendLine(
+                    "val ${name}: MemorySegment = $varLookupExpr.find(\"$lookupName\").orElseThrow()"
+                )
+                builder.appendLine()
             }
-            builder.appendLine(
-                "val ${name}: MemorySegment = $varLookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow()"
-            )
-            builder.appendLine()
             return
         }
 
@@ -127,22 +166,47 @@ class KotlinHeaderBuilder(
         // Use `by lazy` to keep <clinit> small.
         val layoutType = if (isStruct) "MemoryLayout" else "ValueLayout"
         builder.appendLine("private val ${name}_LAYOUT: $layoutType by lazy { ${layoutString(decl.type())} }")
-        val varLookupExpr = when {
-            toplevel.isWin32Mode -> "_lookup(\"${toplevel.lookupName(decl)}\")"
-            toplevel.hasLookup -> "LOOKUP"
-            else -> "SymbolLookup.loaderLookup()"
+
+        if (toplevel.isInitMethod) {
+            builder.appendLine("private var ${name}_SEGMENT: MemorySegment? = null")
+            builder.appendLine("private var ${name}_VH: VarHandle? = null")
+            builder.appendLine()
+            toplevel.initSlot.appendLine(
+                "${name}_SEGMENT = $varLookupExpr.find(\"$lookupName\").orElse(null)"
+            )
+            toplevel.initSlot.appendLine(
+                "${name}_VH = ${name}_SEGMENT?.let { ${name}_LAYOUT.varHandle() }"
+            )
+        } else {
+            builder.appendLine(
+                "private val ${name}_SEGMENT: MemorySegment by lazy { $varLookupExpr.find(\"$lookupName\").orElseThrow() }"
+            )
+            builder.appendLine("private val ${name}_VH: VarHandle by lazy { ${name}_LAYOUT.varHandle() }")
+            builder.appendLine()
         }
-        builder.appendLine(
-            "private val ${name}_SEGMENT: MemorySegment by lazy { $varLookupExpr.find(\"${toplevel.lookupName(decl)}\").orElseThrow() }"
-        )
-        builder.appendLine("private val ${name}_VH: VarHandle by lazy { ${name}_LAYOUT.varHandle() }")
-        builder.appendLine()
 
         // Property (getter/setter)
         builder.appendLine("var ${name}: ${type}")
         builder.indent()
-        builder.appendLine("get() = ${name}_VH.get(${name}_SEGMENT) as ${type}")
-        builder.appendLine("set(value) = ${name}_VH.set(${name}_SEGMENT, value)")
+        if (toplevel.isInitMethod) {
+            builder.appendLine("get() {")
+            builder.indent()
+            builder.appendLine("check(_initialized) { \"Win32 $name accessed before init()\" }")
+            builder.appendLine("val _seg = ${name}_SEGMENT ?: return ${returnDefault(type)}")
+            builder.appendLine("return ${name}_VH!!.get(_seg) as ${type}")
+            builder.unindent()
+            builder.appendLine("}")
+            builder.appendLine("set(value) {")
+            builder.indent()
+            builder.appendLine("check(_initialized) { \"Win32 $name accessed before init()\" }")
+            builder.appendLine("val _seg = ${name}_SEGMENT ?: return")
+            builder.appendLine("${name}_VH!!.set(_seg, value)")
+            builder.unindent()
+            builder.appendLine("}")
+        } else {
+            builder.appendLine("get() = ${name}_VH.get(${name}_SEGMENT) as ${type}")
+            builder.appendLine("set(value) = ${name}_VH.set(${name}_SEGMENT, value)")
+        }
         builder.unindent()
         builder.appendLine()
     }
@@ -241,6 +305,21 @@ class KotlinHeaderBuilder(
 
     fun functionDescriptorString(decl: Declaration.Function): String =
         LayoutUtils.functionDescriptorString(decl.type(), variadicArgs[decl.name()] ?: 0)
+
+    /**
+     * Returns the default (null-safe) return value for a given type,
+     * used when the function handle is null (non-Windows platform).
+     */
+    private fun returnDefault(type: String): String = when {
+        type == "Unit" || type == "Void" -> ""
+        type == "Boolean" -> "false"
+        type == "Long" -> "0L"
+        type == "Float" -> "0f"
+        type == "Double" -> "0.0"
+        type == "Int" || type == "Short" || type == "Byte" || type == "Char" -> "0"
+        type == "MemorySegment" -> "MemorySegment.NULL"
+        else -> "0"
+    }
 
     private fun paramString(decl: Declaration.Function, prependAllocator: Boolean = false): String {
         val fixedCount = decl.type().argumentTypes().size

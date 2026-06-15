@@ -18,6 +18,7 @@ data class Options(
     val includeHelper: IncludeHelper = IncludeHelper(),
     val win32Mode: Boolean = false,
     val dllMap: DllMap? = null,
+    val useInitMethod: Boolean = false,
 ) {
     /** A shared library descriptor. */
     data class Library(val libSpec: String, val specKind: SpecKind) {

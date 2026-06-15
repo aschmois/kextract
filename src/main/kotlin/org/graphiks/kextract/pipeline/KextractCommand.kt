@@ -106,12 +106,16 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
     ).flag()
 
     val win32Mode by option("--win32",
-        help = "Enable Win32 mode: libraryLookup, cross-platform try/catch safety, per-DLL files"
+        help = "Enable Win32 per-DLL symbol lookup mode"
     ).flag()
 
     val dllMapPath by option("--dll-map", metavar = "FILE",
         help = "YAML file mapping symbols to DLLs (required with --win32)"
     )
+
+    val initMethod by option("--init-method",
+        help = "Generate init() method instead of eager static initializers"
+    ).flag()
 
     // ── Positional ───────────────────────────────────────────────────────────
 
@@ -192,7 +196,8 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             includeFrameworks  = includeFrameworks,
             includeHelper      = includeHelper,
             win32Mode          = win32Mode,
-            dllMap             = dllMap
+            dllMap             = dllMap,
+            useInitMethod      = initMethod,
         )
 
         val exitCode = KextractTool(logger).runGeneration(headers, options)
