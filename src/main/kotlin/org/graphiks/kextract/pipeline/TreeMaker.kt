@@ -85,7 +85,13 @@ internal class TreeMaker {
         val decl: Declaration? = when (c.kind()) {
             CursorKind.EnumDecl -> createEnum(c)
             CursorKind.EnumConstantDecl -> createEnumConstant(c)
-            CursorKind.FieldDecl -> createVar(c, Declaration.Variable.Kind.FIELD)
+            CursorKind.FieldDecl -> {
+                val name = c.spelling()
+                if (name.isEmpty() || name.startsWith("struct (anonymous") || name.startsWith("union (anonymous"))
+                    null
+                else
+                    createVar(c, Declaration.Variable.Kind.FIELD)
+            }
             CursorKind.ParmDecl -> createVar(c, Declaration.Variable.Kind.PARAMETER)
             CursorKind.FunctionDecl -> createFunction(c)
             CursorKind.StructDecl -> createRecord(c, Declaration.Scoped.Kind.STRUCT)
