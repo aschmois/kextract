@@ -195,8 +195,11 @@ internal class TreeMaker {
                     } else {
                         val fieldDecl = createTree(fc)!!
                         ClangSizeOf.with(fieldDecl, if (fc.type().kind() == TypeKind.IncompleteArray) 0L else fc.type().size() * 8L)
-                        ClangOffsetOf.with(fieldDecl, parent.type().getOffsetOf(fc.spelling()))
-                        ClangAlignOf.with(fieldDecl, fc.type().align() * 8L)
+                        val fieldName = fc.spelling()
+                        if (fieldName.isNotEmpty() && !fieldName.startsWith("struct (anonymous") && !fieldName.startsWith("union (anonymous")) {
+                            ClangOffsetOf.with(fieldDecl, parent.type().getOffsetOf(fieldName))
+                            ClangAlignOf.with(fieldDecl, fc.type().align() * 8L)
+                        }
                         pendingFields.add(fieldDecl)
                     }
                 }
