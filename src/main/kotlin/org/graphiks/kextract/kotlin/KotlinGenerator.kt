@@ -38,11 +38,12 @@ class KotlinGenerator {
         variadicArgs: Map<String, Int> = emptyMap(),
         win32Mode: Boolean = false,
         dllMap: DllMap? = null,
+        useInitMethod: Boolean = false,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         val toplevel = KotlinToplevelBuilder(
             targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput, variadicArgs,
-            win32Mode, dllMap
+            win32Mode, dllMap, useInitMethod
         )
         scoped.accept(toplevel)
         val files = toplevel.getFiles().toMutableList()

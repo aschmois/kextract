@@ -177,7 +177,8 @@ class KextractTool(private val logger: Logger) {
             transformed, headerName, options.targetPackage,
             options.libraries, options.useSystemLoadLibrary,
             options.splitOutput, options.variadicArgs,
-            options.win32Mode, options.dllMap
+            options.win32Mode, options.dllMap,
+            options.useInitMethod
         )
     }
 

@@ -22,9 +22,13 @@ class KotlinToplevelBuilder(
     private val variadicArgs: Map<String, Int> = emptyMap(),
     private val win32Mode: Boolean = false,
     private val dllMap: DllMap? = null,
+    private val useInitMethod: Boolean = false,
 ) : Declaration.Visitor<Unit> {
     private val slots = LinkedHashMap<String, SourceBuilder>()
     private val files = mutableListOf<KotlinSourceFile>()
+
+    /** Accumulates initialization statements for the generated init() function. */
+    val initSlot: SourceBuilder = SourceBuilder()
 
     /** Base name derived from header filename (e.g. "AppKit" from "AppKit_h"). */
     private val headerBaseName: String = className.removeSuffix("_h")
@@ -99,6 +103,9 @@ class KotlinToplevelBuilder(
     /** True when generating Win32 bindings with per-DLL lookups. */
     val isWin32Mode: Boolean get() = win32Mode
 
+    /** True when generating an init() method instead of eager static initializers. */
+    val isInitMethod: Boolean get() = useInitMethod
+
     init {
         // Package declaration
         if (targetPackage.isNotEmpty()) {
@@ -160,17 +167,35 @@ class KotlinToplevelBuilder(
             val dllNames = dllMap.dllMap.keys.toSortedSet()
             for (dllName in dllNames) {
                 val varName = dllLookupVarName(dllName)
-                mainSlot.appendLine("private val $varName: SymbolLookup? = try {")
-                mainSlot.indent()
-                mainSlot.appendLine("SymbolLookup.libraryLookup(\"$dllName\", Arena.global())")
-                mainSlot.unindent()
-                mainSlot.appendLine("} catch (ex: Throwable) {")
-                mainSlot.indent()
-                mainSlot.appendLine("null")
-                mainSlot.unindent()
-                mainSlot.appendLine("}")
+                if (useInitMethod) {
+                    mainSlot.appendLine("private var $varName: SymbolLookup? = null")
+                    initSlot.appendLine("$varName = try {")
+                    initSlot.indent()
+                    initSlot.appendLine("SymbolLookup.libraryLookup(\"$dllName\", Arena.global())")
+                    initSlot.unindent()
+                    initSlot.appendLine("} catch (ex: Throwable) {")
+                    initSlot.indent()
+                    initSlot.appendLine("null")
+                    initSlot.unindent()
+                    initSlot.appendLine("}")
+                } else {
+                    mainSlot.appendLine("private val $varName: SymbolLookup? = try {")
+                    mainSlot.indent()
+                    mainSlot.appendLine("SymbolLookup.libraryLookup(\"$dllName\", Arena.global())")
+                    mainSlot.unindent()
+                    mainSlot.appendLine("} catch (ex: Throwable) {")
+                    mainSlot.indent()
+                    mainSlot.appendLine("null")
+                    mainSlot.unindent()
+                    mainSlot.appendLine("}")
+                }
             }
             mainSlot.appendLine()
+
+            if (useInitMethod) {
+                mainSlot.appendLine("private var _initialized: Boolean = false")
+                mainSlot.appendLine()
+            }
 
             // Build symbol→DLL mapping for the _lookup helper
             val dllSymbols = linkedMapOf<String, MutableList<String>>()
@@ -311,6 +336,23 @@ class KotlinToplevelBuilder(
 
         // Only add file for TOPLEVEL scoped (not for nested structs/unions)
         if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
+            if (useInitMethod) {
+                mainSlot.appendLine()
+                mainSlot.appendLine("/**")
+                mainSlot.appendLine(" * Initializes all Win32 bindings.")
+                mainSlot.appendLine(" * Must be called before any binding function on Windows.")
+                mainSlot.appendLine(" * Safe to call on non-Windows (no-op, all symbols stay null).")
+                mainSlot.appendLine(" */")
+                mainSlot.appendLine("fun init() {")
+                mainSlot.indent()
+                mainSlot.appendLine("if (_initialized) return")
+                mainSlot.appendLine("_initialized = true")
+                mainSlot.appendLine()
+                mainSlot.appendBlock(initSlot.toString().trimEnd())
+                mainSlot.unindent()
+                mainSlot.appendLine("}")
+                mainSlot.appendLine()
+            }
             if (!splitOutput) {
                 files.add(KotlinSourceFile(targetPackage, className, mainSlot.toString()))
             }
