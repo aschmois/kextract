@@ -22,6 +22,21 @@ object KotlinNameMangler {
     )
 
     /**
+     * Kotlin built-in type names. A C typedef named after one of these (e.g. the
+     * CoreFoundation `typedef unsigned char Boolean`) would otherwise generate a
+     * top-level `typealias Boolean = Byte` that *shadows* `kotlin.Boolean` for the
+     * whole package, silently breaking every `is Boolean` check and Boolean-typed
+     * argument at runtime. Mangle them so the alias gets a distinct name.
+     */
+    private val KOTLIN_BUILTIN_TYPES = setOf(
+        "Boolean", "Byte", "Short", "Int", "Long", "Float", "Double", "Char",
+        "String", "Unit", "Any", "Nothing", "Number",
+        "UByte", "UShort", "UInt", "ULong",
+        "Array", "List", "Set", "Map", "Collection", "Iterable", "Sequence",
+        "Pair", "Triple", "Comparable", "Enum", "Throwable"
+    )
+
+    /**
      * Mangles a C name to a valid Kotlin identifier.
      */
     fun mangle(name: String): String {
@@ -34,6 +49,11 @@ object KotlinNameMangler {
 
         // Handle reserved keywords
         if (RESERVED_KEYWORDS.contains(result)) {
+            result += "_"
+        }
+
+        // Handle names that collide with Kotlin built-in types (avoid shadowing)
+        if (KOTLIN_BUILTIN_TYPES.contains(result)) {
             result += "_"
         }
 
