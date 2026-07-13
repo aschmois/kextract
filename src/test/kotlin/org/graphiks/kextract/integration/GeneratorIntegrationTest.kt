@@ -40,9 +40,9 @@ class GeneratorIntegrationTest : FreeSpec({
 
     fun generateKmpFile(csource: String, sourceSet: String, suffix: String, pkg: String = "test"): String {
         val tmp = Files.createTempFile("kextract_test_", ".h")
+        val output = Files.createTempDirectory("kextract_test_out_")
         try {
             tmp.toFile().writeText(csource)
-            val output = Files.createTempDirectory("kextract_test_out_")
             KextractTool(Logger.DEFAULT).runGeneration(
                 listOf(tmp.toString()),
                 Options(targetPackage = pkg, outputDir = output.toString(), multiplatform = true)
@@ -54,6 +54,7 @@ class GeneratorIntegrationTest : FreeSpec({
             return output.resolve("$sourceSet/kotlin/${pkg.replace('.', '/')}/$className$suffix.kt").toFile().readText()
         } finally {
             Files.deleteIfExists(tmp)
+            output.toFile().deleteRecursively()
         }
     }
 

@@ -195,7 +195,7 @@ class KextractTool(private val logger: Logger) {
                     val targetDir = when {
                         className.endsWith("_common") || className.endsWith("Common") -> "commonMain/kotlin"
                         className.endsWith("_jvm") || className.endsWith("Jvm") -> "jvmMain/kotlin"
-                        className.endsWith("_android") || className.endsWith("Android") || result.packageName.endsWith(".android") -> "androidMain/kotlin"
+                        className.endsWith("_android") || className.endsWith("Android") || result.packageName == "android" || result.packageName.endsWith(".android") -> "androidMain/kotlin"
                         className.endsWith("_native") || className.endsWith("Native") -> "nativeMain/kotlin"
                         else -> "commonMain/kotlin" // Default to commonMain
                     }

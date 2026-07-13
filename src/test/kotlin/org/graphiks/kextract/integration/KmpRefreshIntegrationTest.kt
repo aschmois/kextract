@@ -92,4 +92,27 @@ class KmpRefreshIntegrationTest : FreeSpec({
             Files.deleteIfExists(input)
         }
     }
+
+    "empty target package routes Android JNA support to androidMain" {
+        val input = Files.createTempFile("kextract-kmp-empty-package-routing", ".h")
+        val output = Files.createTempDirectory("kextract-kmp-empty-package-routing-out")
+        try {
+            input.toFile().writeText("int wgpuFunction(void);")
+            KextractTool(Logger.DEFAULT).runGeneration(
+                listOf(input.toString()),
+                Options(outputDir = output.toString(), multiplatform = true),
+            ) shouldBe KextractTool.SUCCESS
+
+            val androidSupport = output.resolve("androidMain/kotlin/android")
+            Files.isDirectory(androidSupport) shouldBe true
+            Files.walk(androidSupport).use { paths ->
+                paths.filter { it.fileName.toString().endsWith(".kt") }
+                    .anyMatch { it.toFile().readText().contains("package android") } shouldBe true
+            }
+            Files.exists(output.resolve("commonMain/kotlin/android")) shouldBe false
+        } finally {
+            input.toFile().delete()
+            output.toFile().deleteRecursively()
+        }
+    }
 })

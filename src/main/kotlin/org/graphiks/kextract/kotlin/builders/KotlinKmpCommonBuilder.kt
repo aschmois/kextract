@@ -18,6 +18,7 @@ class KotlinKmpCommonBuilder(
     private val generatedStructNames = mutableSetOf<String>()
     private val callbackFunctions = mutableMapOf<String, Type.Function>()
     private val opaqueHandleAliases = mutableMapOf<String, String>()
+    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames)
 
     init {
         if (targetPackage.isNotEmpty()) {
@@ -54,7 +55,7 @@ class KotlinKmpCommonBuilder(
                 // Visit members
                 decl.members().filterIsInstance<Declaration.Variable>().filterNot(Skip::isPresent).forEach { field ->
                     val fieldName = field.name()
-                    val fieldType = mapKmpType(field.type())
+                    val fieldType = typeMapper.mapType(field.type())
                     if (fieldType == "CString") {
                         builder.appendLine("var $fieldName: CString?")
                     } else if (fieldType.startsWith("ArrayHolder")) {
@@ -179,10 +180,10 @@ class KotlinKmpCommonBuilder(
         builder.indent()
 
         fields.forEach { field ->
-            builder.appendLine("var ${field.name()}: ${mapKmpType(field.type())}")
+            builder.appendLine("var ${field.name()}: ${typeMapper.mapType(field.type())}")
         }
         unionFields.forEach { field ->
-            val type = mapKmpType(field.type())
+            val type = typeMapper.mapType(field.type())
             val setter = field.name().replaceFirstChar { it.titlecase() }
             builder.appendLine("val ${field.name()}: $type?")
             builder.appendLine("fun set$setter(value: $type)")
@@ -203,7 +204,7 @@ class KotlinKmpCommonBuilder(
     }
 
     private fun nativeDisplayUnionFields(decl: Declaration.Scoped): List<Declaration.Variable> =
-        inlineUnionField(decl)?.type()?.declaredUnion()?.members()?.filterIsInstance<Declaration.Variable>()
+        inlineUnionField(decl)?.type()?.let(typeMapper::declaredUnion)?.members()?.filterIsInstance<Declaration.Variable>()
             ?: decl.members()
                 .filterIsInstance<Declaration.Scoped>()
                 .firstOrNull { it.kind() == Declaration.Scoped.Kind.UNION }
@@ -214,13 +215,7 @@ class KotlinKmpCommonBuilder(
     private fun inlineUnionField(decl: Declaration.Scoped): Declaration.Variable? =
         decl.members()
             .filterIsInstance<Declaration.Variable>()
-            .firstOrNull { it.type().declaredUnion() != null }
-
-    private fun Type.declaredUnion(): Declaration.Scoped? = when (this) {
-        is Type.Declared -> tree().takeIf { it.kind() == Declaration.Scoped.Kind.UNION }
-        is Type.Delegated -> type().declaredUnion()
-        else -> null
-    }
+            .firstOrNull { typeMapper.declaredUnion(it.type()) != null }
 
     private fun Any.toLongValue(): Long = when (this) {
         is Long -> this
@@ -237,10 +232,10 @@ class KotlinKmpCommonBuilder(
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
         if (!decl.name().startsWith("wgpu")) return
-        val returnType = mapKmpFunctionType(decl.type().returnType())
+        val returnType = typeMapper.mapFunctionType(decl.type().returnType())
         val params = decl.parameters().mapIndexed { index, param ->
             val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
-            "$name: ${mapKmpFunctionType(param.type())}"
+            "$name: ${typeMapper.mapFunctionType(param.type())}"
         }.joinToString(", ")
         builder.appendLine("expect fun ${decl.name()}($params): $returnType")
         builder.appendLine()
@@ -251,7 +246,7 @@ class KotlinKmpCommonBuilder(
         if (Skip.isPresent(decl)) return
         val name = decl.name()
         if (name.isEmpty() || !name.startsWith("WGPU")) return
-        if (name.endsWith("Callback")) decl.type().callbackFunction()?.let { function ->
+        if (name.endsWith("Callback")) typeMapper.callbackFunction(decl.type())?.let { function ->
             if (!generatedNames.add(name)) return
             callbackFunctions[name] = function
             emitCallbackExpect(name, function)
@@ -285,7 +280,7 @@ class KotlinKmpCommonBuilder(
         builder.appendLine("override fun close()")
         builder.appendLine("companion object {")
         builder.indent()
-        builder.appendLine("fun allocate(callback: ${callbackLambdaType(function)}): $name")
+        builder.appendLine("fun allocate(callback: ${typeMapper.callbackLambdaType(function)}): $name")
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
@@ -294,18 +289,18 @@ class KotlinKmpCommonBuilder(
     }
 
     private fun emitCallbackConvenienceOverload(decl: Declaration.Function) {
-        if (mapKmpFunctionType(decl.type().returnType()) != "Unit") return
-        val callbackParam = decl.parameters().firstOrNull { it.type().callbackFunction() != null } ?: return
-        val callbackName = callbackParam.type().callbackTypeName() ?: return
+        if (typeMapper.mapFunctionType(decl.type().returnType()) != "Unit") return
+        val callbackParam = decl.parameters().firstOrNull { typeMapper.callbackFunction(it.type()) != null } ?: return
+        val callbackName = typeMapper.callbackTypeName(callbackParam.type()) ?: return
         if (!callbackName.endsWith("Callback")) return
-        val callbackFunction = callbackFunctions[callbackName] ?: callbackParam.type().callbackFunction() ?: return
+        val callbackFunction = callbackFunctions[callbackName] ?: typeMapper.callbackFunction(callbackParam.type()) ?: return
         val valueParams = decl.parameters().filter { it !== callbackParam }
         val helperParams = valueParams.mapIndexed { index, param ->
             val paramName = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
-            val paramType = mapKmpFunctionType(param.type())
+            val paramType = typeMapper.mapFunctionType(param.type())
             val default = if (paramName == "userdata" && paramType == "NativeAddress?") " = null" else ""
             "$paramName: $paramType$default"
-        } + "callback: ${callbackLambdaType(callbackFunction)}"
+        } + "callback: ${typeMapper.callbackLambdaType(callbackFunction)}"
         val callArgs = decl.parameters().mapIndexed { index, param ->
             val paramName = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
             if (param === callbackParam) "holder" else paramName
@@ -321,170 +316,4 @@ class KotlinKmpCommonBuilder(
         builder.appendLine()
     }
 
-    private fun callbackLambdaType(function: Type.Function): String {
-        val names = function.parameterNames().orEmpty()
-        val params = function.argumentTypes().mapIndexed { index, type ->
-            val name = names.getOrNull(index)?.takeIf { it.isNotEmpty() } ?: "arg$index"
-            "$name: ${mapKmpFunctionType(type)}"
-        }.joinToString(", ")
-        return "($params) -> ${mapKmpFunctionType(function.returnType())}"
-    }
-
-    private fun mapKmpType(type: Type): String = when {
-        type is Type.Primitive -> mapPrimitive(type.kind())
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.UNSIGNED -> {
-            val inner = type.type()
-            if (inner is Type.Primitive) {
-                when (inner.kind()) {
-                    Type.Primitive.Kind.Char -> "UByte"
-                    Type.Primitive.Kind.Short -> "UShort"
-                    Type.Primitive.Kind.Int -> "UInt"
-                    Type.Primitive.Kind.Long, Type.Primitive.Kind.LongLong -> "ULong"
-                    else -> "UInt"
-                }
-            } else {
-                "UInt"
-            }
-        }
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> {
-            val pointee = type.type()
-            when {
-                pointee is Type.Primitive && pointee.kind() == Type.Primitive.Kind.Char -> "CString"
-                pointee is Type.Delegated && pointee.isGeneratedReferenceTypedef() -> "${pointee.referenceTypeName()}?"
-                pointee is Type.Declared && (pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT || pointee.tree().kind() == Declaration.Scoped.Kind.UNION) -> {
-                    val name = pointee.tree().name()
-                    opaqueHandleAliases[name]?.let { "$it?" }
-                        ?: name.takeIf { it.startsWith("WGPU") && it.endsWith("Impl") }?.removeSuffix("Impl")?.let { "$it?" }
-                        ?: if (name.isNotEmpty() && !name.contains("unnamed")) "$name?" else "NativeAddress?"
-                }
-                else -> "NativeAddress?"
-            }
-        }
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> {
-            val inner = type.type()
-            if (inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER) {
-                val pointee = inner.type()
-                if (pointee is Type.Declared && pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT) {
-                    val pointeeName = pointee.tree().name()
-                    val typedefName = type.name()
-                    if (pointeeName.isNotEmpty() && pointeeName.endsWith("Impl") && typedefName != null) {
-                        "$typedefName?"
-                    } else if (pointeeName.isNotEmpty() && pointeeName.startsWith("WGPU") && pointeeName.endsWith("Impl")) {
-                        "${pointeeName.removeSuffix("Impl")}?"
-                    } else if (pointeeName.isNotEmpty() && !pointeeName.contains("unnamed")) {
-                        "$pointeeName?"
-                    } else {
-                        "NativeAddress?"
-                    }
-                } else {
-                    "NativeAddress?"
-                }
-            } else {
-                val innerMapped = mapKmpType(inner)
-                if (innerMapped != "NativeAddress" && innerMapped != "NativeAddress?" && !innerMapped.contains("unnamed")) {
-                    innerMapped
-                } else {
-                    val name = type.name()
-                    if (name != null && !name.contains("unnamed")) name else "NativeAddress"
-                }
-            }
-        }
-        type is Type.Declared -> {
-            val tree = type.tree()
-            val name = tree.name()
-            if (name.isNotEmpty() && !name.contains("unnamed")) name else "NativeAddress"
-        }
-        else -> "NativeAddress"
-    }
-
-    private fun mapPrimitive(kind: Type.Primitive.Kind): String = when (kind) {
-        Type.Primitive.Kind.Bool -> "Boolean"
-        Type.Primitive.Kind.Char -> "Byte"
-        Type.Primitive.Kind.Short -> "Short"
-        Type.Primitive.Kind.Int -> "Int"
-        Type.Primitive.Kind.Long, Type.Primitive.Kind.LongLong -> "Long"
-        Type.Primitive.Kind.Float -> "Float"
-        Type.Primitive.Kind.Double -> "Double"
-        Type.Primitive.Kind.Void -> "Unit"
-        else -> "NativeAddress"
-    }
-
-    private fun mapKmpFunctionType(type: Type): String = when {
-        type is Type.Primitive -> mapPrimitive(type.kind())
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.UNSIGNED -> mapKmpType(type)
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> {
-            val pointee = type.type()
-            when {
-                pointee is Type.Primitive && pointee.kind() == Type.Primitive.Kind.Char -> "CString?"
-                pointee is Type.Function -> "NativeAddress?"
-                pointee is Type.Delegated && pointee.kind() == Type.Delegated.Kind.TYPEDEF && pointee.type() is Type.Function -> "NativeAddress?"
-                pointee is Type.Delegated && pointee.isGeneratedReferenceTypedef() -> "${pointee.referenceTypeName()}?"
-                pointee is Type.Declared && (pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT || pointee.tree().kind() == Declaration.Scoped.Kind.UNION) -> {
-                    val name = pointee.tree().name()
-                    opaqueHandleAliases[name]?.let { "$it?" }
-                        ?: name.takeIf { it.startsWith("WGPU") && it.endsWith("Impl") }?.removeSuffix("Impl")?.let { "$it?" }
-                        ?: if (name.isNotEmpty() && !name.contains("unnamed")) "$name?" else "NativeAddress?"
-                }
-                else -> "NativeAddress?"
-            }
-        }
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> {
-            val typedefName = type.name()
-            val inner = type.type()
-            when {
-                type.callbackFunction() != null && typedefName != null && typedefName.startsWith("WGPU") && typedefName.endsWith("Callback") -> "$typedefName?"
-                inner is Type.Function -> "NativeAddress?"
-                inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER && inner.type() is Type.Function -> "NativeAddress?"
-                inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER ->
-                    if (typedefName != null && typedefName.startsWith("WGPU")) "$typedefName?" else "NativeAddress?"
-                else -> {
-                    val innerMapped = mapKmpType(inner)
-                    if (innerMapped != "NativeAddress" && !innerMapped.contains("unnamed")) innerMapped else typedefName ?: "NativeAddress"
-                }
-            }
-        }
-        type is Type.Function -> "NativeAddress?"
-        type is Type.Declared -> {
-            val name = type.tree().name()
-            if (name.isNotEmpty() && !name.contains("unnamed")) name else "NativeAddress"
-        }
-        type is Type.Array -> "ArrayHolder<${mapKmpFunctionType(type.elementType()).removeSuffix("?")}>?"
-        else -> "NativeAddress"
-    }
-
-    private fun Type.callbackFunction(): Type.Function? = when {
-        this is Type.Delegated && kind() == Type.Delegated.Kind.TYPEDEF -> type().callbackFunction()
-        this is Type.Delegated && kind() == Type.Delegated.Kind.POINTER -> type().callbackFunction()
-        this is Type.Function -> this
-        else -> null
-    }
-
-    private fun Type.callbackTypeName(): String? = when {
-        this is Type.Delegated && kind() == Type.Delegated.Kind.TYPEDEF && callbackFunction() != null -> name()
-        else -> null
-    }
-
-    private fun Type.isReferenceTypedef(): Boolean = when (this) {
-        is Type.Delegated -> when (kind()) {
-            Type.Delegated.Kind.TYPEDEF -> type().isReferenceTypedef()
-            Type.Delegated.Kind.POINTER -> true
-            else -> type().isReferenceTypedef()
-        }
-        is Type.Declared -> tree().kind() == Declaration.Scoped.Kind.STRUCT || tree().kind() == Declaration.Scoped.Kind.UNION
-        else -> false
-    }
-
-    private fun Type.referenceTypeName(): String? = when (this) {
-        is Type.Delegated -> (name() ?: type().referenceTypeName())?.toPublicHandleName()
-        is Type.Declared -> tree().name().takeIf { it.isNotEmpty() && !it.contains("unnamed") }?.toPublicHandleName()
-        else -> null
-    }
-
-    private fun String.toPublicHandleName(): String =
-        if (startsWith("WGPU") && endsWith("Impl")) removeSuffix("Impl") else this
-
-    private fun Type.isGeneratedReferenceTypedef(): Boolean {
-        val name = referenceTypeName()
-        return name != null && name.startsWith("WGPU") && (isReferenceTypedef() || name in generatedStructNames)
-    }
 }
