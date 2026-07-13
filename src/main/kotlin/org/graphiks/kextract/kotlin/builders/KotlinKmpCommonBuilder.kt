@@ -90,6 +90,7 @@ class KotlinKmpCommonBuilder(
                 if (name.isNotEmpty() && !name.contains("unnamed")) {
                     if (!generatedNames.add(name)) return
                     val constants = decl.members().filterIsInstance<Declaration.Constant>().filterNot(Skip::isPresent)
+                    emitKDoc(decl)
                     if (isOptionsStyle(name)) {
                         emitValueClass(name, constants)
                     } else {
@@ -260,6 +261,7 @@ class KotlinKmpCommonBuilder(
         if (name.endsWith("Callback")) typeMapper.callbackFunction(decl.type())?.let { function ->
             if (!generatedNames.add(name)) return
             callbackFunctions[name] = function
+            emitKDoc(decl)
             emitCallbackExpect(name, function)
             return
         }

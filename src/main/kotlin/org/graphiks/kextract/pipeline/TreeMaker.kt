@@ -40,7 +40,7 @@ internal class TreeMaker {
     fun addAttributes(d: Declaration?, c: Cursor): Declaration? {
         if (d == null) return null
         val rawComment = c.rawCommentText().trim()
-        val briefComment = ""
+        val briefComment = c.briefCommentText().trim()
         if (rawComment.isNotEmpty() || briefComment.isNotEmpty()) {
             SourceComment.with(d, rawComment, briefComment)
         }
