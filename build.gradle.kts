@@ -187,6 +187,10 @@ tasks.withType<Test>().configureEach {
     environment("PATH",              "$llvm_home/$os_lib_dir${File.pathSeparator}${System.getenv("PATH") ?: ""}")
 }
 
+tasks.named<Test>("test") {
+    exclude("**/GeneratedBindingsCompilationTest.class")
+}
+
 // All Java compilation uses the configured JDK and targets Java 25
 tasks.withType<JavaCompile>().configureEach {
     options.release = 25
@@ -383,6 +387,20 @@ tasks.register("verifyExamples") {
                 }
             }
         if (!allPassed) throw GradleException("One or more examples failed — see output above.")
+    }
+}
+
+tasks.register<Test>("verifyGeneratedBindings") {
+    group = "verification"
+    description = "Generate and compile representative Kotlin bindings."
+    dependsOn("testClasses")
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter {
+        includeTestsMatching("org.graphiks.kextract.integration.GeneratedBindingsCompilationTest")
+    }
+    useJUnitPlatform {
+        includeTags("generated-compile")
     }
 }
 

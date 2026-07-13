@@ -162,6 +162,11 @@ class KotlinToplevelBuilder(
             mainSlot.appendLine()
         }
 
+        if (useInitMethod) {
+            mainSlot.appendLine("private var _initialized: Boolean = false")
+            mainSlot.appendLine()
+        }
+
         // Win32 mode: generate per-DLL lookups with cross-platform try/catch safety
         if (win32Mode && dllMap != null) {
             val dllNames = dllMap.dllMap.keys.toSortedSet()
@@ -191,11 +196,6 @@ class KotlinToplevelBuilder(
                 }
             }
             mainSlot.appendLine()
-
-            if (useInitMethod) {
-                mainSlot.appendLine("private var _initialized: Boolean = false")
-                mainSlot.appendLine()
-            }
 
             // Build symbol→DLL mapping for the _lookup helper
             val dllSymbols = linkedMapOf<String, MutableList<String>>()
