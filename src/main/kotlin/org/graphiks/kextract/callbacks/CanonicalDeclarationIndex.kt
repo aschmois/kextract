@@ -2,17 +2,54 @@ package org.graphiks.kextract.callbacks
 
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
+import org.graphiks.kextract.DeclarationImpl.TypedefEnumScoped
 import org.graphiks.kextract.Type
+import java.util.IdentityHashMap
+
+/** A canonical `typedef:*` type backed by either its typedef or a surviving named enum. */
+class CanonicalTypedef internal constructor(
+    val id: String,
+    val declaration: Declaration,
+    val type: Type,
+    internal val enumDeclaration: Declaration.Scoped?,
+) {
+    fun name(): String = id.removePrefix("typedef:")
+}
 
 /** Canonical declaration lookup built from filtered declarations with their original C names. */
 class CanonicalDeclarationIndex(root: Declaration.Scoped) {
     private val declarations = linkedMapOf<String, MutableList<Declaration>>()
+    private val enumBackedTypedefs = linkedMapOf<String, MutableList<Declaration.Scoped>>()
+    private val constantOwners = IdentityHashMap<Declaration.Constant, Declaration.Scoped>()
 
     init {
         root.members().forEach(::index)
+        enumBackedTypedefs.forEach { (id, enums) ->
+            if (declarations[id].orEmpty().none { it is Declaration.Typedef }) {
+                enums.forEach { add(id, it) }
+            }
+        }
     }
 
     fun requireTypedef(id: String): Declaration.Typedef = require(id, "typedef")
+
+    fun requireCanonicalTypedef(id: String): CanonicalTypedef {
+        val declaration = requireSingle(id)
+        return when (declaration) {
+            is Declaration.Typedef -> CanonicalTypedef(
+                id,
+                declaration,
+                declaration.type(),
+                TypedefEnumScoped.get(declaration) ?: CallbackTypeResolver.enumFromType(declaration.type()),
+            )
+            is Declaration.Scoped -> if (declaration.kind() == Declaration.Scoped.Kind.ENUM) {
+                CanonicalTypedef(id, declaration, Type.declared(declaration), declaration)
+            } else {
+                throw CallbackBindingsException("$id: canonical declaration is not a typedef-backed type")
+            }
+            else -> throw CallbackBindingsException("$id: canonical declaration is not a typedef-backed type")
+        }
+    }
 
     fun requireStruct(id: String): Declaration.Scoped {
         val declaration = require<Declaration.Scoped>(id, "struct")
@@ -26,9 +63,34 @@ class CanonicalDeclarationIndex(root: Declaration.Scoped) {
 
     fun requireConstant(id: String): Declaration.Constant = require(id, "constant")
 
-    fun typedefIds(): List<String> = declarations.keys.filter { it.startsWith("typedef:") }
+    fun typedefIds(): List<String> = declarations
+        .filter { (id, matches) -> id.startsWith("typedef:") && matches.any { it is Declaration.Typedef } }
+        .keys
+        .toList()
+
+    fun belongsToCanonicalTypedef(
+        constant: Declaration.Constant,
+        typedef: CanonicalTypedef,
+    ): Boolean {
+        constantOwners[constant]?.let { owner ->
+            val configuredEnum = typedef.enumDeclaration ?: return false
+            return owner === configuredEnum
+        }
+        return CallbackTypeResolver.belongsToCanonicalTypedef(constant.type(), typedef)
+    }
+
+    fun describeConstantType(constant: Declaration.Constant): String =
+        constantOwners[constant]
+            ?.let { canonicalEnumTypedefId(it) ?: "anonymous enum" }
+            ?: CallbackTypeResolver.canonicalTypedefId(constant.type())
+            ?: CallbackTypeResolver.describeType(constant.type())
 
     private inline fun <reified T : Declaration> require(id: String, kind: String): T {
+        return requireSingle(id) as? T
+            ?: throw CallbackBindingsException("$id: canonical declaration is not a $kind")
+    }
+
+    private fun requireSingle(id: String): Declaration {
         val matches = declarations[id].orEmpty()
         if (matches.isEmpty()) {
             throw CallbackBindingsException("$id: canonical declaration does not exist")
@@ -38,24 +100,37 @@ class CanonicalDeclarationIndex(root: Declaration.Scoped) {
                 "$id: canonical declaration resolves ${matches.size} times; expected exactly once",
             )
         }
-        return matches.single() as? T
-            ?: throw CallbackBindingsException("$id: canonical declaration is not a $kind")
+        return matches.single()
     }
 
-    private fun index(declaration: Declaration) {
+    private fun index(
+        declaration: Declaration,
+        enumOwner: Declaration.Scoped? = null,
+    ) {
         if (Skip.isPresent(declaration)) return
         when (declaration) {
             is Declaration.Typedef -> add("typedef:${declaration.name()}", declaration)
             is Declaration.Function -> add("function:${declaration.name()}", declaration)
-            is Declaration.Constant -> add("constant:${declaration.name()}", declaration)
+            is Declaration.Constant -> {
+                add("constant:${declaration.name()}", declaration)
+                enumOwner?.let { constantOwners[declaration] = it }
+            }
             is Declaration.Scoped -> {
                 if (declaration.kind() == Declaration.Scoped.Kind.STRUCT) {
                     add("struct:${declaration.name()}", declaration)
                 }
+                if (declaration.kind() == Declaration.Scoped.Kind.ENUM) {
+                    canonicalEnumTypedefId(declaration)?.let { id ->
+                        enumBackedTypedefs.getOrPut(id) { mutableListOf() }.add(declaration)
+                    }
+                }
                 if (declaration.kind() == Declaration.Scoped.Kind.ENUM ||
                     declaration.kind() == Declaration.Scoped.Kind.TOPLEVEL
                 ) {
-                    declaration.members().forEach(::index)
+                    val nestedEnumOwner = declaration.takeIf {
+                        it.kind() == Declaration.Scoped.Kind.ENUM
+                    }
+                    declaration.members().forEach { index(it, nestedEnumOwner) }
                 }
             }
         }
@@ -63,6 +138,17 @@ class CanonicalDeclarationIndex(root: Declaration.Scoped) {
 
     private fun add(id: String, declaration: Declaration) {
         declarations.getOrPut(id) { mutableListOf() }.add(declaration)
+    }
+
+    private fun canonicalEnumTypedefId(declaration: Declaration.Scoped): String? {
+        val name = declaration.name()
+        if (name.isBlank() || ANONYMOUS_DECLARATION_NAME.containsMatchIn(name)) return null
+        return "typedef:$name"
+    }
+
+    private companion object {
+        val ANONYMOUS_DECLARATION_NAME =
+            Regex("\\((unnamed|anonymous)(?: (struct|union|enum))? at ")
     }
 }
 
@@ -108,9 +194,20 @@ internal object CallbackTypeResolver {
         else -> null
     }
 
-    fun belongsToTypedef(type: Type, typedef: Declaration.Typedef): Boolean {
-        val configuredTokens = nominalTypeTokens(typedef.type()) + "typedef:${typedef.name()}"
+    fun belongsToCanonicalTypedef(type: Type, typedef: CanonicalTypedef): Boolean {
+        val configuredTokens = nominalTypeTokens(typedef.type) + typedef.id
         return nominalTypeTokens(type).any { it in configuredTokens }
+    }
+
+    fun enumFromType(type: Type): Declaration.Scoped? = when (type) {
+        is Type.Declared -> type.tree().takeIf { it.kind() == Declaration.Scoped.Kind.ENUM }
+        is Type.Delegated -> when (type.kind()) {
+            Type.Delegated.Kind.TYPEDEF,
+            Type.Delegated.Kind.ATOMIC,
+            Type.Delegated.Kind.VOLATILE -> enumFromType(type.type())
+            else -> null
+        }
+        else -> null
     }
 
     fun structFromType(type: Type): Declaration.Scoped? = when (type) {

@@ -250,7 +250,7 @@ object CallbackAnalyzer {
         config: CallbackInfoMode,
     ): ValidatedCallbackInfoMode {
         val field = requireField(struct, config.field, structId, "mode")
-        val type = index.requireTypedef(config.type)
+        val type = index.requireCanonicalTypedef(config.type)
         val actualType = canonicalTypedefId(field.type())
         if (actualType != config.type) {
             throw CallbackBindingsException(
@@ -263,8 +263,8 @@ object CallbackAnalyzer {
         }
         val constants = config.allowedConstants.map { constantId ->
             index.requireConstant(constantId).also { constant ->
-                if (!belongsToTypedef(constant.type(), type)) {
-                    val actual = canonicalTypedefId(constant.type()) ?: describeType(constant.type())
+                if (!index.belongsToCanonicalTypedef(constant, type)) {
+                    val actual = index.describeConstantType(constant)
                     throw CallbackBindingsException(
                         "$constantId: constant type $actual does not match ${config.type} for $structId",
                     )
@@ -393,9 +393,6 @@ object CallbackAnalyzer {
     private fun isOpaquePointer(type: Type) = CallbackTypeResolver.isOpaquePointer(type)
 
     private fun canonicalTypedefId(type: Type) = CallbackTypeResolver.canonicalTypedefId(type)
-
-    private fun belongsToTypedef(type: Type, typedef: Declaration.Typedef) =
-        CallbackTypeResolver.belongsToTypedef(type, typedef)
 
     private fun structFromType(type: Type) = CallbackTypeResolver.structFromType(type)
 

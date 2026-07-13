@@ -73,7 +73,7 @@ data class ValidatedCallbackInfoOwner(
 
 data class ValidatedCallbackInfoMode(
     val field: Declaration.Variable,
-    val type: Declaration.Typedef,
+    val type: CanonicalTypedef,
     val allowedConstants: List<Declaration.Constant>,
 )
 

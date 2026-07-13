@@ -14,6 +14,7 @@ import java.nio.file.Path
 import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -582,6 +583,141 @@ class CallbackAnalyzerTest {
     }
 
     @Test
+    fun `resolves a filtered WGPU enum-backed typedef and accepts its constants`() {
+        val parsed = parseDeclarations(ENUM_BACKED_TYPEDEF_HEADER)
+        val modeDeclaration = parsed.members().single { it.name() == "WGPUCallbackMode" }
+        val modeEnum = assertIs<Declaration.Scoped>(modeDeclaration)
+        assertEquals(Declaration.Scoped.Kind.ENUM, modeEnum.kind())
+        assertTrue(
+            parsed.members().none {
+                it is Declaration.Typedef && it.name() == "WGPUCallbackMode"
+            },
+        )
+
+        val info = parsed.members()
+            .filterIsInstance<Declaration.Scoped>()
+            .single { it.name() == "WGPURequestDeviceCallbackInfo" }
+        val modeField = info.members()
+            .filterIsInstance<Declaration.Variable>()
+            .single { it.name() == "mode" }
+        val modeType = assertIs<Type.Delegated>(modeField.type())
+        assertEquals(Type.Delegated.Kind.TYPEDEF, modeType.kind())
+        assertEquals("WGPUCallbackMode", modeType.name())
+
+        val validated = CallbackAnalyzer.validate(
+            CanonicalDeclarationIndex(parsed),
+            enumBackedTypedefConfig("constant:WGPUCallbackMode_AllowSpontaneous"),
+        )
+
+        assertEquals(
+            listOf("typedef:WGPURequestDeviceCallback"),
+            validated.callbacks.map { it.id },
+        )
+        assertEquals(
+            listOf("WGPUCallbackMode_AllowSpontaneous"),
+            validated.callbackInfoBindings.single().mode?.allowedConstants?.map { it.name() },
+        )
+    }
+
+    @Test
+    fun `rejects an enum-backed mode constant owned by another enum with the same carrier`() {
+        val parsed = parseDeclarations(ENUM_BACKED_TYPEDEF_HEADER)
+        val modeConstant = parsed.members()
+            .filterIsInstance<Declaration.Scoped>()
+            .single { it.name() == "WGPUCallbackMode" }
+            .members()
+            .filterIsInstance<Declaration.Constant>()
+            .single { it.name() == "WGPUCallbackMode_AllowSpontaneous" }
+        val otherConstant = parsed.members()
+            .filterIsInstance<Declaration.Scoped>()
+            .single { it.name() == "WGPUOtherCallbackMode" }
+            .members()
+            .filterIsInstance<Declaration.Constant>()
+            .single { it.name() == "WGPUOtherCallbackMode_AllowSpontaneous" }
+        assertEquals(modeConstant.type(), otherConstant.type())
+
+        assertDiagnostic(
+            "constant:WGPUOtherCallbackMode_AllowSpontaneous: constant type " +
+                "typedef:WGPUOtherCallbackMode does not match typedef:WGPUCallbackMode " +
+                "for struct:WGPURequestDeviceCallbackInfo",
+        ) {
+            CallbackAnalyzer.validate(
+                CanonicalDeclarationIndex(parsed),
+                enumBackedTypedefConfig("constant:WGPUOtherCallbackMode_AllowSpontaneous"),
+            )
+        }
+    }
+
+    @Test
+    fun `distinguishes constants owned by distinct anonymous enum declarations`() {
+        val parsed = parseDeclarations(ANONYMOUS_ENUM_TYPEDEF_HEADER)
+        val anonymousEnums = parsed.members()
+            .filterIsInstance<Declaration.Scoped>()
+            .filter { it.kind() == Declaration.Scoped.Kind.ENUM }
+        val owningEnum = anonymousEnums.single { owner ->
+            owner.members().any { it.name() == "AnonymousMode_Allow" }
+        }
+        val foreignEnum = anonymousEnums.single { owner ->
+            owner.members().any { it.name() == "ForeignAnonymousMode_Allow" }
+        }
+        assertTrue(owningEnum !== foreignEnum)
+        assertEquals(owningEnum.name(), foreignEnum.name())
+
+        val owningConstant = owningEnum.members()
+            .filterIsInstance<Declaration.Constant>()
+            .single { it.name() == "AnonymousMode_Allow" }
+        val foreignConstant = foreignEnum.members()
+            .filterIsInstance<Declaration.Constant>()
+            .single { it.name() == "ForeignAnonymousMode_Allow" }
+        assertEquals(owningConstant.type(), foreignConstant.type())
+
+        val index = CanonicalDeclarationIndex(parsed)
+        val accepted = CallbackAnalyzer.validate(
+            index,
+            anonymousEnumTypedefConfig("constant:AnonymousMode_Allow"),
+        )
+        assertEquals(
+            listOf("AnonymousMode_Allow"),
+            accepted.callbackInfoBindings.single().mode?.allowedConstants?.map { it.name() },
+        )
+
+        assertDiagnostic(
+            "constant:ForeignAnonymousMode_Allow: constant type anonymous enum does not match " +
+                "typedef:AnonymousMode for struct:AnonymousEnumCallbackInfo",
+        ) {
+            CallbackAnalyzer.validate(
+                index,
+                anonymousEnumTypedefConfig("constant:ForeignAnonymousMode_Allow"),
+            )
+        }
+    }
+
+    @Test
+    fun `rejects a raw mode constant with the same carrier as an enum-backed typedef`() {
+        val parsed = parseDeclarations(ENUM_BACKED_TYPEDEF_HEADER)
+        val modeConstant = parsed.members()
+            .filterIsInstance<Declaration.Scoped>()
+            .single { it.name() == "WGPUCallbackMode" }
+            .members()
+            .filterIsInstance<Declaration.Constant>()
+            .single { it.name() == "WGPUCallbackMode_AllowSpontaneous" }
+        val rawConstant = parsed.members()
+            .filterIsInstance<Declaration.Constant>()
+            .single { it.name() == "WGPURawCallbackMode_AllowSpontaneous" }
+        assertEquals(modeConstant.type(), rawConstant.type())
+
+        assertDiagnostic(
+            "constant:WGPURawCallbackMode_AllowSpontaneous: constant type int does not match " +
+                "typedef:WGPUCallbackMode for struct:WGPURequestDeviceCallbackInfo",
+        ) {
+            CallbackAnalyzer.validate(
+                CanonicalDeclarationIndex(parsed),
+                enumBackedTypedefConfig("constant:WGPURawCallbackMode_AllowSpontaneous"),
+            )
+        }
+    }
+
+    @Test
     fun `rejects a non-void callback even when configured`() {
         val invalidIndex = parseIndex(
             """
@@ -688,14 +824,63 @@ class CallbackAnalyzerTest {
         )
     }
 
+    private fun enumBackedTypedefConfig(allowedConstant: String): CallbackBindingsConfig =
+        CallbackBindingsConfig().also { config ->
+            config.callbackInfoBindings = listOf(
+                CallbackInfoBinding().also { binding ->
+                    binding.struct = "struct:WGPURequestDeviceCallbackInfo"
+                    binding.owner = CallbackInfoOwner().also { owner ->
+                        owner.function = "function:wgpuAdapterRequestDevice"
+                        owner.parameterPath = "callbackInfo"
+                        owner.lifetime = CallbackInfoLifetime.CONSUMED_DURING_CALL
+                    }
+                    binding.callbackField = "callback"
+                    binding.callbackType = "typedef:WGPURequestDeviceCallback"
+                    binding.routingUserdataField = "userdata2"
+                    binding.applicationUserdataFields = listOf("userdata1")
+                    binding.mode = CallbackInfoMode().also { mode ->
+                        mode.field = "mode"
+                        mode.type = "typedef:WGPUCallbackMode"
+                        mode.allowedConstants = listOf(allowedConstant)
+                    }
+                },
+            )
+        }
+
+    private fun anonymousEnumTypedefConfig(allowedConstant: String): CallbackBindingsConfig =
+        CallbackBindingsConfig().also { config ->
+            config.callbackInfoBindings = listOf(
+                CallbackInfoBinding().also { binding ->
+                    binding.struct = "struct:AnonymousEnumCallbackInfo"
+                    binding.owner = CallbackInfoOwner().also { owner ->
+                        owner.function = "function:ownAnonymousEnumCallbackInfo"
+                        owner.parameterPath = "callbackInfo"
+                        owner.lifetime = CallbackInfoLifetime.CONSUMED_DURING_CALL
+                    }
+                    binding.callbackField = "callback"
+                    binding.callbackType = "typedef:AnonymousEnumCallback"
+                    binding.routingUserdataField = "userdata"
+                    binding.mode = CallbackInfoMode().also { mode ->
+                        mode.field = "mode"
+                        mode.type = "typedef:AnonymousMode"
+                        mode.allowedConstants = listOf(allowedConstant)
+                    }
+                },
+            )
+        }
+
     private fun assertDiagnostic(expected: String, block: () -> Unit) {
         val failure = assertFailsWith<CallbackBindingsException>(block = block)
         assertEquals(expected, failure.message)
     }
 
     private fun parseIndex(source: String): CanonicalDeclarationIndex {
+        return CanonicalDeclarationIndex(parseDeclarations(source))
+    }
+
+    private fun parseDeclarations(source: String): Declaration.Scoped {
         val header = tempDir.resolve("fixture-${source.hashCode()}.h").also { it.writeText(source) }
-        return CanonicalDeclarationIndex(KextractTool.parse(listOf(header.toString())))
+        return KextractTool.parse(listOf(header.toString()))
     }
 
     private fun programmaticIndex(vararg declarations: Declaration): CanonicalDeclarationIndex =
@@ -755,6 +940,63 @@ class CallbackAnalyzerTest {
             void sampleOwnCallbackInfo(SampleCallbackInfo callbackInfo);
             void sampleOwnAmbiguousDescriptor(SampleDescriptor const * descriptor);
             void sampleOwnNestedCallbackInfo(SampleUniqueDescriptor const * descriptor);
+        """.trimIndent()
+
+        val ENUM_BACKED_TYPEDEF_HEADER = """
+            typedef enum WGPUCallbackMode {
+                WGPUCallbackMode_WaitAnyOnly = 0x00000001,
+                WGPUCallbackMode_AllowProcessEvents = 0x00000002,
+                WGPUCallbackMode_AllowSpontaneous = 0x00000003,
+                WGPUCallbackMode_Force32 = 0x7FFFFFFF
+            } WGPUCallbackMode;
+
+            typedef enum WGPUOtherCallbackMode {
+                WGPUOtherCallbackMode_AllowSpontaneous = 0x00000003,
+                WGPUOtherCallbackMode_Force32 = 0x7FFFFFFF
+            } WGPUOtherCallbackMode;
+
+            const int WGPURawCallbackMode_AllowSpontaneous = 0x00000003;
+
+            typedef void (*WGPURequestDeviceCallback)(
+                int status,
+                void * userdata1,
+                void * userdata2
+            );
+
+            typedef struct WGPURequestDeviceCallbackInfo {
+                WGPUCallbackMode mode;
+                WGPURequestDeviceCallback callback;
+                void * userdata1;
+                void * userdata2;
+            } WGPURequestDeviceCallbackInfo;
+
+            void wgpuAdapterRequestDevice(WGPURequestDeviceCallbackInfo callbackInfo);
+        """.trimIndent()
+
+        val ANONYMOUS_ENUM_TYPEDEF_HEADER = """
+            #line 1 "anonymous-mode-owner.h"
+            enum {
+                AnonymousMode_Allow = 0x00000003,
+                AnonymousMode_Force32 = 0x7FFFFFFF
+            } anonymousModeValue;
+            typedef __typeof__(anonymousModeValue) AnonymousMode;
+
+            #line 1 "anonymous-mode-owner.h"
+            enum {
+                ForeignAnonymousMode_Allow = 0x00000003,
+                ForeignAnonymousMode_Force32 = 0x7FFFFFFF
+            } foreignAnonymousModeValue;
+
+            #line 100 "anonymous-mode-owner.h"
+            typedef void (*AnonymousEnumCallback)(void * userdata);
+
+            typedef struct AnonymousEnumCallbackInfo {
+                AnonymousMode mode;
+                AnonymousEnumCallback callback;
+                void * userdata;
+            } AnonymousEnumCallbackInfo;
+
+            void ownAnonymousEnumCallbackInfo(AnonymousEnumCallbackInfo callbackInfo);
         """.trimIndent()
     }
 }
