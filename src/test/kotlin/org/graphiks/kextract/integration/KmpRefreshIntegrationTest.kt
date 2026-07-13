@@ -272,7 +272,7 @@ class KmpRefreshIntegrationTest : FreeSpec({
             /**
              * Invoked when queue work completes.
              */
-            expect class WGPUQueueDoneCallback : AutoCloseable
+            fun interface WGPUQueueDoneCallback : Callback
             """.trimIndent()
     }
 

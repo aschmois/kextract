@@ -181,7 +181,7 @@ class GeneratorIntegrationTest : FreeSpec({
             jvm shouldContain "?.let { WGPUQueue(it) }"
         }
 
-        "emits typed callback holders and convenience overloads" {
+        "emits typed callback registrations and raw callback addresses" {
             val header = """
                 typedef enum WGPULogLevel {
                     WGPULogLevel_Off = 0,
@@ -198,18 +198,17 @@ class GeneratorIntegrationTest : FreeSpec({
             val common = generateCommon(header)
             val jvm = generateKmpFile(header, "jvmMain", "Jvm")
 
-            common shouldContain "expect class WGPULogCallback : AutoCloseable"
-            common shouldContain "fun allocate(callback: (level: WGPULogLevel, message: WGPUStringView, userdata: NativeAddress?) -> Unit): WGPULogCallback"
-            common shouldContain "expect fun wgpuSetLogCallback(callback: WGPULogCallback?, userdata: NativeAddress?): Unit"
-            common shouldContain "fun wgpuSetLogCallback(userdata: NativeAddress? = null, callback: (level: WGPULogLevel, message: WGPUStringView, userdata: NativeAddress?) -> Unit): WGPULogCallback"
-            common shouldNotContain "callback: NativeAddress?"
+            common shouldContain "fun interface WGPULogCallback : Callback"
+            common shouldContain "fun invoke(level: WGPULogLevel, message: WGPUStringView)"
+            common shouldContain "expect fun WGPULogCallback.Companion.register("
+            common shouldContain "expect fun wgpuSetLogCallback(callback: NativeAddress?, userdata: NativeAddress?): Unit"
+            common shouldNotContain "expect class WGPULogCallback"
+            common shouldNotContain "fun allocate(callback:"
 
-            jvm shouldContain "actual class WGPULogCallback"
-            jvm shouldContain "actual fun allocate(callback: (level: WGPULogLevel, message: WGPUStringView, userdata: NativeAddress?) -> Unit): WGPULogCallback"
-            jvm shouldContain "Linker.nativeLinker().upcallStub"
-            jvm shouldContain "actual fun wgpuSetLogCallback(callback: WGPULogCallback?, userdata: NativeAddress?): Unit"
-            jvm shouldContain "callback?.handler?.handler ?: MemorySegment.NULL"
-            jvm shouldNotContain "callback: NativeAddress?"
+            jvm shouldNotContain "actual class WGPULogCallback"
+            jvm shouldNotContain "Linker.nativeLinker().upcallStub"
+            jvm shouldContain "actual fun wgpuSetLogCallback(callback: NativeAddress?, userdata: NativeAddress?): Unit"
+            jvm shouldContain "callback?.handler ?: MemorySegment.NULL"
         }
     }
 

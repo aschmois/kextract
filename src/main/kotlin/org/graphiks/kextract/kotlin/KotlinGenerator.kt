@@ -9,6 +9,7 @@ import org.graphiks.kextract.kotlin.builders.KotlinKmpCommonBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinKmpJvmBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinKmpNativeBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinToplevelBuilder
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.objc.ObjCRuntimeTemplate
 import org.graphiks.kextract.kotlin.objc.ObjCSubclassingTemplate
@@ -48,7 +49,10 @@ class KotlinGenerator {
         callbackBindings: ValidatedCallbackBindings = ValidatedCallbackBindings.EMPTY,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
-        if (multiplatform) return generateKmp(scoped, targetPackage, className)
+        if (multiplatform) {
+            val callbackModels = callbackBindings.callbacks.map(KotlinCallbackModel::from)
+            return generateKmp(scoped, targetPackage, className, callbackModels)
+        }
 
         val toplevel = KotlinToplevelBuilder(
             targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput, variadicArgs,
@@ -67,11 +71,12 @@ class KotlinGenerator {
         scoped: Declaration.Scoped,
         targetPackage: String,
         className: String,
+        callbackModels: List<KotlinCallbackModel>,
     ): List<KotlinSourceFile> = buildList {
-        KotlinKmpCommonBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpJvmBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpAndroidBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpNativeBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpCommonBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpJvmBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpNativeBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
     }
 
     private fun sanitizeClassName(name: String): String =

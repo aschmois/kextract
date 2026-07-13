@@ -5,6 +5,7 @@ package org.graphiks.kextract.kotlin.builders
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.LayoutUtils
 import org.graphiks.kextract.kotlin.utils.TypeMapper
@@ -13,13 +14,15 @@ import org.graphiks.kextract.pipeline.isEnum
 
 class KotlinKmpJvmBuilder(
     private val targetPackage: String,
-    private val className: String
+    private val className: String,
+    callbackModels: List<KotlinCallbackModel>,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
     private val files = mutableListOf<KotlinSourceFile>()
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
+    private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
     private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames)
 
@@ -30,7 +33,6 @@ class KotlinKmpJvmBuilder(
         }
 
         builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackHolder")
         builder.appendLine("import io.ygdrasil.kffi.CString")
         builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
         builder.appendLine("import io.ygdrasil.kffi.MemoryAllocator")
@@ -38,7 +40,6 @@ class KotlinKmpJvmBuilder(
         builder.appendLine("import io.ygdrasil.kffi.findOrThrow")
         builder.appendLine("import java.lang.foreign.*")
         builder.appendLine("import java.lang.invoke.MethodHandle")
-        builder.appendLine("import java.lang.invoke.MethodHandles")
         builder.appendLine("import java.lang.invoke.VarHandle")
         builder.appendLine("import java.lang.foreign.MemoryLayout.PathElement.groupElement")
         builder.appendLine()
@@ -50,7 +51,7 @@ class KotlinKmpJvmBuilder(
             Declaration.Scoped.Kind.STRUCT,
             Declaration.Scoped.Kind.UNION -> {
                 val structName = decl.name()
-                if (structName.isEmpty() || structName.contains("unnamed") || (!structName.startsWith("WGPU") && !structName.startsWith("wgpu"))) return
+                if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
                 generatedStructNames.add(structName)
@@ -395,19 +396,14 @@ class KotlinKmpJvmBuilder(
 
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
-        if (!decl.name().startsWith("wgpu")) return
         emitFunction(decl)
     }
     override fun visitVariable(decl: Declaration.Variable) {}
     override fun visitTypedef(decl: Declaration.Typedef) {
         if (Skip.isPresent(decl)) return
         val name = decl.name()
-        if (name.isEmpty() || !name.startsWith("WGPU")) return
-        if (name.endsWith("Callback")) typeMapper.callbackFunction(decl.type())?.let { function ->
-            if (!generatedNames.add(name)) return
-            emitCallbackActual(name, function)
-            return
-        }
+        if (name.isEmpty()) return
+        if (name in callbackTypeNames || typeMapper.callbackFunction(decl.type()) != null) return
         val inner = decl.type()
         if (inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER) {
             val pointee = inner.type()
@@ -429,70 +425,6 @@ class KotlinKmpJvmBuilder(
     override fun visitObjCCategory(decl: Declaration.ObjCCategory) {}
 
     fun getFiles(): List<KotlinSourceFile> = files
-
-    private fun emitCallbackActual(name: String, function: Type.Function) {
-        if (typeMapper.mapFunctionType(function.returnType()) != "Unit") {
-            builder.appendLine("// Callback $name is not generated: non-void callbacks are not supported yet.")
-            builder.appendLine()
-            return
-        }
-
-        builder.appendLine("actual class $name private constructor(")
-        builder.indent()
-        builder.appendLine("private var segment: MemorySegment,")
-        builder.appendLine("private val arena: Arena,")
-        builder.appendLine("private val callback: ${typeMapper.callbackLambdaType(function)}")
-        builder.unindent()
-        builder.appendLine(") : AutoCloseable {")
-        builder.indent()
-        builder.appendLine("actual val handler: NativeAddress")
-        builder.indent()
-        builder.appendLine("get() = NativeAddress(segment)")
-        builder.unindent()
-        builder.appendLine()
-
-        val rawParams = function.parameterNames().orEmpty().mapIndexed { index, rawName ->
-            val namePart = rawName.takeIf { it.isNotEmpty() } ?: "arg$index"
-            "$namePart: ${rawJvmType(function.argumentTypes()[index])}"
-        }
-        builder.appendLine("fun invoke(${rawParams.joinToString(", ")}) {")
-        builder.indent()
-        val args = function.argumentTypes().mapIndexed { index, type ->
-            val paramName = function.parameterNames().orEmpty().getOrNull(index)?.takeIf { it.isNotEmpty() } ?: "arg$index"
-            fromRawJvmCallbackArgument(paramName, type)
-        }.joinToString(", ")
-        builder.appendLine("callback($args)")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
-        builder.appendLine("actual override fun close() {")
-        builder.indent()
-        builder.appendLine("arena.close()")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
-        builder.appendLine("actual companion object {")
-        builder.indent()
-        builder.appendLine("private val DESC: FunctionDescriptor = ${LayoutUtils.functionDescriptorString(function)}")
-        builder.appendLine("actual fun allocate(callback: ${typeMapper.callbackLambdaType(function)}): $name {")
-        builder.indent()
-        builder.appendLine("val arena = Arena.ofShared()")
-        builder.appendLine("val holder = $name(MemorySegment.NULL, arena, callback)")
-        builder.appendLine("val handle = MethodHandles.lookup()")
-        builder.indent()
-        builder.appendLine(".findVirtual($name::class.java, \"invoke\", DESC.toMethodType())")
-        builder.appendLine(".bindTo(holder)")
-        builder.unindent()
-        builder.appendLine("holder.segment = Linker.nativeLinker().upcallStub(handle, DESC, arena)")
-        builder.appendLine("return holder")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
-    }
 
     private fun emitFunction(decl: Declaration.Function) {
         val name = decl.name()
@@ -546,16 +478,13 @@ class KotlinKmpJvmBuilder(
             rawType == "Int" && returnType == "UInt" -> {
                 builder.appendLine("return ($invoke as Int).toUInt()")
             }
-            rawType == "Int" && returnType.startsWith("WGPU") -> {
+            rawType == "Int" && typeMapper.isEnumType(type) -> {
                 builder.appendLine("return ($invoke as Int).toUInt() as $returnType")
             }
             rawType == "Long" && returnType == "ULong" -> {
                 builder.appendLine("return ($invoke as Long).toULong()")
             }
-            rawType == "Long" && returnType.startsWith("WGPU") -> {
-                builder.appendLine("return ($invoke as Long).toULong() as $returnType")
-            }
-            rawType == "MemorySegment" && returnType.startsWith("WGPU") -> {
+            rawType == "MemorySegment" && returnsStructByValue(type) -> {
                 builder.appendLine("return $returnType(NativeAddress($invoke as MemorySegment))")
             }
             else -> {
@@ -566,7 +495,14 @@ class KotlinKmpJvmBuilder(
 
     private fun returnsStructByValue(type: Type): Boolean =
         rawJvmType(type) == "MemorySegment" &&
-            typeMapper.mapFunctionType(type).let { it.startsWith("WGPU") && !it.endsWith("?") }
+            !returnsPointer(type) &&
+            typeMapper.mapFunctionType(type) in generatedStructNames
+
+    private fun returnsPointer(type: Type): Boolean = when {
+        type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> true
+        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> returnsPointer(type.type())
+        else -> false
+    }
 
     private fun toRawJvmArgument(name: String, type: Type): String {
         val kmpType = typeMapper.mapFunctionType(type)
@@ -577,41 +513,11 @@ class KotlinKmpJvmBuilder(
             rawType == "MemorySegment" && kmpType.startsWith("ArrayHolder") -> "$name?.handler?.handler ?: MemorySegment.NULL"
             rawType == "MemorySegment" && kmpType.endsWith("?") -> "$name?.handler?.handler ?: MemorySegment.NULL"
             rawType == "MemorySegment" -> "$name.handler.handler"
-            rawType == "Int" && (kmpType == "UInt" || kmpType.startsWith("WGPU")) -> "$name.toInt()"
+            rawType == "Int" && (kmpType == "UInt" || typeMapper.isEnumType(type)) -> "$name.toInt()"
             rawType == "Int" && kmpType == "Boolean" -> "if ($name) 1 else 0"
-            rawType == "Long" && (kmpType == "ULong" || kmpType.startsWith("WGPU")) -> "$name.toLong()"
+            rawType == "Long" && kmpType == "ULong" -> "$name.toLong()"
             rawType == "Short" && kmpType == "UShort" -> "$name.toShort()"
             rawType == "Byte" && kmpType == "UByte" -> "$name.toByte()"
-            else -> name
-        }
-    }
-
-    private fun fromRawJvmCallbackArgument(name: String, type: Type): String {
-        val kmpType = typeMapper.mapFunctionType(type)
-        val rawType = rawJvmType(type)
-        return when {
-            rawType == "MemorySegment" && kmpType == "NativeAddress?" ->
-                "$name.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)"
-            rawType == "MemorySegment" && kmpType == "CString?" ->
-                "$name.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)?.let(::CString)"
-            rawType == "MemorySegment" && kmpType.endsWith("?") -> {
-                val nonOpt = kmpType.removeSuffix("?")
-                "$name.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)?.let { $nonOpt(it) }"
-            }
-            rawType == "MemorySegment" && kmpType != "NativeAddress" ->
-                "$kmpType(NativeAddress($name))"
-            rawType == "MemorySegment" ->
-                "NativeAddress($name)"
-            rawType == "Int" && kmpType == "Boolean" ->
-                "($name != 0)"
-            rawType == "Int" && (kmpType == "UInt" || kmpType.startsWith("WGPU")) ->
-                "$name.toUInt() as $kmpType"
-            rawType == "Long" && (kmpType == "ULong" || kmpType.startsWith("WGPU")) ->
-                "$name.toULong() as $kmpType"
-            rawType == "Short" && kmpType == "UShort" ->
-                "$name.toUShort()"
-            rawType == "Byte" && kmpType == "UByte" ->
-                "$name.toUByte()"
             else -> name
         }
     }

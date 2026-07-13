@@ -5,6 +5,7 @@ package org.graphiks.kextract.kotlin.builders
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.LayoutUtils
 import org.graphiks.kextract.kotlin.utils.TypeMapper
@@ -12,7 +13,8 @@ import org.graphiks.kextract.pipeline.isEnum
 
 class KotlinKmpAndroidBuilder(
     private val targetPackage: String,
-    private val className: String
+    private val className: String,
+    callbackModels: List<KotlinCallbackModel>,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -20,6 +22,7 @@ class KotlinKmpAndroidBuilder(
     private val files = mutableListOf<KotlinSourceFile>()
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
+    private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
     private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val androidPackage = if (targetPackage.isEmpty()) "android" else "$targetPackage.android"
     private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames, arraysAsHolders = false)
@@ -33,7 +36,6 @@ class KotlinKmpAndroidBuilder(
         jnaBuilder.appendLine()
 
         builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackHolder")
         builder.appendLine("import io.ygdrasil.kffi.CString")
         builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
         builder.appendLine("import io.ygdrasil.kffi.MemoryAllocator")
@@ -52,7 +54,7 @@ class KotlinKmpAndroidBuilder(
             Declaration.Scoped.Kind.STRUCT,
             Declaration.Scoped.Kind.UNION -> {
                 val structName = decl.name()
-                if (structName.isEmpty() || structName.contains("unnamed") || (!structName.startsWith("WGPU") && !structName.startsWith("wgpu"))) return
+                if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
                 generatedStructNames.add(structName)
@@ -421,7 +423,6 @@ class KotlinKmpAndroidBuilder(
 
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
-        if (!decl.name().startsWith("wgpu")) return
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
         val params = decl.parameters().mapIndexed { index, param ->
             val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
@@ -437,12 +438,8 @@ class KotlinKmpAndroidBuilder(
     override fun visitTypedef(decl: Declaration.Typedef) {
         if (Skip.isPresent(decl)) return
         val name = decl.name()
-        if (name.isEmpty() || !name.startsWith("WGPU")) return
-        if (name.endsWith("Callback")) typeMapper.callbackFunction(decl.type())?.let { function ->
-            if (!generatedNames.add(name)) return
-            emitCallbackUnsupportedActual(name, function)
-            return
-        }
+        if (name.isEmpty()) return
+        if (name in callbackTypeNames || typeMapper.callbackFunction(decl.type()) != null) return
         val inner = decl.type()
         if (inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER) {
             val pointee = inner.type()
@@ -464,23 +461,6 @@ class KotlinKmpAndroidBuilder(
     override fun visitObjCCategory(decl: Declaration.ObjCCategory) {}
 
     fun getFiles(): List<KotlinSourceFile> = files
-
-    private fun emitCallbackUnsupportedActual(name: String, function: Type.Function) {
-        builder.appendLine("actual class $name private constructor(actual val handler: NativeAddress) : AutoCloseable {")
-        builder.indent()
-        builder.appendLine("actual override fun close() = Unit")
-        builder.appendLine("actual companion object {")
-        builder.indent()
-        builder.appendLine("actual fun allocate(callback: ${typeMapper.callbackLambdaType(function)}): $name =")
-        builder.indent()
-        builder.appendLine("error(\"$name allocation is not implemented on Android\")")
-        builder.unindent()
-        builder.unindent()
-        builder.appendLine("}")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
-    }
 
     private fun emitNativeDisplayHandle() {
         builder.appendLine("actual interface WGPUNativeDisplayHandle {")

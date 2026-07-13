@@ -6,18 +6,20 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCommonEmitter
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 
 class KotlinKmpCommonBuilder(
     private val targetPackage: String,
-    private val className: String
+    private val className: String,
+    private val callbackModels: List<KotlinCallbackModel>,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
     private val files = mutableListOf<KotlinSourceFile>()
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
-    private val callbackFunctions = mutableMapOf<String, Type.Function>()
     private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames)
 
@@ -28,7 +30,14 @@ class KotlinKmpCommonBuilder(
         }
 
         builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackHolder")
+        builder.appendLine("import io.ygdrasil.kffi.Callback")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackExceptionHandler")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackPolicy")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackRegistration")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackRuntimeApi")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackType")
+        builder.appendLine("import io.ygdrasil.kffi.PreparedCallbackRegistration")
+        builder.appendLine("import io.ygdrasil.kffi.UnsafeCallbackRearmApi")
         builder.appendLine("import io.ygdrasil.kffi.CString")
         builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
         builder.appendLine("import io.ygdrasil.kffi.MemoryAllocator")
@@ -41,7 +50,7 @@ class KotlinKmpCommonBuilder(
             Declaration.Scoped.Kind.STRUCT,
             Declaration.Scoped.Kind.UNION -> {
                 val structName = decl.name()
-                if (structName.isEmpty() || structName.contains("unnamed") || (!structName.startsWith("WGPU") && !structName.startsWith("wgpu"))) return
+                if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
                 generatedStructNames.add(structName)
@@ -103,6 +112,7 @@ class KotlinKmpCommonBuilder(
                 for (member in decl.members()) {
                     member.accept(this)
                 }
+                KotlinCallbackCommonEmitter(typeMapper::mapFunctionType).emit(builder, callbackModels)
             }
             else -> {}
         }
@@ -163,8 +173,7 @@ class KotlinKmpCommonBuilder(
         val constants = decl.members().filterIsInstance<Declaration.Constant>().filterNot(Skip::isPresent)
         val flagTypedefs = typedefs
             .filter { typedef ->
-                typedef.name().startsWith("WGPU") &&
-                    typedef.name() != "WGPUFlags" &&
+                typedef.name() != "WGPUFlags" &&
                     constants.any { it.name().startsWith("${typedef.name()}_") }
             }
 
@@ -249,7 +258,6 @@ class KotlinKmpCommonBuilder(
 
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
-        if (!decl.name().startsWith("wgpu")) return
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
         val params = decl.parameters().mapIndexed { index, param ->
             val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
@@ -258,20 +266,13 @@ class KotlinKmpCommonBuilder(
         emitKDoc(decl)
         builder.appendLine("expect fun ${decl.name()}($params): $returnType")
         builder.appendLine()
-        emitCallbackConvenienceOverload(decl)
     }
     override fun visitVariable(decl: Declaration.Variable) {}
     override fun visitTypedef(decl: Declaration.Typedef) {
         if (Skip.isPresent(decl)) return
         val name = decl.name()
-        if (name.isEmpty() || !name.startsWith("WGPU")) return
-        if (name.endsWith("Callback")) typeMapper.callbackFunction(decl.type())?.let { function ->
-            if (!generatedNames.add(name)) return
-            callbackFunctions[name] = function
-            emitKDoc(decl)
-            emitCallbackExpect(name, function)
-            return
-        }
+        if (name.isEmpty()) return
+        if (typeMapper.callbackFunction(decl.type()) != null) return
         val inner = decl.type()
         if (inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER) {
             val pointee = inner.type()
@@ -330,49 +331,6 @@ class KotlinKmpCommonBuilder(
             .dropWhile { it.isBlank() }
             .dropLastWhile { it.isBlank() }
         return lines.joinToString("\n").takeIf { it.isNotBlank() }
-    }
-
-    private fun emitCallbackExpect(name: String, function: Type.Function) {
-        builder.appendLine("expect class $name : AutoCloseable {")
-        builder.indent()
-        builder.appendLine("val handler: NativeAddress")
-        builder.appendLine("override fun close()")
-        builder.appendLine("companion object {")
-        builder.indent()
-        builder.appendLine("fun allocate(callback: ${typeMapper.callbackLambdaType(function)}): $name")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
-    }
-
-    private fun emitCallbackConvenienceOverload(decl: Declaration.Function) {
-        if (typeMapper.mapFunctionType(decl.type().returnType()) != "Unit") return
-        val callbackParam = decl.parameters().firstOrNull { typeMapper.callbackFunction(it.type()) != null } ?: return
-        val callbackName = typeMapper.callbackTypeName(callbackParam.type()) ?: return
-        if (!callbackName.endsWith("Callback")) return
-        val callbackFunction = callbackFunctions[callbackName] ?: typeMapper.callbackFunction(callbackParam.type()) ?: return
-        val valueParams = decl.parameters().filter { it !== callbackParam }
-        val helperParams = valueParams.mapIndexed { index, param ->
-            val paramName = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
-            val paramType = typeMapper.mapFunctionType(param.type())
-            val default = if (paramName == "userdata" && paramType == "NativeAddress?") " = null" else ""
-            "$paramName: $paramType$default"
-        } + "callback: ${typeMapper.callbackLambdaType(callbackFunction)}"
-        val callArgs = decl.parameters().mapIndexed { index, param ->
-            val paramName = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
-            if (param === callbackParam) "holder" else paramName
-        }.joinToString(", ")
-
-        builder.appendLine("fun ${decl.name()}(${helperParams.joinToString(", ")}): $callbackName {")
-        builder.indent()
-        builder.appendLine("val holder = $callbackName.allocate(callback)")
-        builder.appendLine("${decl.name()}($callArgs)")
-        builder.appendLine("return holder")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
     }
 
 }

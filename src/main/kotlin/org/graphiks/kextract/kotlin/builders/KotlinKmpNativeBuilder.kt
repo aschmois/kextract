@@ -5,19 +5,22 @@ package org.graphiks.kextract.kotlin.builders
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.isStructOrUnion
 import org.graphiks.kextract.pipeline.isEnum
 
 class KotlinKmpNativeBuilder(
     private val targetPackage: String,
-    private val className: String
+    private val className: String,
+    callbackModels: List<KotlinCallbackModel>,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
     private val files = mutableListOf<KotlinSourceFile>()
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
+    private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
     private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames)
 
@@ -30,7 +33,6 @@ class KotlinKmpNativeBuilder(
         }
 
         builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackHolder")
         builder.appendLine("import io.ygdrasil.kffi.CString")
         builder.appendLine("import io.ygdrasil.kffi.toCString")
         builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
@@ -45,7 +47,7 @@ class KotlinKmpNativeBuilder(
             Declaration.Scoped.Kind.STRUCT,
             Declaration.Scoped.Kind.UNION -> {
                 val structName = decl.name()
-                if (structName.isEmpty() || structName.contains("unnamed") || (!structName.startsWith("WGPU") && !structName.startsWith("wgpu"))) return
+                if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
                 generatedStructNames.add(structName)
@@ -362,7 +364,6 @@ class KotlinKmpNativeBuilder(
 
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
-        if (!decl.name().startsWith("wgpu")) return
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
         val params = decl.parameters().mapIndexed { index, param ->
             val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
@@ -384,12 +385,8 @@ class KotlinKmpNativeBuilder(
     override fun visitTypedef(decl: Declaration.Typedef) {
         if (Skip.isPresent(decl)) return
         val name = decl.name()
-        if (name.isEmpty() || !name.startsWith("WGPU")) return
-        if (name.endsWith("Callback")) typeMapper.callbackFunction(decl.type())?.let { function ->
-            if (!generatedNames.add(name)) return
-            emitCallbackActual(name, function)
-            return
-        }
+        if (name.isEmpty()) return
+        if (name in callbackTypeNames || typeMapper.callbackFunction(decl.type()) != null) return
         val inner = decl.type()
         if (inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER) {
             val pointee = inner.type()
@@ -410,49 +407,6 @@ class KotlinKmpNativeBuilder(
     override fun visitObjCCategory(decl: Declaration.ObjCCategory) {}
 
     fun getFiles(): List<KotlinSourceFile> = files
-
-    private fun emitCallbackActual(name: String, function: Type.Function) {
-        if (typeMapper.mapFunctionType(function.returnType()) != "Unit") {
-            builder.appendLine("// Callback $name is not generated: non-void callbacks are not supported yet.")
-            builder.appendLine()
-            return
-        }
-
-        val callbackVar = "${name}_callback"
-        val staticName = "${name}_static"
-        builder.appendLine("private var $callbackVar: (${typeMapper.callbackLambdaType(function)})? = null")
-        builder.appendLine("private val $staticName = staticCFunction<${nativeCallbackFunctionType(function)}> { ${nativeCallbackParams(function).joinToString(", ")} ->")
-        builder.indent()
-        val args = function.argumentTypes().mapIndexed { index, type ->
-            val paramName = nativeCallbackParams(function).getOrNull(index) ?: "arg$index"
-            fromNativeCallbackArgument(paramName, type)
-        }.joinToString(", ")
-        builder.appendLine("$callbackVar?.invoke($args)")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
-        builder.appendLine("actual class $name private constructor(actual val handler: NativeAddress) : AutoCloseable {")
-        builder.indent()
-        builder.appendLine("actual override fun close() {")
-        builder.indent()
-        builder.appendLine("if (handler.rawValue == NativeAddress($staticName).rawValue) $callbackVar = null")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine("actual companion object {")
-        builder.indent()
-        builder.appendLine("actual fun allocate(callback: ${typeMapper.callbackLambdaType(function)}): $name {")
-        builder.indent()
-        builder.appendLine("$callbackVar = callback")
-        builder.appendLine("return $name(NativeAddress($staticName))")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.unindent()
-        builder.unindent()
-        builder.appendLine("}")
-        builder.unindent()
-        builder.appendLine("}")
-        builder.appendLine()
-    }
 
     private fun emitFunctionReturn(type: Type, returnType: String, call: String) {
         if (returnType == "Unit") {
@@ -476,6 +430,8 @@ class KotlinKmpNativeBuilder(
         val kmpType = typeMapper.mapFunctionType(type)
         return when {
             kmpType == "CString?" -> "$name?.handler?.pointer?.takeIf { $name.handler.rawValue != 0L }?.reinterpret()"
+            typeMapper.callbackFunction(type) != null ->
+                "$name?.pointer?.takeIf { $name.rawValue != 0L }?.reinterpret()"
             kmpType == "NativeAddress?" -> {
                 val cast = when (name) {
                     "dynamicOffsets" -> "UIntVar"
@@ -492,34 +448,6 @@ class KotlinKmpNativeBuilder(
             returnsStructByValue(type) -> "$name.toCValue()"
             else -> name
         }
-    }
-
-    private fun fromNativeCallbackArgument(name: String, type: Type): String {
-        val kmpType = typeMapper.mapFunctionType(type)
-        return when {
-            kmpType == "CString?" -> "$name?.let(::NativeAddress)?.let(::CString)"
-            kmpType == "NativeAddress?" -> "$name?.let(::NativeAddress)"
-            kmpType.endsWith("?") && returnsPointer(type) -> {
-                val nonOpt = kmpType.removeSuffix("?")
-                "$name?.let(::NativeAddress)?.let { $nonOpt(it) }"
-            }
-            returnsStructByValue(type) -> "${kmpType}.ByValue($name)"
-            else -> name
-        }
-    }
-
-    private fun nativeCallbackParams(function: Type.Function): List<String> =
-        function.parameterNames().orEmpty().mapIndexed { index, rawName ->
-            rawName.takeIf { it.isNotEmpty() } ?: "arg$index"
-        }
-
-    private fun nativeCallbackFunctionType(function: Type.Function): String =
-        function.argumentTypes().joinToString(", ") { nativeCallbackRawType(it) } + ", Unit"
-
-    private fun nativeCallbackRawType(type: Type): String = when {
-        returnsStructByValue(type) -> "CValue<webgpu.native.${typeMapper.mapFunctionType(type)}>"
-        returnsPointer(type) -> "COpaquePointer?"
-        else -> typeMapper.mapFunctionType(type)
     }
 
     private fun returnsPointer(type: Type): Boolean = when {

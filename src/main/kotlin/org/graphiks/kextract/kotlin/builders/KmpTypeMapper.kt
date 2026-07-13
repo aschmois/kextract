@@ -43,20 +43,6 @@ internal class KmpTypeMapper(
 
     fun callbackFunction(type: Type): Type.Function? = type.callbackFunctionOrNull()
 
-    fun callbackTypeName(type: Type): String? = when {
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF && callbackFunction(type) != null -> type.name()
-        else -> null
-    }
-
-    fun callbackLambdaType(function: Type.Function): String {
-        val names = function.parameterNames().orEmpty()
-        val params = function.argumentTypes().mapIndexed { index, type ->
-            val name = names.getOrNull(index)?.takeIf { it.isNotEmpty() } ?: "arg$index"
-            "$name: ${mapFunctionType(type)}"
-        }.joinToString(", ")
-        return "($params) -> ${mapFunctionType(function.returnType())}"
-    }
-
     fun declaredUnion(type: Type): Declaration.Scoped? = when (type) {
         is Type.Declared -> type.tree().takeIf { it.kind() == Declaration.Scoped.Kind.UNION }
         is Type.Delegated -> declaredUnion(type.type())
@@ -105,7 +91,7 @@ internal class KmpTypeMapper(
         pointee is Type.Declared && pointee.tree().kind() in setOf(Declaration.Scoped.Kind.STRUCT, Declaration.Scoped.Kind.UNION) -> {
             val name = pointee.tree().name()
             opaqueHandleAliases[name]?.let { "$it?" }
-                ?: name.takeIf { it.startsWith("WGPU") && it.endsWith("Impl") }?.removeSuffix("Impl")?.let { "$it?" }
+                ?: name.takeIf { it.endsWith("Impl") }?.removeSuffix("Impl")?.let { "$it?" }
                 ?: if (name.isNotEmpty() && !name.contains("unnamed")) "$name?" else "NativeAddress?"
         }
         else -> "NativeAddress?"
@@ -120,7 +106,7 @@ internal class KmpTypeMapper(
                 val typedefName = type.name()
                 return when {
                     pointeeName.isNotEmpty() && pointeeName.endsWith("Impl") && typedefName != null -> "$typedefName?"
-                    pointeeName.isNotEmpty() && pointeeName.startsWith("WGPU") && pointeeName.endsWith("Impl") -> "${pointeeName.removeSuffix("Impl")}?"
+                    pointeeName.isNotEmpty() && pointeeName.endsWith("Impl") -> "${pointeeName.removeSuffix("Impl")}?"
                     pointeeName.isNotEmpty() && !pointeeName.contains("unnamed") -> "$pointeeName?"
                     else -> "NativeAddress?"
                 }
@@ -147,11 +133,11 @@ internal class KmpTypeMapper(
         val typedefName = type.name()
         val inner = type.type()
         return when {
-            callbackFunction(type) != null && typedefName != null && typedefName.startsWith("WGPU") && typedefName.endsWith("Callback") -> "$typedefName?"
+            callbackFunction(type) != null -> "NativeAddress?"
             inner is Type.Function -> "NativeAddress?"
             inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER && inner.type() is Type.Function -> "NativeAddress?"
             inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER ->
-                if (typedefName != null && typedefName.startsWith("WGPU")) "$typedefName?" else "NativeAddress?"
+                if (typedefName != null && isGeneratedReferenceTypedef(type)) "$typedefName?" else "NativeAddress?"
             else -> {
                 val innerMapped = mapType(inner)
                 if (innerMapped != "NativeAddress" && !innerMapped.contains("unnamed")) innerMapped else typedefName ?: "NativeAddress"
@@ -171,16 +157,6 @@ internal class KmpTypeMapper(
         else -> null
     }
 
-    private fun isReferenceTypedef(type: Type): Boolean = when (type) {
-        is Type.Delegated -> when (type.kind()) {
-            Type.Delegated.Kind.TYPEDEF -> isReferenceTypedef(type.type())
-            Type.Delegated.Kind.POINTER -> true
-            else -> isReferenceTypedef(type.type())
-        }
-        is Type.Declared -> type.tree().kind() in setOf(Declaration.Scoped.Kind.STRUCT, Declaration.Scoped.Kind.UNION)
-        else -> false
-    }
-
     private fun referenceTypeName(type: Type): String? = when (type) {
         is Type.Delegated -> (type.name() ?: referenceTypeName(type.type()))?.toPublicHandleName()
         is Type.Declared -> type.tree().name().takeIf { it.isNotEmpty() && !it.contains("unnamed") }?.toPublicHandleName()
@@ -189,7 +165,7 @@ internal class KmpTypeMapper(
 
     private fun isGeneratedReferenceTypedef(type: Type): Boolean {
         val name = referenceTypeName(type)
-        return name != null && name.startsWith("WGPU") && (isReferenceTypedef(type) || name in generatedStructNames)
+        return name != null && (name in opaqueHandleAliases.values || name in generatedStructNames)
     }
 
     private fun canonicalType(type: Type): Type = when {
@@ -198,5 +174,5 @@ internal class KmpTypeMapper(
     }
 
     private fun String.toPublicHandleName(): String =
-        if (startsWith("WGPU") && endsWith("Impl")) removeSuffix("Impl") else this
+        if (endsWith("Impl")) removeSuffix("Impl") else this
 }
