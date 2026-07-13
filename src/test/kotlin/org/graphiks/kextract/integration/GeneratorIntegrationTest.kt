@@ -5,12 +5,16 @@ import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldHaveAtLeastSize
 import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import io.kotest.matchers.string.shouldStartWith
 import org.graphiks.kextract.pipeline.NameMangler
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.pipeline.KextractTool
+import org.graphiks.kextract.testsupport.GeneratedSourceTestSupport
+import org.graphiks.kextract.testsupport.GenerationRequest
+import java.nio.file.Path
 import java.nio.file.Files
 
 /**
@@ -18,6 +22,18 @@ import java.nio.file.Files
  * C header source → Parser → KotlinGenerator → Kotlin source
  */
 class GeneratorIntegrationTest : FreeSpec({
+
+    "Shared generation support" - {
+        "returns generated content keyed by the header output path" {
+            val generated = GeneratedSourceTestSupport.contentByPath(
+                GeneratedSourceTestSupport.generate(
+                    GenerationRequest(source = "int add(int a, int b);")
+                )
+            )
+
+            generated.keys shouldContain Path.of("test", "input_h.kt").toString()
+        }
+    }
 
     // Helper: parse an inline C source and run the Kotlin generator.
     // Mirrors the full pipeline: parse → NameMangler → KotlinGenerator.
