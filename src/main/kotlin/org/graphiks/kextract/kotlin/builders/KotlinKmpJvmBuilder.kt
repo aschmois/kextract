@@ -255,7 +255,14 @@ class KotlinKmpJvmBuilder(
         }
 
         if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
-            files.add(KotlinSourceFile(targetPackage, className + "Jvm", builder.toString()))
+            files.add(
+                KotlinSourceFile(
+                    targetPackage,
+                    className + "Jvm",
+                    builder.toString(),
+                    sourceRoot = "jvmMain/kotlin",
+                ),
+            )
         }
     }
 

@@ -349,7 +349,14 @@ class KotlinKmpNativeBuilder(
         }
 
         if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
-            files.add(KotlinSourceFile(targetPackage, className + "Native", builder.toString()))
+            files.add(
+                KotlinSourceFile(
+                    targetPackage,
+                    className + "Native",
+                    builder.toString(),
+                    sourceRoot = "nativeMain/kotlin",
+                ),
+            )
         }
     }
 

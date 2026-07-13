@@ -6,6 +6,7 @@ import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.kotlin.KotlinGenerator
+import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.IncludeHelper
 import org.graphiks.kextract.pipeline.KextractTool
 import org.graphiks.kextract.pipeline.Logger
@@ -59,6 +60,54 @@ class KmpRefreshIntegrationTest : FreeSpec({
         generated.getValue("jvmMain") shouldContain "actual value class WGPUDevice"
         generated.getValue("nativeMain") shouldContain "actual value class WGPUDevice"
         generated.getValue("androidMain") shouldContain "actual value class WGPUDevice"
+    }
+
+    "multiplatform output uses explicit source roots" {
+        val workspace = Files.createTempDirectory("kextract-kmp-paths")
+        val input = workspace.resolve("wgpu_fixture.h")
+        val output = workspace.resolve("out")
+        try {
+            input.toFile().writeText(
+                """
+                typedef struct WGPUDeviceImpl* WGPUDevice;
+                WGPUDevice wgpuGetDevice(void);
+                """.trimIndent(),
+            )
+            KextractTool(Logger.DEFAULT).runGeneration(
+                listOf(input.toString()),
+                Options(
+                    targetPackage = "sample.bindings",
+                    outputDir = output.toString(),
+                    multiplatform = true,
+                ),
+            ) shouldBe KextractTool.SUCCESS
+
+            Files.walk(output).use { paths ->
+                paths.filter { it.fileName.toString().endsWith(".kt") }
+                    .map { output.relativize(it).toString().replace('\\', '/') }
+                    .toList()
+                    .toSet() shouldBe setOf(
+                    "commonMain/kotlin/sample/bindings/wgpu_fixture_hCommon.kt",
+                    "jvmMain/kotlin/sample/bindings/wgpu_fixture_hJvm.kt",
+                    "nativeMain/kotlin/sample/bindings/wgpu_fixture_hNative.kt",
+                    "androidMain/kotlin/sample/bindings/wgpu_fixture_hAndroid.kt",
+                    "androidMain/kotlin/sample/bindings/android/wgpu_fixture_h.kt",
+                )
+            }
+        } finally {
+            workspace.toFile().deleteRecursively()
+        }
+    }
+
+    "source root precedes package and split-output subdirectory" {
+        KotlinSourceFile(
+            packageName = "sample.bindings",
+            className = "Types",
+            contents = "",
+            subDirectory = "generated",
+            sourceRoot = "commonMain/kotlin",
+        ).getPath().toString().replace('\\', '/') shouldBe
+            "commonMain/kotlin/sample/bindings/generated/Types.kt"
     }
 
     "multiplatform mode honors include filters" {

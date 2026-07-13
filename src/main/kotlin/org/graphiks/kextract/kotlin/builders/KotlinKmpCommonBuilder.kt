@@ -108,7 +108,14 @@ class KotlinKmpCommonBuilder(
         }
 
         if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
-            files.add(KotlinSourceFile(targetPackage, className + "Common", builder.toString()))
+            files.add(
+                KotlinSourceFile(
+                    targetPackage,
+                    className + "Common",
+                    builder.toString(),
+                    sourceRoot = "commonMain/kotlin",
+                ),
+            )
         }
     }
 

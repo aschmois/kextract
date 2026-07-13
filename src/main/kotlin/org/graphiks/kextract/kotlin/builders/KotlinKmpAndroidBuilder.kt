@@ -380,8 +380,22 @@ class KotlinKmpAndroidBuilder(
         }
 
         if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
-            files.add(KotlinSourceFile(targetPackage, className + "Android", builder.toString()))
-            files.add(KotlinSourceFile(androidPackage, className, jnaBuilder.toString()))
+            files.add(
+                KotlinSourceFile(
+                    targetPackage,
+                    className + "Android",
+                    builder.toString(),
+                    sourceRoot = "androidMain/kotlin",
+                ),
+            )
+            files.add(
+                KotlinSourceFile(
+                    androidPackage,
+                    className,
+                    jnaBuilder.toString(),
+                    sourceRoot = "androidMain/kotlin",
+                ),
+            )
         }
     }
 

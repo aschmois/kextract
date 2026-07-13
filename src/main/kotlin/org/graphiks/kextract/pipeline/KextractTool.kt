@@ -139,7 +139,7 @@ class KextractTool(private val logger: Logger) {
             results.forEach { r -> System.err.println("  ${r.getPath()}") }
         }
 
-        return writeKotlin(results, outputDir, options)
+        return writeKotlin(results, outputDir)
     }
 
     private fun resolveFrameworkPaths(names: List<String>): List<Path> {
@@ -186,32 +186,16 @@ class KextractTool(private val logger: Logger) {
         )
     }
 
-    private fun writeKotlin(results: List<KotlinSourceFile>, outputDir: Path, options: Options): Int {
-        return try {
-            for (result in results) {
-                val fileSubpath = result.getPath()
-                val finalPath = if (options.multiplatform) {
-                    val className = result.className
-                    val targetDir = when {
-                        className.endsWith("_common") || className.endsWith("Common") -> "commonMain/kotlin"
-                        className.endsWith("_jvm") || className.endsWith("Jvm") -> "jvmMain/kotlin"
-                        className.endsWith("_android") || className.endsWith("Android") || result.packageName == "android" || result.packageName.endsWith(".android") -> "androidMain/kotlin"
-                        className.endsWith("_native") || className.endsWith("Native") -> "nativeMain/kotlin"
-                        else -> "commonMain/kotlin" // Default to commonMain
-                    }
-                    Path.of(targetDir).resolve(fileSubpath)
-                } else {
-                    fileSubpath
-                }
-                val outputPath = outputDir.resolve(finalPath)
-                outputPath.parent.createDirectories()
-                outputPath.writeText(result.contents)
-            }
-            SUCCESS
-        } catch (e: Exception) {
-            System.err.println("Error writing Kotlin files: ${e.message}")
-            OUTPUT_ERROR
+    private fun writeKotlin(results: List<KotlinSourceFile>, outputDir: Path): Int = try {
+        for (result in results) {
+            val outputPath = outputDir.resolve(result.getPath())
+            outputPath.parent.createDirectories()
+            outputPath.writeText(result.contents)
         }
+        SUCCESS
+    } catch (e: Exception) {
+        System.err.println("Error writing Kotlin files: ${e.message}")
+        OUTPUT_ERROR
     }
 
     private fun generateTmpSource(headers: List<String>): String =
