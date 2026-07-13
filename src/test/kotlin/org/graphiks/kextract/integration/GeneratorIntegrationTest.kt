@@ -206,7 +206,8 @@ class GeneratorIntegrationTest : FreeSpec({
             common shouldNotContain "fun allocate(callback:"
 
             jvm shouldNotContain "actual class WGPULogCallback"
-            jvm shouldNotContain "Linker.nativeLinker().upcallStub"
+            jvm shouldContain "Linker.nativeLinker().upcallStub(methodHandle, descriptor, Arena.global())"
+            jvm shouldNotContain "Arena.ofShared()"
             jvm shouldContain "actual fun wgpuSetLogCallback(callback: NativeAddress?, userdata: NativeAddress?): Unit"
             jvm shouldContain "callback?.handler ?: MemorySegment.NULL"
         }

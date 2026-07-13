@@ -5,6 +5,7 @@ package org.graphiks.kextract.kotlin.builders
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackAndroidEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.LayoutUtils
@@ -14,7 +15,7 @@ import org.graphiks.kextract.pipeline.isEnum
 class KotlinKmpAndroidBuilder(
     private val targetPackage: String,
     private val className: String,
-    callbackModels: List<KotlinCallbackModel>,
+    private val callbackModels: List<KotlinCallbackModel>,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -36,6 +37,12 @@ class KotlinKmpAndroidBuilder(
         jnaBuilder.appendLine()
 
         builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackExceptionHandler")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackPolicy")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackRegistration")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackRuntimeApi")
+        builder.appendLine("import io.ygdrasil.kffi.PreparedCallbackRegistration")
+        builder.appendLine("import io.ygdrasil.kffi.UnsafeCallbackRearmApi")
         builder.appendLine("import io.ygdrasil.kffi.CString")
         builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
         builder.appendLine("import io.ygdrasil.kffi.MemoryAllocator")
@@ -397,6 +404,7 @@ class KotlinKmpAndroidBuilder(
                 for (member in decl.members()) {
                     member.accept(this)
                 }
+                KotlinCallbackAndroidEmitter().emit(builder, callbackModels)
             }
             else -> {}
         }

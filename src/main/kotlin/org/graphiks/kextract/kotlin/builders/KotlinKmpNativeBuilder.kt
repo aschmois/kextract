@@ -6,6 +6,7 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackNativeEmitter
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.isStructOrUnion
 import org.graphiks.kextract.pipeline.isEnum
@@ -13,7 +14,7 @@ import org.graphiks.kextract.pipeline.isEnum
 class KotlinKmpNativeBuilder(
     private val targetPackage: String,
     private val className: String,
-    callbackModels: List<KotlinCallbackModel>,
+    private val callbackModels: List<KotlinCallbackModel>,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -33,6 +34,13 @@ class KotlinKmpNativeBuilder(
         }
 
         builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackExceptionHandler")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackPolicy")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackRegistration")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackRuntime")
+        builder.appendLine("import io.ygdrasil.kffi.CallbackRuntimeApi")
+        builder.appendLine("import io.ygdrasil.kffi.PreparedCallbackRegistration")
+        builder.appendLine("import io.ygdrasil.kffi.UnsafeCallbackRearmApi")
         builder.appendLine("import io.ygdrasil.kffi.CString")
         builder.appendLine("import io.ygdrasil.kffi.toCString")
         builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
@@ -346,6 +354,7 @@ class KotlinKmpNativeBuilder(
                 for (member in decl.members()) {
                     member.accept(this)
                 }
+                KotlinCallbackNativeEmitter(typeMapper::mapFunctionType).emit(builder, callbackModels)
             }
             else -> {}
         }

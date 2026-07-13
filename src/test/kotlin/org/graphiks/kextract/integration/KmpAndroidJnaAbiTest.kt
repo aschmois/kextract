@@ -286,6 +286,26 @@ private fun compileGeneratedAndroid(sources: AndroidSources, probe: String? = nu
             package io.ygdrasil.kffi
 
             expect class NativeAddress
+            interface Callback
+            enum class CallbackPolicy { ONCE, REPEATING }
+            fun interface CallbackExceptionHandler {
+                fun onException(error: Throwable)
+                companion object {
+                    val Default = CallbackExceptionHandler { }
+                }
+            }
+            interface CallbackRegistration<C : Callback>
+            @RequiresOptIn
+            annotation class CallbackRuntimeApi
+            @RequiresOptIn
+            annotation class UnsafeCallbackRearmApi
+            @CallbackRuntimeApi
+            class CallbackType<C : Callback>(
+                val canonicalId: String,
+                val hasRoutingUserdata: Boolean,
+            )
+            @CallbackRuntimeApi
+            class PreparedCallbackRegistration<C : Callback>
             expect class CallbackHolder<T> {
                 val handler: NativeAddress
             }

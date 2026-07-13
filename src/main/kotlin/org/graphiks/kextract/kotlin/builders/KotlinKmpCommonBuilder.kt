@@ -6,6 +6,7 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCAbiType
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCommonEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
@@ -103,7 +104,7 @@ class KotlinKmpCommonBuilder(
                     if (isOptionsStyle(name)) {
                         emitValueClass(name, constants)
                     } else {
-                        emitEnumClass(name, constants)
+                        emitEnumClass(decl, constants)
                     }
                 }
             }
@@ -129,13 +130,27 @@ class KotlinKmpCommonBuilder(
         }
     }
 
-    private fun emitEnumClass(name: String, constants: List<Declaration.Constant>) {
-        builder.appendLine("typealias ${name} = UInt")
+    private fun emitEnumClass(decl: Declaration.Scoped, constants: List<Declaration.Constant>) {
+        val name = decl.name()
+        val scalar = KotlinCallbackCAbiType.from(Type.declared(decl)) as? KotlinCallbackCAbiType.Scalar
+            ?: error("Enum $name must have a scalar C ABI type")
+        val applicationType = scalar.nativeCarrier
+        builder.appendLine("typealias ${name} = $applicationType")
         for (c in constants) {
             emitKDoc(c)
-            builder.appendLine("const val ${c.name()} : ${name} = ${c.value().toLongValue()}u")
+            builder.appendLine(
+                "const val ${c.name()} : ${name} = " +
+                    enumConstantLiteral(c.value().toLongValue(), applicationType),
+            )
         }
         builder.appendLine()
+    }
+
+    private fun enumConstantLiteral(value: Long, applicationType: String): String = when (applicationType) {
+        "ULong" -> value.toKotlinULongLiteral()
+        "UInt", "UShort", "UByte" -> "${java.lang.Long.toUnsignedString(value)}u"
+        "Long" -> value.toKotlinLongLiteral()
+        else -> value.toString()
     }
 
     private fun emitValueClass(name: String, constants: List<Declaration.Constant>) {
