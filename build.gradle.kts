@@ -4,6 +4,7 @@ import java.net.URI
 plugins {
     java
     id("org.jetbrains.kotlin.jvm") version "2.3.21"
+    id("org.jetbrains.kotlinx.kover") version "0.9.8"
 }
 
 kotlin { jvmToolchain(25) }
@@ -189,6 +190,24 @@ tasks.withType<Test>().configureEach {
 
 tasks.named<Test>("test") {
     exclude("**/GeneratedBindingsCompilationTest.class")
+}
+
+kover {
+    currentProject {
+        sources {
+            includedSourceSets.addAll("kmain")
+        }
+    }
+    reports {
+        filters {
+            excludes {
+                classes(
+                    "org.graphiks.kextract.clang.libclang.*",
+                    "org.graphiks.kextract.testsupport.*",
+                )
+            }
+        }
+    }
 }
 
 // All Java compilation uses the configured JDK and targets Java 25
