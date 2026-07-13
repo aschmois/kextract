@@ -5,15 +5,20 @@ import io.kotest.matchers.collections.shouldBeEmpty
 import io.kotest.matchers.collections.shouldHaveAtLeastSize
 import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import io.kotest.matchers.string.shouldStartWith
+import java.io.File
 import org.graphiks.kextract.pipeline.NameMangler
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.pipeline.KextractTool
+import org.graphiks.kextract.kotlin.models.KotlinSourceFile
+import org.graphiks.kextract.testsupport.KotlinCompilerSupport
 import org.graphiks.kextract.testsupport.GeneratedSourceTestSupport
 import org.graphiks.kextract.testsupport.GenerationRequest
+import org.graphiks.kextract.testsupport.ProcessTestSupport
 import java.nio.file.Path
 import java.nio.file.Files
 
@@ -32,6 +37,68 @@ class GeneratorIntegrationTest : FreeSpec({
             )
 
             generated.keys shouldContain Path.of("test", "input_h.kt").toString()
+        }
+
+        "returns compiler diagnostics in stderr" {
+            val result = KotlinCompilerSupport.compile(
+                listOf(KotlinSourceFile("", "Invalid", "fun broken( {"))
+            )
+
+            result.exitCode shouldNotBe 0
+            result.stderr.isNotEmpty() shouldBe true
+        }
+
+        "runs the CLI through a child JVM and generates output" {
+            val directory = Files.createTempDirectory("kextract-cli-test-")
+            try {
+                val header = directory.resolve("input.h")
+                val output = directory.resolve("generated")
+                Files.writeString(header, "int add(int a, int b);\n")
+
+                val java = Path.of(
+                    System.getProperty("java.home"),
+                    "bin",
+                    if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java"
+                )
+                val classPath = buildList {
+                    add(System.getProperty("java.class.path"))
+                    val gradleCache = Path.of(
+                        System.getProperty("user.home"), ".gradle", "caches", "modules-2", "files-2.1"
+                    )
+                    if (Files.isDirectory(gradleCache)) {
+                        Files.walk(gradleCache).use { paths ->
+                            paths.filter { path ->
+                                Files.isRegularFile(path) && path.fileName.toString().endsWith(".jar") &&
+                                    path.fileName.toString().let { it.contains("clikt") || it.contains("mordant") }
+                            }.forEach { add(it.toString()) }
+                        }
+                    }
+                }.distinct().joinToString(File.pathSeparator)
+                val command = buildList {
+                    add(java.toString())
+                    add("--enable-native-access=ALL-UNNAMED")
+                    add("-Djava.library.path=${System.getProperty("java.library.path")}")
+                    add("-cp")
+                    add(classPath)
+                    add("org.graphiks.kextract.pipeline.KextractTool")
+                    add("-o")
+                    add(output.toString())
+                    add("-t")
+                    add("test")
+                    add(header.toString())
+                }
+
+                val result = ProcessTestSupport.run(command, directory)
+
+                if (result.exitCode != 0) {
+                    error("CLI child exited with ${result.exitCode}:\n${result.output}")
+                }
+                val generated = output.resolve("test/input_h.kt")
+                Files.exists(generated) shouldBe true
+                Files.readString(generated) shouldContain "fun add("
+            } finally {
+                directory.toFile().deleteRecursively()
+            }
         }
     }
 

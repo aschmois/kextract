@@ -37,7 +37,7 @@ object KotlinCompilerSupport {
                 }
             }
             val output = directory.resolve("generated.jar")
-            val result = ProcessTestSupport.run(
+            val result = ProcessTestSupport.runSeparate(
                 listOf(
                     compilerPath().toString(),
                     "-jdk-home", System.getProperty("java.home"),
@@ -45,7 +45,7 @@ object KotlinCompilerSupport {
                 ) + sourcePaths.map(Path::toString),
                 directory,
             )
-            CompilationResult(result.exitCode, result.output, "")
+            CompilationResult(result.exitCode, result.stdout, result.stderr)
         } finally {
             directory.toFile().deleteRecursively()
         }
