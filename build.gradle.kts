@@ -163,6 +163,8 @@ dependencies {
     testImplementation("io.kotest:kotest-runner-junit5:$kotestVersion")
     testImplementation("io.kotest:kotest-assertions-core:$kotestVersion")
     testImplementation("io.kotest:kotest-property:$kotestVersion")
+    testImplementation("net.java.dev.jna:jna:5.18.1")
+    testImplementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.3.21")
 }
 
 // ── Compiler configuration ────────────────────────────────────────────────────

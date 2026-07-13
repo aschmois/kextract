@@ -42,6 +42,7 @@ class KotlinKmpAndroidBuilder(
 
         jnaBuilder.appendLine("import com.sun.jna.Pointer")
         jnaBuilder.appendLine("import com.sun.jna.Structure")
+        jnaBuilder.appendLine("import com.sun.jna.Union")
         jnaBuilder.appendLine()
     }
 
@@ -130,7 +131,16 @@ class KotlinKmpAndroidBuilder(
                     } else {
                         builder.appendLine("override var $fieldName: $fieldType")
                     }
-                    if (isStructType(field.type())) {
+                    val inlineJnaType = inlineRecordJnaType(field.type())
+                    if (decl.kind() == Declaration.Scoped.Kind.UNION) {
+                        builder.indent()
+                        emitUnionFieldAccessors(field)
+                        builder.unindent()
+                    } else if (inlineJnaType != null) {
+                        builder.indent()
+                        emitInlineRecordAccessors(fieldName, fieldType)
+                        builder.unindent()
+                    } else if (isStructType(field.type())) {
                         builder.indent()
                         val isOpt = fieldType == "CString" || fieldType.startsWith("ArrayHolder") || fieldType.endsWith("?")
                         val nonOpt = fieldType.removeSuffix("?")
@@ -248,7 +258,16 @@ class KotlinKmpAndroidBuilder(
                     } else {
                         builder.appendLine("override var $fieldName: $fieldType")
                     }
-                    if (isStructType(field.type())) {
+                    val inlineJnaType = inlineRecordJnaType(field.type())
+                    if (decl.kind() == Declaration.Scoped.Kind.UNION) {
+                        builder.indent()
+                        emitUnionFieldAccessors(field)
+                        builder.unindent()
+                    } else if (inlineJnaType != null) {
+                        builder.indent()
+                        emitInlineRecordAccessors(fieldName, fieldType)
+                        builder.unindent()
+                    } else if (isStructType(field.type())) {
                         builder.indent()
                         val isOpt = fieldType == "CString" || fieldType.startsWith("ArrayHolder") || fieldType.endsWith("?")
                         val nonOpt = fieldType.removeSuffix("?")
@@ -356,7 +375,8 @@ class KotlinKmpAndroidBuilder(
 
 
                 // 2. Generate the RAW JNA class
-                jnaBuilder.appendLine("open class $structName(pointer: Pointer? = null) : Structure(pointer) {")
+                val jnaBase = if (decl.kind() == Declaration.Scoped.Kind.UNION) "Union" else "Structure"
+                jnaBuilder.appendLine("open class $structName(pointer: Pointer? = null) : $jnaBase(pointer) {")
                 jnaBuilder.indent()
                 fields.forEach { field ->
                     val fieldName = field.name()
@@ -505,7 +525,7 @@ class KotlinKmpAndroidBuilder(
         jnaBuilder.appendLine("@JvmField var type: Int = 0")
         jnaBuilder.appendLine("@JvmField var data: Data = Data()")
         jnaBuilder.appendLine("override fun getFieldOrder() = listOf<String>(\"type\", \"data\")")
-        jnaBuilder.appendLine("class Data : com.sun.jna.Union() {")
+        jnaBuilder.appendLine("class Data : com.sun.jna.Union(), Structure.ByValue {")
         jnaBuilder.indent()
         jnaBuilder.appendLine("@JvmField var xlib: WGPUXlibDisplayHandle.ByValue = WGPUXlibDisplayHandle.ByValue()")
         jnaBuilder.appendLine("@JvmField var xcb: WGPUXcbDisplayHandle.ByValue = WGPUXcbDisplayHandle.ByValue()")
@@ -535,19 +555,20 @@ class KotlinKmpAndroidBuilder(
             builder.indent()
             builder.appendLine("handle.read()")
             builder.appendLine("if (type != WGPUNativeDisplayHandleType_$setter) return null")
-            builder.appendLine("handle.data.setType($androidPackage.$type.ByValue::class.java)")
-            builder.appendLine("handle.data.read()")
-            builder.appendLine("return $type.ByReference($androidPackage.$type.ByReference(handle.data.$field.pointer))")
+            builder.appendLine("handle.data.readField(\"$field\")")
+            builder.appendLine("return $type.ByValue(handle.data.$field)")
             builder.unindent()
             builder.appendLine("}")
             builder.unindent()
             builder.appendLine("override fun set$setter(value: $type) {")
             builder.indent()
             builder.appendLine("handle.type = WGPUNativeDisplayHandleType_$setter.toInt()")
-            builder.appendLine("handle.data.setType($androidPackage.$type.ByValue::class.java)")
-            builder.appendLine("handle.data.$field = $androidPackage.$type.ByValue(value.handler)")
-            builder.appendLine("handle.data.write()")
-            builder.appendLine("handle.write()")
+            builder.appendLine("val copy = $androidPackage.$type.ByValue(value.handler)")
+            builder.appendLine("copy.read()")
+            builder.appendLine("handle.data.$field = copy")
+            builder.appendLine("handle.data.writeField(\"$field\")")
+            builder.appendLine("handle.writeField(\"type\")")
+            builder.appendLine("handle.writeField(\"data\")")
             builder.unindent()
             builder.appendLine("}")
         }
@@ -575,7 +596,97 @@ class KotlinKmpAndroidBuilder(
     private fun isOptionsStyle(name: String): Boolean =
         name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask") || name == "WGPUInstanceBackend" || name == "WGPUInstanceFlag" || name == "WGPUFlags"
 
-    private fun mapJnaType(type: Type): String = when {
+    private fun inlineRecordJnaType(type: Type): String? =
+        canonicalRecordName(type)
+            ?.takeIf { it.isNotEmpty() && !it.contains("unnamed") }
+            ?.let { "$androidPackage.$it.ByValue" }
+
+    private fun canonicalRecordName(type: Type): String? = when {
+        type is Type.Declared && isStructType(type) -> type.tree().name()
+        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> canonicalRecordName(type.type())
+        else -> null
+    }
+
+    private fun emitInlineRecordAccessors(fieldName: String, fieldType: String) {
+        builder.appendLine("get() {")
+        builder.indent()
+        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.appendLine("return $fieldType.ByValue(handle.$fieldName)")
+        builder.unindent()
+        builder.appendLine("}")
+        builder.appendLine("set(value) {")
+        builder.indent()
+        builder.appendLine("val bytes = value.handler.getByteArray(0, handle.$fieldName.size())")
+        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.appendLine("handle.$fieldName.pointer.write(0, bytes, 0, bytes.size)")
+        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.unindent()
+        builder.appendLine("}")
+    }
+
+    private fun emitUnionFieldAccessors(field: Declaration.Variable) {
+        val fieldName = field.name()
+        val fieldType = typeMapper.mapType(field.type())
+        val inlineJnaType = inlineRecordJnaType(field.type())
+        if (inlineJnaType != null) {
+            emitInlineRecordAccessors(fieldName, fieldType)
+            return
+        }
+
+        val getter = when {
+            fieldType == "CString" -> "handle.$fieldName?.let(::CString)"
+            fieldType == "NativeAddress" -> "handle.$fieldName ?: com.sun.jna.Pointer.NULL"
+            fieldType == "NativeAddress?" -> "handle.$fieldName"
+            fieldType == "Boolean" -> "handle.$fieldName != 0"
+            typeMapper.isEnumType(field.type()) || fieldType == "UInt" ->
+                "handle.$fieldName.toUInt() as $fieldType"
+            fieldType == "ULong" || fieldType.endsWith("Flags") || fieldType.endsWith("Usage") ->
+                "handle.$fieldName.toULong() as $fieldType"
+            fieldType == "UShort" -> "handle.$fieldName.toUShort() as $fieldType"
+            fieldType == "UByte" -> "handle.$fieldName.toUByte() as $fieldType"
+            fieldType.startsWith("ArrayHolder") -> "handle.$fieldName?.let { ArrayHolder(it) }"
+            fieldType !in listOf("Byte", "Short", "Int", "Long", "Float", "Double") && fieldType.endsWith("?") -> {
+                val nonOpt = fieldType.removeSuffix("?")
+                "handle.$fieldName?.let { $nonOpt(it) }"
+            }
+            fieldType !in listOf("Byte", "Short", "Int", "Long", "Float", "Double") ->
+                "handle.$fieldName?.let { $fieldType(it) } ?: error(\"$fieldName is null\")"
+            else -> "handle.$fieldName as $fieldType"
+        }
+        val assignment = when {
+            fieldType == "NativeAddress" || fieldType == "NativeAddress?" ->
+                "handle.$fieldName = value"
+            fieldType == "Boolean" -> "handle.$fieldName = if (value) 1 else 0"
+            fieldType == "CString" || fieldType.startsWith("ArrayHolder") || fieldType.endsWith("?") ->
+                "handle.$fieldName = value?.handler"
+            typeMapper.isEnumType(field.type()) || fieldType == "UInt" ->
+                "handle.$fieldName = value.toInt()"
+            fieldType == "ULong" || fieldType.endsWith("Flags") || fieldType.endsWith("Usage") ->
+                "handle.$fieldName = value.toLong()"
+            fieldType == "UShort" -> "handle.$fieldName = value.toShort()"
+            fieldType == "UByte" -> "handle.$fieldName = value.toByte()"
+            fieldType !in listOf("Byte", "Short", "Int", "Long", "Float", "Double") ->
+                "handle.$fieldName = value.handler"
+            else -> "handle.$fieldName = value"
+        }
+
+        builder.appendLine("get() {")
+        builder.indent()
+        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.appendLine("return $getter")
+        builder.unindent()
+        builder.appendLine("}")
+        builder.appendLine("set(value) {")
+        builder.indent()
+        builder.appendLine(assignment)
+        builder.appendLine("handle.writeField(\"$fieldName\")")
+        builder.unindent()
+        builder.appendLine("}")
+    }
+
+    private fun mapJnaType(type: Type): String {
+        inlineRecordJnaType(type)?.let { return it }
+        return when {
         typeMapper.isEnumType(type) -> "Int"
         type is Type.Primitive -> mapJnaPrimitive(type.kind())
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.UNSIGNED -> {
@@ -597,10 +708,7 @@ class KotlinKmpAndroidBuilder(
             val inner = type.type()
             when {
                 typeMapper.isEnumType(inner) -> "Int"
-                isStructType(inner) -> {
-                    val name = type.name()
-                    if (name != null && !name.contains("unnamed") && name != "WGPUNativeDisplayHandle") "$androidPackage.$name.ByReference?" else "Pointer?"
-                }
+                isStructType(inner) -> "Pointer?"
                 inner is Type.Primitive -> mapJnaPrimitive(inner.kind())
                 inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.UNSIGNED -> {
                     val innerInner = inner.type()
@@ -622,8 +730,7 @@ class KotlinKmpAndroidBuilder(
         type is Type.Declared -> {
             val tree = type.tree()
             if (tree.kind() == Declaration.Scoped.Kind.STRUCT || tree.kind() == Declaration.Scoped.Kind.UNION) {
-                val name = tree.name()
-                if (!name.contains("unnamed") && name != "WGPUNativeDisplayHandle") "$androidPackage.$name.ByReference?" else "Pointer?"
+                "Pointer?"
             } else if (tree.kind() == Declaration.Scoped.Kind.ENUM) {
                 "Int"
             } else {
@@ -631,6 +738,7 @@ class KotlinKmpAndroidBuilder(
             }
         }
         else -> "Pointer?"
+    }
     }
 
     private fun mapJnaPrimitive(kind: Type.Primitive.Kind): String = when (kind) {
@@ -646,7 +754,9 @@ class KotlinKmpAndroidBuilder(
 
     private fun getDefaultJnaValue(type: Type): String {
         val jnaType = mapJnaType(type)
-        return when (jnaType) {
+        return when {
+            jnaType.endsWith(".ByValue") -> "$jnaType()"
+            else -> when (jnaType) {
             "Int" -> "0"
             "Long" -> "0L"
             "Byte" -> "0"
@@ -654,6 +764,7 @@ class KotlinKmpAndroidBuilder(
             "Float" -> "0.0f"
             "Double" -> "0.0"
             else -> "null"
+            }
         }
     }
 }

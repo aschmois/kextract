@@ -47,6 +47,36 @@ class KmpRefreshIntegrationTest : FreeSpec({
         }
     }
 
+    fun generateKmpFromIncludedHeader(header: String): Map<String, String> {
+        val workspace = Files.createTempDirectory("kextract-kmp-refresh-include")
+        val input = workspace.resolve("wgpu.h")
+        val included = workspace.resolve("webgpu.h")
+        val output = workspace.resolve("out")
+        return try {
+            input.toFile().writeText("""#include "webgpu.h"""")
+            included.toFile().writeText(header)
+            KextractTool(Logger.DEFAULT).runGeneration(
+                listOf(input.toString()),
+                Options(
+                    targetPackage = "sample.bindings",
+                    outputDir = output.toString(),
+                    multiplatform = true,
+                ),
+            ) shouldBe KextractTool.SUCCESS
+
+            listOf("commonMain", "jvmMain", "nativeMain", "androidMain").associateWith { sourceSet ->
+                Files.walk(output.resolve(sourceSet)).use { paths ->
+                    paths.filter { it.fileName.toString().endsWith(".kt") }
+                        .map { it.toFile().readText() }
+                        .toList()
+                        .joinToString("\n")
+                }
+            }
+        } finally {
+            workspace.toFile().deleteRecursively()
+        }
+    }
+
     "multiplatform mode emits common, JVM, Native, and Android bindings" {
         val generated = generateKmp(
             """
@@ -60,6 +90,38 @@ class KmpRefreshIntegrationTest : FreeSpec({
         generated.getValue("jvmMain") shouldContain "actual value class WGPUDevice"
         generated.getValue("nativeMain") shouldContain "actual value class WGPUDevice"
         generated.getValue("androidMain") shouldContain "actual value class WGPUDevice"
+    }
+
+    "multiplatform mode resolves forward-declared struct typedef fields" {
+        val generated = generateKmpFromIncludedHeader(
+            """
+            typedef struct WGPUValue WGPUValue;
+            typedef struct WGPUContainer WGPUContainer;
+            typedef struct WGPUValue {
+                int value;
+            } WGPUValue;
+            typedef struct WGPUContainer {
+                WGPUValue member;
+            } WGPUContainer;
+            """.trimIndent(),
+        )
+
+        generated.getValue("commonMain") shouldContain "var member: WGPUValue"
+    }
+
+    "multiplatform mode resolves forward-declared struct typedef function signatures" {
+        val generated = generateKmpFromIncludedHeader(
+            """
+            typedef struct WGPUValue WGPUValue;
+            typedef struct WGPUValue {
+                int value;
+            } WGPUValue;
+            WGPUValue wgpuRoundTrip(WGPUValue value);
+            """.trimIndent(),
+        )
+
+        generated.getValue("commonMain") shouldContain
+            "expect fun wgpuRoundTrip(value: WGPUValue): WGPUValue"
     }
 
     "multiplatform output uses explicit source roots" {
