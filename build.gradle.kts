@@ -159,6 +159,8 @@ dependencies {
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.14.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("org.jetbrains.kotlin:kotlin-test:2.3.21")
+    testImplementation("com.github.ajalt.clikt:clikt:5.0.3")
+    testImplementation("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.0")
     val kotestVersion = "6.1.11"
     testImplementation("io.kotest:kotest-runner-junit5:$kotestVersion")
     testImplementation("io.kotest:kotest-assertions-core:$kotestVersion")

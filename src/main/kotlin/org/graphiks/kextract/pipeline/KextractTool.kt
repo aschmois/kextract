@@ -111,6 +111,8 @@ class KextractTool(private val logger: Logger) {
             return FAILURE
         }
 
+        if (logger.hasClangErrors()) return CLANG_ERROR
+
         if (DEBUG) {
             System.err.println("Parsed ${decl.members().size} top-level declarations:")
             decl.members().forEach { m -> System.err.println("  ${m.javaClass.simpleName} name=${m.name()}") }
