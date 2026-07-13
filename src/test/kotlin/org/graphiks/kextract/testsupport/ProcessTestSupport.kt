@@ -14,6 +14,22 @@ data class SeparateProcessResult(
 )
 
 object ProcessTestSupport {
+    fun runKextractTool(
+        workingDirectory: Path,
+        vararg args: String,
+    ): SeparateProcessResult = runSeparate(
+        command = buildList {
+            add(javaExecutable().toString())
+            add("--enable-native-access=ALL-UNNAMED")
+            add("-Djava.library.path=${System.getProperty("java.library.path")}")
+            add("-cp")
+            add(System.getProperty("java.class.path"))
+            add("org.graphiks.kextract.pipeline.KextractTool")
+            addAll(args)
+        },
+        workingDirectory = workingDirectory,
+    )
+
     fun run(
         command: List<String>,
         workingDirectory: Path,
@@ -48,4 +64,10 @@ object ProcessTestSupport {
         stderrReader.join()
         return SeparateProcessResult(exitCode, stdout, stderr)
     }
+
+    private fun javaExecutable(): Path = Path.of(
+        System.getProperty("java.home"),
+        "bin",
+        if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java",
+    )
 }

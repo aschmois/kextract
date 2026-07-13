@@ -5,9 +5,9 @@ import java.lang.foreign.MemoryLayout.PathElement.*
 /**
  * {@snippet lang=c : WindowStyle Int
  */
-private val WindowStyle_LAYOUT: ValueLayout by lazy { ValueLayout.JAVA_INT }
-private var WindowStyle_SEGMENT: MemorySegment? = null
-private var WindowStyle_VH: VarHandle? = null
+internal val WindowStyle_LAYOUT: ValueLayout by lazy { ValueLayout.JAVA_INT }
+internal var WindowStyle_SEGMENT: MemorySegment? = null
+internal var WindowStyle_VH: VarHandle? = null
 
 var WindowStyle: Int
     get() {
@@ -24,8 +24,8 @@ var WindowStyle: Int
 /**
  * {@snippet lang=c : CreateWindow Int(Int,Int)
  */
-private val CreateWindow_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
-private var CreateWindow_HANDLE: MethodHandle? = null
+internal val CreateWindow_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
+internal var CreateWindow_HANDLE: MethodHandle? = null
 
 fun CreateWindow(arg0: Int, arg1: Int): Int {
     check(_initialized) { "Win32 CreateWindow called before init()" }
@@ -44,8 +44,8 @@ fun CreateWindow(arg0: Int, arg1: Int): Int {
 /**
  * {@snippet lang=c : GetWindowText Int(Int,(Char)*,Int)
  */
-private val GetWindowText_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
-private var GetWindowText_HANDLE: MethodHandle? = null
+internal val GetWindowText_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
+internal var GetWindowText_HANDLE: MethodHandle? = null
 
 fun GetWindowText(arg0: Int, arg1: MemorySegment, arg2: Int): Int {
     check(_initialized) { "Win32 GetWindowText called before init()" }

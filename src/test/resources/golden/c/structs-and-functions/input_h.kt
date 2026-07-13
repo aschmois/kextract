@@ -64,6 +64,39 @@ class Point {
 } // End class
 
 /**
+ * {@snippet lang=c : STRUCT SampleArray
+ */
+class SampleArray {
+    companion object {
+        val layout: GroupLayout = MemoryLayout.structLayout(
+            MemoryLayout.sequenceLayout(4, ValueLayout.JAVA_INT).withName("values")
+        ).withName("SampleArray")
+
+        val byteSize: Long
+            get() = layout.byteSize()
+
+        fun allocate(allocator: SegmentAllocator): MemorySegment =
+            allocator.allocate(layout)
+
+        fun allocateArray(elementCount: Long, allocator: SegmentAllocator): MemorySegment =
+            allocator.allocate(MemoryLayout.sequenceLayout(elementCount, layout))
+
+        fun asSlice(array: MemorySegment, index: Long): MemorySegment =
+            array.asSlice(byteSize * index)
+
+        fun reinterpret(addr: MemorySegment): MemorySegment =
+            addr.reinterpret(byteSize)
+
+        fun reinterpret(addr: MemorySegment, elementCount: Long): MemorySegment =
+            addr.reinterpret(byteSize * elementCount)
+
+    } // End companion object
+
+    fun values(segment: MemorySegment): MemorySegment =
+        segment.asSlice(layout.byteOffset(groupElement("values")), layout.select(groupElement("values")).byteSize())
+} // End class
+
+/**
  * WARNING: This was originally a C union. Fields overlap in memory!
  * {@snippet lang=c : UNION Number
  */

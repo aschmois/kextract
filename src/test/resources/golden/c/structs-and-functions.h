@@ -3,6 +3,10 @@ struct Point {
     int y;
 };
 
+struct SampleArray {
+    int values[4];
+};
+
 union Number {
     int integer;
     float decimal;

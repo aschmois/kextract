@@ -71,27 +71,10 @@ class KextractCliIntegrationTest {
         assertContains(result.stderr, "Invalid count in --variadic-args 'log_message:not-a-count'")
     }
 
-    private fun runCli(vararg args: String) = ProcessTestSupport.runSeparate(
-        command = buildList {
-            add(javaExecutable().toString())
-            add("--enable-native-access=ALL-UNNAMED")
-            add("-Djava.library.path=${System.getProperty("java.library.path")}")
-            add("-cp")
-            add(System.getProperty("java.class.path"))
-            add("org.graphiks.kextract.pipeline.KextractTool")
-            addAll(args)
-        },
-        workingDirectory = tempDir,
-    )
+    private fun runCli(vararg args: String) = ProcessTestSupport.runKextractTool(tempDir, *args)
 
     private fun header(contents: String): Path =
         tempDir.resolve("input.h").also { Files.writeString(it, contents) }
-
-    private fun javaExecutable(): Path = Path.of(
-        System.getProperty("java.home"),
-        "bin",
-        if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java",
-    )
 
     private fun assertFalseFatal(stderr: String) {
         assertTrue(!stderr.contains("kextract.fatal"), stderr)

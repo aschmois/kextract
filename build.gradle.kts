@@ -1,5 +1,6 @@
 import org.apache.tools.ant.taskdefs.condition.Os
 import java.net.URI
+import kotlinx.kover.gradle.plugin.dsl.CoverageUnit
 
 plugins {
     java
@@ -205,6 +206,12 @@ kover {
                     "org.graphiks.kextract.clang.libclang.*",
                     "org.graphiks.kextract.testsupport.*",
                 )
+            }
+        }
+        verify {
+            rule {
+                minBound(77, CoverageUnit.LINE)
+                minBound(51, CoverageUnit.BRANCH)
             }
         }
     }

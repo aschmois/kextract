@@ -106,6 +106,9 @@ class KotlinToplevelBuilder(
     /** True when generating an init() method instead of eager static initializers. */
     val isInitMethod: Boolean get() = useInitMethod
 
+    /** Visibility for generated state shared between the main and split-output files. */
+    fun generatedVisibility(): String = if (splitOutput) "internal" else "private"
+
     init {
         // Package declaration
         if (targetPackage.isNotEmpty()) {
@@ -120,7 +123,7 @@ class KotlinToplevelBuilder(
         mainSlot.appendLine()
 
         // Helper constants for layouts
-        mainSlot.appendLine("private object kextract_runtime {")
+        mainSlot.appendLine("${generatedVisibility()} object kextract_runtime {")
         mainSlot.indent()
         mainSlot.appendLine("val C_BOOL: ValueLayout = ValueLayout.JAVA_BOOLEAN")
         mainSlot.appendLine("val C_CHAR: ValueLayout = ValueLayout.JAVA_BYTE")
@@ -137,7 +140,7 @@ class KotlinToplevelBuilder(
 
         // Symbol lookup — loads native libraries and exposes a single LOOKUP
         if (libraries.isNotEmpty()) {
-            mainSlot.appendLine("private val LOOKUP: SymbolLookup = run {")
+            mainSlot.appendLine("${generatedVisibility()} val LOOKUP: SymbolLookup = run {")
             mainSlot.indent()
             if (useSystemLoadLibrary) {
                 for (lib in libraries) {
@@ -163,7 +166,7 @@ class KotlinToplevelBuilder(
         }
 
         if (useInitMethod) {
-            mainSlot.appendLine("private var _initialized: Boolean = false")
+            mainSlot.appendLine("${generatedVisibility()} var _initialized: Boolean = false")
             mainSlot.appendLine()
         }
 
@@ -173,7 +176,7 @@ class KotlinToplevelBuilder(
             for (dllName in dllNames) {
                 val varName = dllLookupVarName(dllName)
                 if (useInitMethod) {
-                    mainSlot.appendLine("private var $varName: SymbolLookup? = null")
+                    mainSlot.appendLine("${generatedVisibility()} var $varName: SymbolLookup? = null")
                     initSlot.appendLine("$varName = try {")
                     initSlot.indent()
                     initSlot.appendLine("SymbolLookup.libraryLookup(\"$dllName\", Arena.global())")
@@ -184,7 +187,7 @@ class KotlinToplevelBuilder(
                     initSlot.unindent()
                     initSlot.appendLine("}")
                 } else {
-                    mainSlot.appendLine("private val $varName: SymbolLookup? = try {")
+                    mainSlot.appendLine("${generatedVisibility()} val $varName: SymbolLookup? = try {")
                     mainSlot.indent()
                     mainSlot.appendLine("SymbolLookup.libraryLookup(\"$dllName\", Arena.global())")
                     mainSlot.unindent()
@@ -205,7 +208,7 @@ class KotlinToplevelBuilder(
                 syms.addAll(entry.constants)
             }
 
-            mainSlot.appendLine("private fun _lookup(symbol: String): SymbolLookup {")
+            mainSlot.appendLine("${generatedVisibility()} fun _lookup(symbol: String): SymbolLookup {")
             mainSlot.indent()
             mainSlot.appendLine("return when (symbol) {")
             mainSlot.indent()

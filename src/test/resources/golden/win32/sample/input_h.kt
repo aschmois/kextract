@@ -2,7 +2,7 @@ import java.lang.invoke.*
 import java.lang.foreign.*
 import java.lang.foreign.MemoryLayout.PathElement.*
 
-private object kextract_runtime {
+internal object kextract_runtime {
     val C_BOOL: ValueLayout = ValueLayout.JAVA_BOOLEAN
     val C_CHAR: ValueLayout = ValueLayout.JAVA_BYTE
     val C_SHORT: ValueLayout = ValueLayout.JAVA_SHORT
@@ -14,12 +14,12 @@ private object kextract_runtime {
     val C_POINTER: ValueLayout = ValueLayout.ADDRESS
 }
 
-private var _initialized: Boolean = false
+internal var _initialized: Boolean = false
 
-private var _DLL_KERNEL32_DLL: SymbolLookup? = null
-private var _DLL_USER32_DLL: SymbolLookup? = null
+internal var _DLL_KERNEL32_DLL: SymbolLookup? = null
+internal var _DLL_USER32_DLL: SymbolLookup? = null
 
-private fun _lookup(symbol: String): SymbolLookup {
+internal fun _lookup(symbol: String): SymbolLookup {
     return when (symbol) {
         "GetWindowText" -> _DLL_KERNEL32_DLL ?: SymbolLookup.loaderLookup()
         "CreateWindow", "WindowStyle" -> _DLL_USER32_DLL ?: SymbolLookup.loaderLookup()

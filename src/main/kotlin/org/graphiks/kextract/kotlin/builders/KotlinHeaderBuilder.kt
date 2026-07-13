@@ -17,6 +17,7 @@ class KotlinHeaderBuilder(
 
     fun visitFunction(decl: Declaration.Function) {
         val name = toplevel.javaName(decl.name())
+        val visibility = toplevel.generatedVisibility()
         val returnType = TypeMapper.map(decl.type().returnType())
         val returnsStruct = isStructType(decl.type().returnType())
         val params = paramString(decl, returnsStruct)
@@ -31,7 +32,7 @@ class KotlinHeaderBuilder(
         builder.appendLine(" */")
 
         // Function descriptor, address and handle (toplevel properties)
-        builder.appendLine("private val ${name}_DESC: FunctionDescriptor = ${functionDescriptorString(decl)}")
+        builder.appendLine("$visibility val ${name}_DESC: FunctionDescriptor = ${functionDescriptorString(decl)}")
         val lookupExpr = when {
             toplevel.isWin32Mode -> "_lookup(\"${toplevel.lookupName(decl)}\")"
             toplevel.hasLookup -> "LOOKUP"
@@ -40,7 +41,7 @@ class KotlinHeaderBuilder(
         val lookupName = toplevel.lookupName(decl)
 
         if (toplevel.isInitMethod) {
-            builder.appendLine("private var ${name}_HANDLE: MethodHandle? = null")
+            builder.appendLine("$visibility var ${name}_HANDLE: MethodHandle? = null")
             builder.appendLine()
             toplevel.initSlot.appendLine(
                 "${name}_HANDLE = $lookupExpr.find(\"$lookupName\")" +
@@ -50,15 +51,15 @@ class KotlinHeaderBuilder(
             // Use find(name).orElseThrow() rather than findOrThrow(name) for compatibility with
             // older Kotlin/JDK toolchains that haven't seen SymbolLookup.findOrThrow (added JDK 22).
             builder.appendLine(
-                "private val ${name}_ADDR: MemorySegment = $lookupExpr.find(\"$lookupName\").orElseThrow()"
+                "$visibility val ${name}_ADDR: MemorySegment = $lookupExpr.find(\"$lookupName\").orElseThrow()"
             )
             if (variadicCount > 0) {
-                builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(")
+                builder.appendLine("$visibility val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(")
                 builder.appendLine("    ${name}_ADDR, ${name}_DESC,")
                 builder.appendLine("    Linker.Option.firstVariadicArg(${fixedCount}),")
                 builder.appendLine(")")
             } else {
-                builder.appendLine("private val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC)")
+                builder.appendLine("$visibility val ${name}_HANDLE: MethodHandle = Linker.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC)")
             }
             builder.appendLine()
         }
@@ -127,6 +128,7 @@ class KotlinHeaderBuilder(
 
     fun visitVariable(decl: Declaration.Variable) {
         val name = toplevel.javaName(decl.name())
+        val visibility = toplevel.generatedVisibility()
         val type = TypeMapper.map(decl.type())
         val lookupName = toplevel.lookupName(decl)
 
@@ -145,7 +147,7 @@ class KotlinHeaderBuilder(
         // because a scalar VarHandle cannot get/set a whole record at once.
         if (isAggregateGlobal(decl.type())) {
             if (toplevel.isInitMethod) {
-                builder.appendLine("private var ${name}: MemorySegment? = null")
+                builder.appendLine("$visibility var ${name}: MemorySegment? = null")
                 builder.appendLine()
                 toplevel.initSlot.appendLine(
                     "${name} = $varLookupExpr.find(\"$lookupName\").orElse(null)"
@@ -165,11 +167,11 @@ class KotlinHeaderBuilder(
         // Struct types use MemoryLayout (GroupLayout) instead of ValueLayout
         // Use `by lazy` to keep <clinit> small.
         val layoutType = if (isStruct) "MemoryLayout" else "ValueLayout"
-        builder.appendLine("private val ${name}_LAYOUT: $layoutType by lazy { ${layoutString(decl.type())} }")
+        builder.appendLine("$visibility val ${name}_LAYOUT: $layoutType by lazy { ${layoutString(decl.type())} }")
 
         if (toplevel.isInitMethod) {
-            builder.appendLine("private var ${name}_SEGMENT: MemorySegment? = null")
-            builder.appendLine("private var ${name}_VH: VarHandle? = null")
+            builder.appendLine("$visibility var ${name}_SEGMENT: MemorySegment? = null")
+            builder.appendLine("$visibility var ${name}_VH: VarHandle? = null")
             builder.appendLine()
             toplevel.initSlot.appendLine(
                 "${name}_SEGMENT = $varLookupExpr.find(\"$lookupName\").orElse(null)"
@@ -179,9 +181,9 @@ class KotlinHeaderBuilder(
             )
         } else {
             builder.appendLine(
-                "private val ${name}_SEGMENT: MemorySegment by lazy { $varLookupExpr.find(\"$lookupName\").orElseThrow() }"
+                "$visibility val ${name}_SEGMENT: MemorySegment by lazy { $varLookupExpr.find(\"$lookupName\").orElseThrow() }"
             )
-            builder.appendLine("private val ${name}_VH: VarHandle by lazy { ${name}_LAYOUT.varHandle() }")
+            builder.appendLine("$visibility val ${name}_VH: VarHandle by lazy { ${name}_LAYOUT.varHandle() }")
             builder.appendLine()
         }
 

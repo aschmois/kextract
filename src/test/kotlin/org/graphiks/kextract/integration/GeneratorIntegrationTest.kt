@@ -46,6 +46,11 @@ class GeneratorIntegrationTest : FreeSpec({
 
             result.exitCode shouldNotBe 0
             result.stderr.isNotEmpty() shouldBe true
+            result.failureArtifact shouldNotBe null
+            val artifact = result.failureArtifact!!
+            Files.exists(artifact.resolve("Invalid.kt")) shouldBe true
+            Files.exists(artifact.resolve("kotlinc-diagnostics.txt")) shouldBe true
+            result.stderr shouldContain artifact.toString()
         }
 
         "runs the CLI through a child JVM and generates output" {
@@ -55,43 +60,15 @@ class GeneratorIntegrationTest : FreeSpec({
                 val output = directory.resolve("generated")
                 Files.writeString(header, "int add(int a, int b);\n")
 
-                val java = Path.of(
-                    System.getProperty("java.home"),
-                    "bin",
-                    if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java"
+                val result = ProcessTestSupport.runKextractTool(
+                    directory,
+                    "-o", output.toString(),
+                    "-t", "test",
+                    header.toString(),
                 )
-                val classPath = buildList {
-                    add(System.getProperty("java.class.path"))
-                    val gradleCache = Path.of(
-                        System.getProperty("user.home"), ".gradle", "caches", "modules-2", "files-2.1"
-                    )
-                    if (Files.isDirectory(gradleCache)) {
-                        Files.walk(gradleCache).use { paths ->
-                            paths.filter { path ->
-                                Files.isRegularFile(path) && path.fileName.toString().endsWith(".jar") &&
-                                    path.fileName.toString().let { it.contains("clikt") || it.contains("mordant") }
-                            }.forEach { add(it.toString()) }
-                        }
-                    }
-                }.distinct().joinToString(File.pathSeparator)
-                val command = buildList {
-                    add(java.toString())
-                    add("--enable-native-access=ALL-UNNAMED")
-                    add("-Djava.library.path=${System.getProperty("java.library.path")}")
-                    add("-cp")
-                    add(classPath)
-                    add("org.graphiks.kextract.pipeline.KextractTool")
-                    add("-o")
-                    add(output.toString())
-                    add("-t")
-                    add("test")
-                    add(header.toString())
-                }
-
-                val result = ProcessTestSupport.run(command, directory)
 
                 if (result.exitCode != 0) {
-                    error("CLI child exited with ${result.exitCode}:\n${result.output}")
+                    error("CLI child exited with ${result.exitCode}:\n${result.stdout}\n${result.stderr}")
                 }
                 val generated = output.resolve("test/input_h.kt")
                 Files.exists(generated) shouldBe true

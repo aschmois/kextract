@@ -2,9 +2,11 @@ package org.graphiks.kextract.integration
 
 import org.graphiks.kextract.testsupport.GeneratedSourceTestSupport
 import org.graphiks.kextract.testsupport.GenerationRequest
+import org.graphiks.kextract.testsupport.HeaderLanguage
 import org.graphiks.kextract.testsupport.KotlinCompilerSupport
 import org.graphiks.kextract.cli.DllEntry
 import org.graphiks.kextract.cli.DllMap
+import org.graphiks.kextract.pipeline.Options
 import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
 import org.junit.jupiter.api.Tag
@@ -19,9 +21,11 @@ class GeneratedBindingsCompilationTest {
             GenerationRequest(
                 source = """
                     struct Point { int x; int y; };
+                    typedef struct Point PointAlias;
                     union Value { int number; float decimal; };
                     enum Color { Red, Green, Blue };
-                    struct Buffer { char bytes[16]; int *length; };
+                    struct Flags { unsigned int ready:1; unsigned int code:7; };
+                    struct Buffer { char bytes[16]; int *length; PointAlias point; };
                     const int DefaultColor = Green;
                     int add(int left, int right);
                     void log_values(int count, ...);
@@ -40,8 +44,14 @@ class GeneratedBindingsCompilationTest {
         val files = GeneratedSourceTestSupport.generate(
             GenerationRequest(
                 source = """
-                    struct Point { int x; int y; };
+                    typedef unsigned long Word;
+                    struct Flags { unsigned int ready:1; unsigned int code:7; };
+                    union Value { int number; float decimal; };
+                    enum Color { Red, Green, Blue };
+                    struct Point { Word values[4]; int *length; };
+                    int add(int left, int right);
                 """.trimIndent(),
+                libraries = listOf(Options.Library.parse("split-native")),
                 splitOutput = true,
                 useInitMethod = true,
             )
@@ -59,6 +69,16 @@ class GeneratedBindingsCompilationTest {
             GenerationRequest(
                 language = org.graphiks.kextract.testsupport.HeaderLanguage.OBJECTIVE_C,
                 source = """
+                    typedef enum : long {
+                        KxModeDefault = 0,
+                        KxModeFast = 1
+                    } KxMode;
+
+                    typedef enum : long {
+                        KxOptionReadable = 1,
+                        KxOptionWritable = 2
+                    } KxDisplayOptions;
+
                     @class NSString;
 
                     @interface NSObject
@@ -66,6 +86,8 @@ class GeneratedBindingsCompilationTest {
 
                     @protocol KxGreeting
                     - (NSString *)requiredGreeting;
+                    @optional
+                    - (void)optionalReset;
                     @end
 
                     @interface KxPerson : NSObject <KxGreeting>
@@ -77,6 +99,7 @@ class GeneratedBindingsCompilationTest {
                     - (void)reset;
                     @end
                 """.trimIndent(),
+                libraries = listOf(Options.Library.parse("objc-runtime")),
             )
         )
 

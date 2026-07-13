@@ -7,7 +7,9 @@ import org.graphiks.kextract.testsupport.GeneratedSourceTestSupport
 import org.graphiks.kextract.testsupport.GenerationRequest
 import org.graphiks.kextract.testsupport.HeaderLanguage
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
@@ -30,7 +32,8 @@ fun normalizeGeneratedSource(source: String): String {
 }
 
 fun compareOrUpdateGolden(case: GoldenCase, generated: Map<String, String>, update: Boolean) {
-    if (update) Files.createDirectories(case.root)
+    val fixtureRoot = case.root.toAbsolutePath().normalize()
+    if (update) Files.createDirectories(fixtureRoot)
     val generatedByPath = generated.entries.associate { (path, content) ->
         normalizePath(path) to normalizeGeneratedSource(content)
     }
@@ -38,11 +41,11 @@ fun compareOrUpdateGolden(case: GoldenCase, generated: Map<String, String>, upda
         "Duplicate generated paths for fixture ${case.name}: ${generated.keys}"
     }
 
-    val expectedByPath: Map<String, String> = if (Files.isDirectory(case.root)) {
-        Files.walk(case.root).use { paths ->
+    val expectedByPath: Map<String, String> = if (Files.isDirectory(fixtureRoot)) {
+        Files.walk(fixtureRoot).use { paths ->
             paths
                 .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".kt") }
-                .map { path -> normalizePath(case.root.relativize(path).toString()) to normalizeGeneratedSource(Files.readString(path)) }
+                .map { path -> normalizePath(fixtureRoot.relativize(path).toString()) to normalizeGeneratedSource(Files.readString(path)) }
                 .toList()
                 .toMap()
         }
@@ -51,11 +54,12 @@ fun compareOrUpdateGolden(case: GoldenCase, generated: Map<String, String>, upda
     }
 
     if (update) {
+        (expectedByPath.keys - generatedByPath.keys).forEach { relativePath ->
+            val stale = resolveGoldenKotlinPath(fixtureRoot, relativePath, case.name)
+            Files.deleteIfExists(stale)
+        }
         generatedByPath.toSortedMap().forEach { (relativePath, content) ->
-            val destination = case.root.resolve(relativePath).normalize()
-            require(destination.startsWith(case.root.normalize())) {
-                "Generated path escapes fixture ${case.name}: $relativePath"
-            }
+            val destination = resolveGoldenKotlinPath(fixtureRoot, relativePath, case.name)
             Files.createDirectories(destination.parent)
             Files.writeString(destination, content)
         }
@@ -88,6 +92,17 @@ fun compareOrUpdateGolden(case: GoldenCase, generated: Map<String, String>, upda
     }
 }
 
+private fun resolveGoldenKotlinPath(root: Path, relativePath: String, caseName: String): Path {
+    require(relativePath.endsWith(".kt")) {
+        "Golden update can only write Kotlin files for fixture $caseName: $relativePath"
+    }
+    val destination = root.resolve(relativePath).normalize()
+    require(destination.startsWith(root) && destination.fileName.toString().endsWith(".kt")) {
+        "Generated path escapes fixture $caseName: $relativePath"
+    }
+    return destination
+}
+
 private fun normalizePath(path: String): String = path.replace('\\', '/')
 
 private fun unifiedDiff(expected: String, actual: String): String {
@@ -114,12 +129,40 @@ private fun unifiedDiff(expected: String, actual: String): String {
 }
 
 class GoldenFileTest {
+    @TempDir
+    lateinit var temporaryFixtureRoot: Path
+
     @Test
     fun `normalization preserves blank lines and only trims terminal spaces`() {
         assertEquals(
             "first\n\nsecond\nthird\n",
             normalizeGeneratedSource("first \r\n\r\nsecond\t\rthird"),
         )
+    }
+
+    @Test
+    fun `golden update removes stale Kotlin files but preserves fixture inputs`() {
+        val root = temporaryFixtureRoot.resolve("case")
+        Files.createDirectories(root)
+        Files.writeString(root.resolve("old.kt"), "old")
+        Files.writeString(root.resolve("input.h"), "int add(int, int);")
+        Files.writeString(root.resolve("case.yml"), "name: case\n")
+
+        compareOrUpdateGolden(
+            GoldenCase("temporary", root, GenerationRequest(source = "")),
+            mapOf("new.kt" to "new"),
+            update = true,
+        )
+        compareOrUpdateGolden(
+            GoldenCase("temporary", root, GenerationRequest(source = "")),
+            mapOf("new.kt" to "new"),
+            update = true,
+        )
+
+        assertFalse(Files.exists(root.resolve("old.kt")))
+        assertTrue(Files.exists(root.resolve("new.kt")))
+        assertTrue(Files.exists(root.resolve("input.h")))
+        assertTrue(Files.exists(root.resolve("case.yml")))
     }
 
     @Test
