@@ -1,13 +1,14 @@
 package org.graphiks.kextract.cli
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertEquals
-import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 
 class DllMapTest {
     @TempDir
@@ -40,7 +41,7 @@ class DllMapTest {
 
     @Test
     fun `rejects malformed YAML`() {
-        assertFails { readYaml("dllMap: [") }
+        assertFailsWith<JsonProcessingException> { readYaml("dllMap: [") }
     }
 
     private fun readYaml(contents: String): DllMap {

@@ -108,7 +108,7 @@ class KextractTool(private val logger: Logger) {
             logger.err("kextract.parse.failed", e.message ?: "")
             if (e.cause != null) logger.err("kextract.parse.cause", e.cause!!.message ?: "")
             if (DEBUG) e.printStackTrace()
-            return FAILURE
+            return if (logger.hasClangErrors()) CLANG_ERROR else FAILURE
         }
 
         if (logger.hasClangErrors()) return CLANG_ERROR

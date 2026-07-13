@@ -1,5 +1,6 @@
 package org.graphiks.kextract.integration
 
+import org.graphiks.kextract.pipeline.KextractTool
 import org.graphiks.kextract.testsupport.ProcessTestSupport
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -7,6 +8,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
@@ -32,8 +34,31 @@ class KextractCliIntegrationTest {
 
         val result = runCli(missing.toString())
 
-        assertNotEquals(0, result.exitCode)
+        assertEquals(KextractTool.CLANG_ERROR, result.exitCode, result.stderr)
         assertContains(result.stderr, "missing.h")
+        assertFalse(result.stderr.contains("kextract.fatal"), result.stderr)
+    }
+
+    @Test
+    fun `returns clang error when parsing fails after a clang diagnostic`() {
+        val header = header("int add(int a, int b);")
+
+        val result = runCli("--clang-arg=-invalid-clang-option", header.toString())
+
+        assertEquals(KextractTool.CLANG_ERROR, result.exitCode, result.stderr)
+        assertContains(result.stderr, "unknown argument")
+        assertFalse(result.stderr.contains("kextract.fatal"), result.stderr)
+    }
+
+    @Test
+    fun `keeps a libclang warning non-fatal`() {
+        val header = header("#warning task-2-warning\nint add(int a, int b);\n")
+
+        val result = runCli(header.toString())
+
+        assertEquals(KextractTool.SUCCESS, result.exitCode, result.stderr)
+        assertContains(result.stderr, "task-2-warning")
+        assertFalse(result.stderr.contains("kextract.fatal"), result.stderr)
     }
 
     @Test

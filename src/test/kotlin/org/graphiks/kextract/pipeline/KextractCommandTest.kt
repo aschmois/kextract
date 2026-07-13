@@ -1,6 +1,7 @@
 package org.graphiks.kextract.pipeline
 
 import com.github.ajalt.clikt.core.main
+import com.fasterxml.jackson.core.JsonProcessingException
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.PrintWriter
@@ -108,7 +109,7 @@ class KextractCommandTest {
 
     @Test
     fun `rejects malformed DLL map YAML`() {
-        assertFailsWith<Exception> {
+        assertFailsWith<JsonProcessingException> {
             runCommand("--win32", "--dll-map", dllMap("dllMap: [").toString(), header().toString())
         }
     }
