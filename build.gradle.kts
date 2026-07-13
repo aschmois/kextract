@@ -141,8 +141,8 @@ sourceSets {
             setSrcDirs(listOf("src/test/kotlin"))
             exclude("ManualKotlinGen.kt")
         }
-        compileClasspath += sourceSets["kmain"].output
-        runtimeClasspath += sourceSets["kmain"].output
+        compileClasspath += sourceSets["kmain"].output + sourceSets["kmain"].compileClasspath
+        runtimeClasspath += sourceSets["kmain"].output + sourceSets["kmain"].runtimeClasspath
     }
 }
 

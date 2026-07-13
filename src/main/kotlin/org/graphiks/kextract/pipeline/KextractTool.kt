@@ -4,6 +4,9 @@ import com.github.ajalt.clikt.core.main
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.Position
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.callbacks.CallbackAnalyzer
+import org.graphiks.kextract.callbacks.CallbackBindingsConfig
+import org.graphiks.kextract.callbacks.CanonicalDeclarationIndex
 import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
@@ -176,6 +179,10 @@ class KextractTool(private val logger: Logger) {
         d = MissingDepChecker(logger).scan(d)
         if (logger.hasErrors()) return emptyList()
 
+        val callbackBindings = CallbackAnalyzer.validate(
+            CanonicalDeclarationIndex(d),
+            options.callbackBindings ?: CallbackBindingsConfig(),
+        )
         val transformed = NameMangler(headerName).scan(d)
         return KotlinGenerator().generate(
             transformed, headerName, options.targetPackage,
@@ -183,6 +190,7 @@ class KextractTool(private val logger: Logger) {
             options.splitOutput, options.variadicArgs,
             options.win32Mode, options.dllMap,
             options.useInitMethod, options.multiplatform,
+            callbackBindings,
         )
     }
 

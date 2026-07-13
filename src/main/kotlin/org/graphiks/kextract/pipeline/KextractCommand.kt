@@ -11,7 +11,9 @@ import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.multiple
 import com.github.ajalt.clikt.parameters.options.option
+import org.graphiks.kextract.callbacks.CallbackBindingsLoader
 import org.graphiks.kextract.cli.DllMap
+import java.nio.file.Path
 
 /**
  * Clikt command for kextract.
@@ -113,6 +115,12 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "YAML file mapping symbols to DLLs (required with --win32)"
     )
 
+    val callbackBindingsPath by option(
+        "--callback-bindings",
+        metavar = "FILE",
+        help = "YAML metadata for generated safe callback bindings",
+    )
+
     val initMethod by option("--init-method",
         help = "Generate init() method instead of eager static initializers"
     ).flag()
@@ -182,6 +190,9 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             if (dllMapPath != null) throw IllegalArgumentException("--dll-map requires --win32")
             null
         }
+        val callbackBindings = callbackBindingsPath?.let {
+            CallbackBindingsLoader.load(Path.of(it))
+        }
 
         val options = Options(
             clangArgs = buildList {
@@ -203,6 +214,7 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             dllMap             = dllMap,
             useInitMethod      = initMethod,
             multiplatform      = multiplatform,
+            callbackBindings   = callbackBindings,
         )
 
         val exitCode = KextractTool(logger).runGeneration(headers, options)

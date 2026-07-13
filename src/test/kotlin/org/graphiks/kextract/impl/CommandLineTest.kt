@@ -1,14 +1,18 @@
 package org.graphiks.kextract.pipeline
 
+import com.github.ajalt.clikt.core.main
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.io.TempDir
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.PrintWriter
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class CommandLineTest {
     @TempDir
@@ -149,5 +153,47 @@ class CommandLineTest {
         val exception = CommandLine.UnmatchedQuoteException("TEST_VAR")
         assertContains(exception.message ?: "", "Unmatched quote")
         assertContains(exception.message ?: "", "TEST_VAR")
+    }
+
+    @Test
+    fun `callback bindings option loads metadata and runs the generation pipeline`() {
+        val header = tempDir.resolve("cli-callback.h").also {
+            Files.writeString(
+                it,
+                """
+                    typedef void (*CliCallback)(void * userdata);
+                    void setCliCallback(CliCallback callback, void * userdata);
+                """.trimIndent(),
+            )
+        }
+        val bindings = tempDir.resolve("cli-callbacks.yml").also {
+            Files.writeString(
+                it,
+                """
+                    directFunctionBindings:
+                      - function: function:setCliCallback
+                        callbackParameter: callback
+                        callbackType: typedef:CliCallback
+                        routingUserdataParameter: userdata
+                """.trimIndent(),
+            )
+        }
+        val output = tempDir.resolve("generated")
+        val logger = Logger(
+            PrintWriter(ByteArrayOutputStream(), true),
+            PrintWriter(ByteArrayOutputStream(), true),
+        )
+
+        KextractCommand(logger).main(
+            listOf(
+                "--callback-bindings", bindings.toString(),
+                "--output", output.toString(),
+                header.toString(),
+            ),
+        )
+
+        Files.walk(output).use { files ->
+            assertTrue(files.anyMatch { Files.isRegularFile(it) })
+        }
     }
 }

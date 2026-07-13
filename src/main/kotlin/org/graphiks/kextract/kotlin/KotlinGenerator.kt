@@ -2,6 +2,7 @@
 package org.graphiks.kextract.kotlin
 
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.builders.KotlinKmpAndroidBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinKmpCommonBuilder
@@ -44,6 +45,7 @@ class KotlinGenerator {
         dllMap: DllMap? = null,
         useInitMethod: Boolean = false,
         multiplatform: Boolean = false,
+        callbackBindings: ValidatedCallbackBindings = ValidatedCallbackBindings.EMPTY,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         if (multiplatform) return generateKmp(scoped, targetPackage, className)

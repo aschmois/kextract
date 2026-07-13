@@ -1,13 +1,19 @@
 package org.graphiks.kextract.pipeline
 
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayOutputStream
 import java.io.PrintWriter
+import java.nio.file.Path
+import kotlin.io.path.writeText
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class KextractToolTest {
+    @TempDir
+    private lateinit var tempDir: Path
 
     @Test
     fun `test KextractTool can be instantiated`() {
@@ -79,5 +85,25 @@ class KextractToolTest {
     fun `Options Library toQuotedName escapes backslashes`() {
         val lib = Options.Library("C:\\lib\\foo.dll", Options.Library.SpecKind.PATH)
         assertEquals("C:\\\\lib\\\\foo.dll", Options.Library.toQuotedName(lib))
+    }
+
+    @Test
+    fun `pipeline rejects an invalid automatic callback without metadata`() {
+        val header = tempDir.resolve("invalid-callback.h").also {
+            it.writeText("typedef int (*InvalidPipelineHandler)(void);")
+        }
+        val errors = ByteArrayOutputStream()
+        val logger = Logger(PrintWriter(ByteArrayOutputStream(), true), PrintWriter(errors, true))
+
+        val exitCode = KextractTool(logger).runGeneration(
+            listOf(header.toString()),
+            Options(outputDir = tempDir.resolve("output").toString()),
+        )
+
+        assertEquals(KextractTool.FAILURE, exitCode)
+        assertContains(
+            errors.toString(),
+            "typedef:InvalidPipelineHandler: callback return type must be void, found int",
+        )
     }
 }
