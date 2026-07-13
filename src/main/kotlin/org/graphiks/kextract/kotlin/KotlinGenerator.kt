@@ -51,7 +51,7 @@ class KotlinGenerator {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
             val callbackModels = callbackBindings.callbacks.map(KotlinCallbackModel::from)
-            return generateKmp(scoped, targetPackage, className, callbackModels)
+            return generateKmp(scoped, targetPackage, className, callbackModels, callbackBindings)
         }
 
         val toplevel = KotlinToplevelBuilder(
@@ -72,11 +72,12 @@ class KotlinGenerator {
         targetPackage: String,
         className: String,
         callbackModels: List<KotlinCallbackModel>,
+        callbackBindings: ValidatedCallbackBindings,
     ): List<KotlinSourceFile> = buildList {
-        KotlinKmpCommonBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpJvmBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpNativeBuilder(targetPackage, className, callbackModels).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpCommonBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpJvmBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpNativeBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
     }
 
     private fun sanitizeClassName(name: String): String =

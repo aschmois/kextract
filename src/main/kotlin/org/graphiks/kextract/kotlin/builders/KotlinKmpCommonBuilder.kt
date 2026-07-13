@@ -6,6 +6,8 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCAbiType
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCommonEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
@@ -15,6 +17,7 @@ class KotlinKmpCommonBuilder(
     private val targetPackage: String,
     private val className: String,
     private val callbackModels: List<KotlinCallbackModel>,
+    private val callbackBindings: ValidatedCallbackBindings,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -35,6 +38,9 @@ class KotlinKmpCommonBuilder(
         builder.appendLine("import io.ygdrasil.kffi.CallbackExceptionHandler")
         builder.appendLine("import io.ygdrasil.kffi.CallbackPolicy")
         builder.appendLine("import io.ygdrasil.kffi.CallbackRegistration")
+        if (callbackBindings.directFunctionBindings.isNotEmpty()) {
+            builder.appendLine("import io.ygdrasil.kffi.CallbackRuntime")
+        }
         builder.appendLine("import io.ygdrasil.kffi.CallbackRuntimeApi")
         builder.appendLine("import io.ygdrasil.kffi.CallbackType")
         builder.appendLine("import io.ygdrasil.kffi.PreparedCallbackRegistration")
@@ -114,6 +120,11 @@ class KotlinKmpCommonBuilder(
                     member.accept(this)
                 }
                 KotlinCallbackCommonEmitter(typeMapper::mapFunctionType).emit(builder, callbackModels)
+                KotlinCallbackBindingEmitter(typeMapper::mapFunctionType).emitCommon(
+                    builder,
+                    callbackBindings.directFunctionBindings,
+                    callbackBindings.callbackInfoBindings,
+                )
             }
             else -> {}
         }

@@ -5,6 +5,8 @@ import org.graphiks.kextract.Position
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.pipeline.DuplicateFilter
 import org.graphiks.kextract.pipeline.KextractTool
+import org.graphiks.kextract.pipeline.Logger
+import org.graphiks.kextract.pipeline.Options
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -13,6 +15,7 @@ import kotlin.io.path.writeText
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class CallbackAnalyzerTest {
     @TempDir
@@ -49,6 +52,41 @@ class CallbackAnalyzerTest {
             listOf("SampleMode_Allow", "SampleMode_Spontaneous"),
             info.mode?.allowedConstants?.map { it.name() },
         )
+    }
+
+    @Test
+    fun `emits callback-info factories from validated mode lifetime and userdata metadata`() {
+        val common = generateCommon(validConfig(), "callback-info")
+
+        val factory = common
+            .substringAfter("fun SampleCallbackInfo.Companion.allocate(\n")
+            .substringBefore("\n}\n")
+        assertTrue(
+            factory.startsWith(
+                "    allocator: MemoryAllocator,\n" +
+                    "    mode: SampleMode,\n" +
+                    "    registration: CallbackRegistration<SampleCallback>,\n" +
+                    "    userdata1: NativeAddress? = null,\n" +
+                    "): SampleCallbackInfo {",
+            ),
+        )
+        assertTrue(factory.contains("mode == SampleMode_Allow ||"))
+        assertTrue(factory.contains("mode == SampleMode_Spontaneous,"))
+        assertTrue(factory.indexOf("require(") < factory.indexOf("val info = allocate(allocator)"))
+        assertTrue(factory.contains("info.callback = registration.callback"))
+        assertTrue(factory.contains("info.userdata2 = registration.userdata"))
+        assertTrue(factory.contains("info.userdata1 = userdata1"))
+        assertTrue(factory.contains("return info"))
+        assertTrue(common.contains("CONSUMED_DURING_CALL: the owning native call copies the callback-info value or containing descriptor, so the allocator scope may close after the call while the registration remains live."))
+        assertTrue(!factory.contains("registration.close()"))
+
+        val noModeConfig = validConfig().also { it.callbackInfoBindings.single().mode = null }
+        val noModeCommon = generateCommon(noModeConfig, "callback-info-no-mode")
+        val noModeFactory = noModeCommon
+            .substringAfter("fun SampleCallbackInfo.Companion.allocate(\n")
+            .substringBefore("\n}\n")
+        assertTrue(!noModeFactory.contains("mode: SampleMode"))
+        assertTrue(!noModeFactory.contains("info.mode ="))
     }
 
     @Test
@@ -662,6 +700,29 @@ class CallbackAnalyzerTest {
 
     private fun programmaticIndex(vararg declarations: Declaration): CanonicalDeclarationIndex =
         CanonicalDeclarationIndex(Declaration.toplevel(Position.NO_POSITION, *declarations))
+
+    private fun generateCommon(config: CallbackBindingsConfig, fixtureName: String): String {
+        val header = tempDir.resolve("$fixtureName.h").also { it.writeText(FIXTURE_HEADER) }
+        val output = tempDir.resolve("$fixtureName-output")
+        assertEquals(
+            KextractTool.SUCCESS,
+            KextractTool(Logger()).runGeneration(
+                listOf(header.toString()),
+                Options(
+                    targetPackage = "sample.bindings",
+                    outputDir = output.toString(),
+                    multiplatform = true,
+                    callbackBindings = config,
+                ),
+            ),
+        )
+        return java.nio.file.Files.walk(output.resolve("commonMain")).use { paths ->
+            paths.filter { it.fileName.toString().endsWith(".kt") }
+                .map { it.toFile().readText() }
+                .toList()
+                .joinToString("\n")
+        }
+    }
 
     private companion object {
         val FIXTURE_HEADER = """

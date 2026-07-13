@@ -4,13 +4,22 @@ import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
+import org.graphiks.kextract.callbacks.CallbackBindingsConfig
+import org.graphiks.kextract.callbacks.CallbackInfoBinding
+import org.graphiks.kextract.callbacks.CallbackInfoLifetime
+import org.graphiks.kextract.callbacks.CallbackInfoMode
+import org.graphiks.kextract.callbacks.CallbackInfoOwner
+import org.graphiks.kextract.callbacks.DirectFunctionBinding
 import org.graphiks.kextract.pipeline.KextractTool
 import org.graphiks.kextract.pipeline.Logger
 import org.graphiks.kextract.pipeline.Options
 import java.nio.file.Files
 
 class CallbackGeneratorIntegrationTest : FreeSpec({
-    fun generateKmp(header: String): Map<String, String> {
+    fun generateKmp(
+        header: String,
+        callbackBindings: CallbackBindingsConfig? = null,
+    ): Map<String, String> {
         val input = Files.createTempFile("kextract-callback-generator", ".h")
         val output = Files.createTempDirectory("kextract-callback-generator-out")
         return try {
@@ -21,6 +30,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
                     targetPackage = "sample.bindings",
                     outputDir = output.toString(),
                     multiplatform = true,
+                    callbackBindings = callbackBindings,
                 ),
             ) shouldBe KextractTool.SUCCESS
 
@@ -85,6 +95,156 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
             void * userdata
         );
     """.trimIndent()
+
+    "configured direct callback helpers are transactional on every platform" {
+        val config = CallbackBindingsConfig().also { bindings ->
+            bindings.directFunctionBindings = listOf(
+                DirectFunctionBinding().also { binding ->
+                    binding.function = "function:sample_set_callback"
+                    binding.callbackParameter = "callback"
+                    binding.callbackType = "typedef:SampleCallback"
+                    binding.routingUserdataParameter = "userdata2"
+                },
+                DirectFunctionBinding().also { binding ->
+                    binding.function = "function:sample_set_no_userdata_callback"
+                    binding.callbackParameter = "callback"
+                    binding.callbackType = "typedef:NoUserdataCallback"
+                },
+            )
+        }
+        val generated = generateKmp(
+            """
+                typedef void (*SampleCallback)(unsigned int value, void * userdata1, void * userdata2);
+                typedef void (*NoUserdataCallback)(unsigned int value);
+                void sample_set_callback(unsigned int limit, SampleCallback callback, void * userdata2);
+                void sample_set_no_userdata_callback(unsigned int limit, NoUserdataCallback callback);
+            """.trimIndent(),
+            config,
+        )
+        val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
+        val native = generated.getValue("nativeMain")
+        val android = generated.getValue("androidMain")
+
+        common shouldContain "internal expect fun sample_set_callbackCallbackBindingPreflight()"
+        common shouldContain """
+            fun sample_set_callback(
+                limit: UInt,
+                policy: CallbackPolicy,
+                onError: CallbackExceptionHandler = CallbackExceptionHandler.Default,
+                callback: SampleCallback,
+            ): CallbackRegistration<SampleCallback> {
+        """.trimIndent()
+        val safeSetter = common
+            .substringAfter("fun sample_set_callback(\n    limit: UInt,\n    policy: CallbackPolicy,")
+            .substringBefore("\n}\n")
+        safeSetter shouldContain "val validatedLimit = limit"
+        safeSetter shouldContain "sample_set_callbackCallbackBindingPreflight()"
+        safeSetter shouldContain "val prepared = SampleCallback.prepare("
+        safeSetter shouldContain "return CallbackRuntime.activateForNativeCall(prepared) { registration ->"
+        safeSetter shouldContain "sample_set_callback(validatedLimit, registration.callback, registration.userdata)"
+        safeSetter shouldNotContain "userdata2: NativeAddress?"
+        (safeSetter.indexOf("val validatedLimit = limit") <
+            safeSetter.indexOf("sample_set_callbackCallbackBindingPreflight()")) shouldBe true
+        (safeSetter.indexOf("sample_set_callbackCallbackBindingPreflight()") <
+            safeSetter.indexOf("val prepared = SampleCallback.prepare(")) shouldBe true
+        (safeSetter.indexOf("activateForNativeCall") <
+            safeSetter.indexOf("sample_set_callback(validatedLimit, registration.callback, registration.userdata)")) shouldBe true
+
+        common shouldContain """
+            @UnsafeCallbackRearmApi
+            fun rearmAfterNativeQuiescence(
+        """.trimIndent()
+        common shouldNotContain "rearmAfterNativeQuiescence: Boolean"
+        common shouldNotContain "allowRearm"
+
+        jvm shouldContain """
+            internal actual fun sample_set_callbackCallbackBindingPreflight() {
+                val address = sample_set_callback_ADDR
+                val handle = sample_set_callback_HANDLE
+            }
+        """.trimIndent()
+        native shouldContain "internal actual fun sample_set_callbackCallbackBindingPreflight() = Unit"
+        android shouldContain "internal actual fun sample_set_callbackCallbackBindingPreflight()"
+        android shouldContain "throw UnsupportedOperationException("
+        android shouldNotContain "CallbackRuntime.activateForNativeCall"
+    }
+
+    "configured callback-info factory enforces the mode allowlist before allocation" {
+        val config = CallbackBindingsConfig().also { bindings ->
+            bindings.callbackInfoBindings = listOf(
+                CallbackInfoBinding().also { binding ->
+                    binding.struct = "struct:WGPUQueueWorkDoneCallbackInfo"
+                    binding.owner = CallbackInfoOwner().also { owner ->
+                        owner.function = "function:wgpuQueueOnSubmittedWorkDone"
+                        owner.parameterPath = "callbackInfo"
+                        owner.lifetime = CallbackInfoLifetime.CONSUMED_DURING_CALL
+                    }
+                    binding.callbackField = "callback"
+                    binding.callbackType = "typedef:WGPUQueueWorkDoneCallback"
+                    binding.routingUserdataField = "userdata2"
+                    binding.applicationUserdataFields = listOf("userdata1")
+                    binding.mode = CallbackInfoMode().also { mode ->
+                        mode.field = "mode"
+                        mode.type = "typedef:WGPUCallbackMode"
+                        mode.allowedConstants = listOf(
+                            "constant:WGPUCallbackMode_WaitAnyOnly",
+                            "constant:WGPUCallbackMode_AllowProcessEvents",
+                            "constant:WGPUCallbackMode_AllowSpontaneous",
+                        )
+                    }
+                },
+            )
+        }
+        val common = generateKmp(
+            """
+                typedef unsigned int WGPUCallbackMode;
+                const WGPUCallbackMode WGPUCallbackMode_Undefined = 0;
+                const WGPUCallbackMode WGPUCallbackMode_WaitAnyOnly = 1;
+                const WGPUCallbackMode WGPUCallbackMode_AllowProcessEvents = 2;
+                const WGPUCallbackMode WGPUCallbackMode_AllowSpontaneous = 3;
+                const WGPUCallbackMode WGPUCallbackMode_Force32 = 0x7fffffff;
+
+                typedef void (*WGPUQueueWorkDoneCallback)(
+                    unsigned int status,
+                    void * userdata1,
+                    void * userdata2
+                );
+                typedef struct WGPUQueueWorkDoneCallbackInfo {
+                    WGPUCallbackMode mode;
+                    WGPUQueueWorkDoneCallback callback;
+                    void * userdata1;
+                    void * userdata2;
+                } WGPUQueueWorkDoneCallbackInfo;
+                void wgpuQueueOnSubmittedWorkDone(WGPUQueueWorkDoneCallbackInfo callbackInfo);
+            """.trimIndent(),
+            config,
+        ).getValue("commonMain")
+
+        common shouldContain """
+            fun WGPUQueueWorkDoneCallbackInfo.Companion.allocate(
+                allocator: MemoryAllocator,
+                mode: WGPUCallbackMode,
+                registration: CallbackRegistration<WGPUQueueWorkDoneCallback>,
+                userdata1: NativeAddress? = null,
+            ): WGPUQueueWorkDoneCallbackInfo
+        """.trimIndent()
+        val factory = common
+            .substringAfter("fun WGPUQueueWorkDoneCallbackInfo.Companion.allocate(\n")
+            .substringBefore("\n}\n")
+        factory shouldContain "require("
+        factory shouldContain "mode == WGPUCallbackMode_WaitAnyOnly ||"
+        factory shouldContain "mode == WGPUCallbackMode_AllowProcessEvents ||"
+        factory shouldContain "mode == WGPUCallbackMode_AllowSpontaneous,"
+        factory shouldNotContain "WGPUCallbackMode_Undefined"
+        factory shouldNotContain "WGPUCallbackMode_Force32"
+        factory shouldContain "val info = allocate(allocator)"
+        factory shouldContain "info.callback = registration.callback"
+        factory shouldContain "info.userdata2 = registration.userdata"
+        factory shouldContain "info.userdata1 = userdata1"
+        (factory.indexOf("require(") < factory.indexOf("val info = allocate(allocator)")) shouldBe true
+        common shouldContain "fun allocate(allocator: MemoryAllocator): WGPUQueueWorkDoneCallbackInfo"
+    }
 
     "common KMP output emits typed callback registrations for generic typedefs" {
         val common = generateKmp(genericCallbacks).getValue("commonMain")
