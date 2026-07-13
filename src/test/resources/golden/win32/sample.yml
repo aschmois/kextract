@@ -1,0 +1,11 @@
+dllMap:
+  kernel32.dll:
+    functions:
+      - GetWindowText
+  user32.dll:
+    functions:
+      - CreateWindow
+    structs:
+      - Window
+    constants:
+      - WindowStyle

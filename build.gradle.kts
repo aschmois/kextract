@@ -404,6 +404,19 @@ tasks.register<Test>("verifyGeneratedBindings") {
     }
 }
 
+tasks.register<Test>("updateGoldenFiles") {
+    group = "verification"
+    description = "Regenerate declared golden files explicitly."
+    dependsOn("testClasses")
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter {
+        includeTestsMatching("org.graphiks.kextract.integration.GoldenFileTest")
+    }
+    systemProperty("golden.update", "true")
+    useJUnitPlatform()
+}
+
 // ── Task ordering ─────────────────────────────────────────────────────────────
 
 tasks.named("compileKmainKotlin") { dependsOn("compileJava") }
