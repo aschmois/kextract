@@ -45,9 +45,8 @@ class FilterTest {
     }
 
     @Test
-    fun `include filter preserves selected declarations and their selected type dependencies`() {
+    fun `single function include preserves Point type identity and excludes unrelated declarations`() {
         val point = Declaration.struct(pos, "Point", Declaration.field(pos, "x", Type.primitive(Type.Primitive.Kind.Int)))
-        val alias = Declaration.typedef(pos, "PointAlias", Type.declared(point))
         val parameter = Declaration.parameter(pos, "point", Type.declared(point))
         val usePoint = Declaration.function(
             pos,
@@ -56,19 +55,23 @@ class FilterTest {
             parameter,
         )
         val unrelated = Declaration.function(pos, "unrelated", Type.function(false, Type.void_()))
-        val header = Declaration.toplevel(pos, point, alias, usePoint, unrelated)
-        val helper = IncludeHelper().also {
-            it.addSymbol(IncludeHelper.IncludeKind.STRUCT, "Point")
-            it.addSymbol(IncludeHelper.IncludeKind.TYPEDEF, "PointAlias")
-            it.addSymbol(IncludeHelper.IncludeKind.FUNCTION, "usePoint")
-        }
+        val header = Declaration.toplevel(pos, point, usePoint, unrelated)
+        val helper = IncludeHelper().also { it.addSymbol(IncludeHelper.IncludeKind.FUNCTION, "usePoint") }
 
         IncludeFilter(helper).scan(header)
 
-        assertFalse(isSkipped(point))
-        assertFalse(isSkipped(alias))
         assertFalse(isSkipped(usePoint))
         assertTrue(isSkipped(unrelated))
+        assertTrue(isSkipped(point))
+        val referencedPoint = (usePoint.type().argumentTypes().single() as Type.Declared).tree()
+        assertEquals(point, referencedPoint)
+
+        val errors = ByteArrayOutputStream()
+        val logger = Logger(PrintWriter(ByteArrayOutputStream()), PrintWriter(errors, true))
+        MissingDepChecker(logger).scan(header)
+        assertTrue(logger.hasErrors())
+        assertTrue(errors.toString().contains("usePoint"), errors.toString())
+        assertTrue(errors.toString().contains("Point"), errors.toString())
     }
 
     @Test
@@ -81,34 +84,75 @@ class FilterTest {
     }
 
     @Test
-    fun `duplicate filter skips only later declarations with the same identity`() {
+    fun `duplicate filter skips repeated functions typedefs variables and category identities`() {
         val first = Declaration.function(pos, "duplicate", Type.function(false, Type.void_()))
         val second = Declaration.function(pos, "duplicate", Type.function(false, Type.void_()))
+        val firstTypedef = Declaration.typedef(pos, "DuplicateType", Type.primitive(Type.Primitive.Kind.Int))
+        val secondTypedef = Declaration.typedef(pos, "DuplicateType", Type.primitive(Type.Primitive.Kind.Int))
+        val firstVariable = Declaration.globalVariable(pos, "duplicateValue", Type.primitive(Type.Primitive.Kind.Int))
+        val secondVariable = Declaration.globalVariable(pos, "duplicateValue", Type.primitive(Type.Primitive.Kind.Int))
+        val firstCategory = Declaration.objcCategory(
+            pos, "Widget+Tracing", "Widget", "Tracing", emptyList(), emptyList()
+        )
+        val secondCategory = Declaration.objcCategory(
+            pos, "Widget+TracingAgain", "Widget", "Tracing", emptyList(), emptyList()
+        )
+        val otherCategory = Declaration.objcCategory(
+            pos, "Widget+Layout", "Widget", "Layout", emptyList(), emptyList()
+        )
 
-        DuplicateFilter().scan(Declaration.toplevel(pos, first, second))
+        DuplicateFilter().scan(
+            Declaration.toplevel(
+                pos,
+                first,
+                second,
+                firstTypedef,
+                secondTypedef,
+                firstVariable,
+                secondVariable,
+                firstCategory,
+                secondCategory,
+                otherCategory,
+            ),
+        )
 
         assertFalse(isSkipped(first))
         assertTrue(isSkipped(second))
+        assertFalse(isSkipped(firstTypedef))
+        assertTrue(isSkipped(secondTypedef))
+        assertFalse(isSkipped(firstVariable))
+        assertTrue(isSkipped(secondVariable))
+        assertFalse(isSkipped(firstCategory))
+        assertTrue(isSkipped(secondCategory))
+        assertFalse(isSkipped(otherCategory))
     }
 
     @Test
-    fun `unsupported filter marks unsupported declarations and reports a verbose warning`() {
+    fun `unsupported filter skips unsupported declarations in both verbose modes`() {
         val savedVerbose = KextractConfig.verbose
-        val errors = ByteArrayOutputStream()
         try {
-            KextractConfig.verbose = true
-            val logger = Logger(PrintWriter(ByteArrayOutputStream()), PrintWriter(errors, true))
-            val unsupported = Declaration.function(
-                pos,
-                "usesLongDouble",
-                Type.function(false, Type.primitive(Type.Primitive.Kind.LongDouble)),
-            )
+            listOf(false, true).forEach { verbose ->
+                KextractConfig.verbose = verbose
+                val errors = ByteArrayOutputStream()
+                val logger = Logger(PrintWriter(ByteArrayOutputStream()), PrintWriter(errors, true))
+                val unsupported = Declaration.function(
+                    pos,
+                    "usesLongDouble",
+                    Type.function(false, Type.primitive(Type.Primitive.Kind.LongDouble)),
+                )
 
-            UnsupportedFilter(logger).scan(Declaration.toplevel(pos, unsupported))
+                UnsupportedFilter(logger).scan(Declaration.toplevel(pos, unsupported))
 
-            assertTrue(isSkipped(unsupported))
-            assertTrue(errors.toString().contains("Skipping usesLongDouble"))
-            assertTrue(errors.toString().contains("type LongDouble is not supported"), errors.toString())
+                assertTrue(isSkipped(unsupported), "unsupported declaration must be skipped with verbose=$verbose")
+                if (verbose) {
+                    assertEquals(
+                        "warning: Skipping usesLongDouble (type LongDouble is not supported)\n",
+                        errors.toString(),
+                    )
+                } else {
+                    assertEquals("", errors.toString())
+                }
+            }
         } finally {
             KextractConfig.verbose = savedVerbose
         }
@@ -159,12 +203,15 @@ class FilterTest {
     }
 
     private fun markAsSkip(declaration: Declaration) {
+        // DeclarationImpl.Skip is internal to kmain; this test source set cannot call it directly.
+        // Keep the same narrow JVM reflection workaround used by MissingDepCheckerTest.
         val skipClass = Class.forName("org.graphiks.kextract.DeclarationImpl\$Skip")
         val instance = skipClass.getDeclaredField("INSTANCE").get(null)
         skipClass.getDeclaredMethod("with", Declaration::class.java).invoke(instance, declaration)
     }
 
     private fun isSkipped(declaration: Declaration): Boolean {
+        // See markAsSkip: Skip remains production-internal, so reflection is test-only and localized here.
         val skipClass = Class.forName("org.graphiks.kextract.DeclarationImpl\$Skip")
         val instance = skipClass.getDeclaredField("INSTANCE").get(null)
         return skipClass.getDeclaredMethod("isPresent", Declaration::class.java)

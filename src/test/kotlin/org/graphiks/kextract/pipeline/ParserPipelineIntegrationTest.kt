@@ -5,7 +5,7 @@ import org.graphiks.kextract.Type
 import org.graphiks.kextract.testsupport.GenerationRequest
 import org.graphiks.kextract.testsupport.GeneratedSourceTestSupport
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertDoesNotThrow
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.io.ByteArrayOutputStream
@@ -46,6 +46,12 @@ class ParserPipelineIntegrationTest {
 
         val name = sample.members().single { it.name() == "name" } as Declaration.Variable
         assertEquals(Type.Delegated.Kind.POINTER, (name.type() as Type.Delegated).kind())
+        val nestedField = sample.members().single { it.name() == "named" } as Declaration.Variable
+        val nested = (nestedField.type() as Type.Declared).tree()
+        assertEquals("Nested", nested.name())
+        assertEquals(Declaration.Scoped.Kind.STRUCT, nested.kind())
+        val nestedValue = nested.members().single { it.name() == "nested" } as Declaration.Variable
+        assertEquals(Type.Primitive.Kind.Int, (nestedValue.type() as Type.Primitive).kind())
         assertTrue(sample.members().any { it is Declaration.Scoped && it.kind() == Declaration.Scoped.Kind.UNION })
         val bitfields = sample.members().single { it is Declaration.Scoped && it.kind() == Declaration.Scoped.Kind.BITFIELDS }
             as Declaration.Scoped
@@ -77,7 +83,9 @@ class ParserPipelineIntegrationTest {
         val errors = ByteArrayOutputStream()
         val logger = Logger(PrintWriter(ByteArrayOutputStream()), PrintWriter(errors, true))
 
-        runCatching { Parser(logger).parse("invalid.h", "struct Broken {", emptyList()) }
+        assertDoesNotThrow<Declaration.Scoped> {
+            Parser(logger).parse("invalid.h", "struct Broken {", emptyList())
+        }
 
         assertTrue(logger.hasClangErrors())
         assertTrue(errors.toString().contains("error:"), errors.toString())
