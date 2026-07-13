@@ -55,6 +55,7 @@ class Cursor internal constructor(segment: MemorySegment, owner: ClangDisposable
     fun resultType(): Type         = Type(clang_getCursorResultType(owner, segment), owner)
     fun getEnumDeclIntegerType(): Type = Type(clang_getEnumDeclIntegerType(owner, segment), owner)
     fun getDefinition(): Cursor    = Cursor(clang_getCursorDefinition(owner, segment), owner)
+    fun getVarDeclInitializer(): Cursor = Cursor(clang_Cursor_getVarDeclInitializer(owner, segment), owner)
     fun isFunctionInlined(): Boolean = clang_Cursor_isFunctionInlined(segment) != 0
 
     fun getSourceLocation(): SourceLocation? {

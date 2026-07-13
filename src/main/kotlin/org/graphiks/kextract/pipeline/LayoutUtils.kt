@@ -35,7 +35,18 @@ object LayoutUtils {
     }
 
     private fun fieldLayoutString(type: Type, typeAlign: Long, expectedAlign: Long): String {
-        if (type.isErroneous()) return "ValueLayout.ADDRESS"
+        if (type.isErroneous()) {
+            if (type is org.graphiks.kextract.TypeImpl.ErronrousTypeImpl) {
+                val name = type.erroneousName
+                if (!name.contains("*")) {
+                    val match = "\\b(WGPU[a-zA-Z0-9_]+)\\b".toRegex().find(name)
+                    if (match != null) {
+                        return "${match.value}.layout"
+                    }
+                }
+            }
+            return "ValueLayout.ADDRESS"
+        }
         return when {
             type is Type.Primitive -> primitiveLayoutString(type, typeAlign, expectedAlign)
             type is Type.Declared && type.isEnum() -> {

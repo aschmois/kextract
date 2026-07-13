@@ -8,9 +8,12 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
 import io.kotest.matchers.string.shouldStartWith
+import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.pipeline.NameMangler
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.pipeline.KextractTool
+import org.graphiks.kextract.pipeline.Logger
+import org.graphiks.kextract.pipeline.Options
 import java.nio.file.Files
 
 /**
@@ -35,6 +38,28 @@ class GeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    fun generateKmpFile(csource: String, sourceSet: String, suffix: String, pkg: String = "test"): String {
+        val tmp = Files.createTempFile("kextract_test_", ".h")
+        try {
+            tmp.toFile().writeText(csource)
+            val output = Files.createTempDirectory("kextract_test_out_")
+            KextractTool(Logger.DEFAULT).runGeneration(
+                listOf(tmp.toString()),
+                Options(targetPackage = pkg, outputDir = output.toString(), multiplatform = true)
+            ) shouldBe KextractTool.SUCCESS
+            val className = tmp.fileName.toString()
+                .substringAfterLast('/')
+                .replace(Regex("[^a-zA-Z0-9_]"), "_")
+                .replace(Regex("^\\d+"), "_")
+            return output.resolve("$sourceSet/kotlin/${pkg.replace('.', '/')}/$className$suffix.kt").toFile().readText()
+        } finally {
+            Files.deleteIfExists(tmp)
+        }
+    }
+
+    fun generateCommon(csource: String, pkg: String = "test"): String =
+        generateKmpFile(csource, "commonMain", "Common", pkg)
+
     "Package declaration" - {
         "should emit package when target package is set" {
             val src = generate("int add(int a, int b);", pkg = "com.example")
@@ -44,6 +69,146 @@ class GeneratorIntegrationTest : FreeSpec({
         "should omit package line when target package is empty" {
             val src = generate("int add(int a, int b);", pkg = "")
             src shouldNotContain "package "
+        }
+    }
+
+    "KMP bitflag generation" - {
+        "emits static const values for WGPUFlags aliases" {
+            val src = generateCommon("""
+                typedef unsigned long long WGPUFlags;
+                typedef WGPUFlags WGPUTextureUsage;
+                static const WGPUTextureUsage WGPUTextureUsage_None = 0x0000000000000000;
+                static const WGPUTextureUsage WGPUTextureUsage_CopySrc = 0x0000000000000001;
+                static const WGPUTextureUsage WGPUTextureUsage_CopyDst = 0x0000000000000002;
+            """.trimIndent())
+
+            src shouldContain "typealias WGPUTextureUsage = ULong"
+            src shouldContain "const val WGPUTextureUsage_None : WGPUTextureUsage = 0uL"
+            src shouldContain "const val WGPUTextureUsage_CopySrc : WGPUTextureUsage = 1uL"
+            src shouldContain "const val WGPUTextureUsage_CopyDst : WGPUTextureUsage = 2uL"
+        }
+    }
+
+    "KMP native display handle generation" - {
+        "emits anonymous union accessors for WGPUNativeDisplayHandle" {
+            val header = """
+                typedef enum WGPUNativeDisplayHandleType {
+                    WGPUNativeDisplayHandleType_Xlib = 1,
+                    WGPUNativeDisplayHandleType_Xcb = 2,
+                    WGPUNativeDisplayHandleType_Wayland = 3
+                } WGPUNativeDisplayHandleType;
+                typedef struct WGPUXlibDisplayHandle { void* display; int screen; } WGPUXlibDisplayHandle;
+                typedef struct WGPUXcbDisplayHandle { void* connection; int screen; } WGPUXcbDisplayHandle;
+                typedef struct WGPUWaylandDisplayHandle { void* display; } WGPUWaylandDisplayHandle;
+                typedef struct WGPUNativeDisplayHandle {
+                    WGPUNativeDisplayHandleType type;
+                    union {
+                        WGPUXlibDisplayHandle xlib;
+                        WGPUXcbDisplayHandle xcb;
+                        WGPUWaylandDisplayHandle wayland;
+                    } data;
+                } WGPUNativeDisplayHandle;
+            """.trimIndent()
+
+            val common = generateCommon(header)
+            val jvm = generateKmpFile(header, "jvmMain", "Jvm")
+
+            common shouldContain "expect interface WGPUNativeDisplayHandle"
+            common shouldContain "var type: WGPUNativeDisplayHandleType"
+            common shouldContain "val xlib: WGPUXlibDisplayHandle?"
+            common shouldContain "fun setXlib(value: WGPUXlibDisplayHandle)"
+            common shouldContain "val xcb: WGPUXcbDisplayHandle?"
+            common shouldContain "fun setXcb(value: WGPUXcbDisplayHandle)"
+            common shouldContain "val wayland: WGPUWaylandDisplayHandle?"
+            common shouldContain "fun setWayland(value: WGPUWaylandDisplayHandle)"
+
+            jvm shouldContain "actual interface WGPUNativeDisplayHandle : CStructure"
+            jvm shouldContain "MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_BYTE).withName(\"value\")"
+            jvm shouldContain "private val valueOffset: Long = layout.byteOffset(groupElement(\"value\"))"
+            jvm shouldContain "get() = if (type == WGPUNativeDisplayHandleType_Xlib) WGPUXlibDisplayHandle"
+            jvm shouldContain "type = WGPUNativeDisplayHandleType_Xlib"
+            jvm shouldContain "MemorySegment.copy(value.handler.handler, 0L, handler.handler, valueOffset, WGPUXlibDisplayHandle.layout.byteSize())"
+        }
+    }
+
+    "KMP function generation" - {
+        "emits common and JVM wrappers for WGPU functions" {
+            val header = """
+                typedef struct WGPUDeviceImpl* WGPUDevice;
+                typedef struct WGPUQueueImpl* WGPUQueue;
+                typedef struct WGPUShaderModuleImpl* WGPUShaderModule;
+                struct WGPUShaderModuleDescriptor;
+                typedef unsigned int WGPUBool;
+                typedef unsigned long long WGPUSubmissionIndex;
+                typedef struct WGPUShaderModuleDescriptor {
+                    int label;
+                } WGPUShaderModuleDescriptor;
+                typedef struct WGPUDeviceBinding {
+                    WGPUDevice device;
+                } WGPUDeviceBinding;
+                WGPUQueue wgpuDeviceGetQueue(WGPUDevice device);
+                WGPUShaderModule wgpuDeviceCreateShaderModule(WGPUDevice device, WGPUShaderModuleDescriptor const * descriptor);
+                WGPUBool wgpuDevicePoll(WGPUDevice device, WGPUBool wait, WGPUSubmissionIndex const * submissionIndex);
+            """.trimIndent()
+
+            val common = generateCommon(header)
+            val jvm = generateKmpFile(header, "jvmMain", "Jvm")
+
+            common shouldContain "expect value class WGPUDevice(val handler: NativeAddress)"
+            common shouldContain "expect value class WGPUQueue(val handler: NativeAddress)"
+            common shouldContain "expect value class WGPUShaderModule(val handler: NativeAddress)"
+            common shouldNotContain "expect interface WGPUDeviceImpl"
+            common shouldNotContain "typealias WGPUDevice = WGPUDeviceImpl"
+            common shouldContain "var device: WGPUDevice?"
+            jvm shouldContain "@kotlin.jvm.JvmInline"
+            jvm shouldContain "actual value class WGPUDevice actual constructor(actual val handler: NativeAddress)"
+            jvm shouldNotContain "actual interface WGPUDeviceImpl"
+            jvm shouldNotContain "typealias WGPUDevice = WGPUDeviceImpl"
+            jvm shouldContain "actual var device: WGPUDevice?"
+            jvm shouldContain "?.let { WGPUDevice(it) }"
+            common shouldContain "expect fun wgpuDeviceGetQueue(device: WGPUDevice?): WGPUQueue?"
+            common shouldContain "expect fun wgpuDeviceCreateShaderModule(device: WGPUDevice?, descriptor: WGPUShaderModuleDescriptor?): WGPUShaderModule?"
+            common shouldContain "expect fun wgpuDevicePoll(device: WGPUDevice?, wait: UInt, submissionIndex: NativeAddress?): UInt"
+            common shouldNotContain "submissionIndex: WGPUSubmissionIndex?"
+            jvm shouldContain "private val wgpuDeviceGetQueue_DESC: FunctionDescriptor = FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)"
+            jvm shouldContain "actual fun wgpuDeviceGetQueue(device: WGPUDevice?): WGPUQueue?"
+            jvm shouldContain "actual fun wgpuDeviceCreateShaderModule(device: WGPUDevice?, descriptor: WGPUShaderModuleDescriptor?): WGPUShaderModule?"
+            jvm shouldContain "actual fun wgpuDevicePoll(device: WGPUDevice?, wait: UInt, submissionIndex: NativeAddress?): UInt"
+            jvm shouldNotContain "submissionIndex?.handler?.handler"
+            jvm shouldContain "findOrThrow(\"wgpuDeviceGetQueue\")"
+            jvm shouldContain "device?.handler?.handler ?: MemorySegment.NULL"
+            jvm shouldContain "?.let { WGPUQueue(it) }"
+        }
+
+        "emits typed callback holders and convenience overloads" {
+            val header = """
+                typedef enum WGPULogLevel {
+                    WGPULogLevel_Off = 0,
+                    WGPULogLevel_Error = 1
+                } WGPULogLevel;
+                typedef struct WGPUStringView {
+                    char const * data;
+                    unsigned long long length;
+                } WGPUStringView;
+                typedef void (*WGPULogCallback)(WGPULogLevel level, WGPUStringView message, void * userdata);
+                void wgpuSetLogCallback(WGPULogCallback callback, void * userdata);
+            """.trimIndent()
+
+            val common = generateCommon(header)
+            val jvm = generateKmpFile(header, "jvmMain", "Jvm")
+
+            common shouldContain "expect class WGPULogCallback : AutoCloseable"
+            common shouldContain "fun allocate(callback: (level: WGPULogLevel, message: WGPUStringView, userdata: NativeAddress?) -> Unit): WGPULogCallback"
+            common shouldContain "expect fun wgpuSetLogCallback(callback: WGPULogCallback?, userdata: NativeAddress?): Unit"
+            common shouldContain "fun wgpuSetLogCallback(userdata: NativeAddress? = null, callback: (level: WGPULogLevel, message: WGPUStringView, userdata: NativeAddress?) -> Unit): WGPULogCallback"
+            common shouldNotContain "callback: NativeAddress?"
+
+            jvm shouldContain "actual class WGPULogCallback"
+            jvm shouldContain "actual fun allocate(callback: (level: WGPULogLevel, message: WGPUStringView, userdata: NativeAddress?) -> Unit): WGPULogCallback"
+            jvm shouldContain "Linker.nativeLinker().upcallStub"
+            jvm shouldContain "actual fun wgpuSetLogCallback(callback: WGPULogCallback?, userdata: NativeAddress?): Unit"
+            jvm shouldContain "callback?.handler?.handler ?: MemorySegment.NULL"
+            jvm shouldNotContain "callback: NativeAddress?"
         }
     }
 
@@ -182,6 +347,19 @@ class GeneratorIntegrationTest : FreeSpec({
     }
 
     "Constant generation" - {
+        "initialized mutable globals remain variables" {
+            val tmp = Files.createTempFile("kextract_mutable_global_", ".h")
+            try {
+                tmp.toFile().writeText("int counter = 1;")
+                val parsed = KextractTool.parse(listOf(tmp.toString()))
+                val counter = parsed.members().single { it.name() == "counter" }
+
+                (counter is Declaration.Variable) shouldBe true
+            } finally {
+                Files.deleteIfExists(tmp)
+            }
+        }
+
         "integer constant generates a fun returning Int" {
             val src = generate("#define MAX_SIZE 1024")
 

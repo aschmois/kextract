@@ -3,6 +3,10 @@ package org.graphiks.kextract.kotlin
 
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.cli.DllMap
+import org.graphiks.kextract.kotlin.builders.KotlinKmpAndroidBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinKmpCommonBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinKmpJvmBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinKmpNativeBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinToplevelBuilder
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.objc.ObjCRuntimeTemplate
@@ -39,19 +43,33 @@ class KotlinGenerator {
         win32Mode: Boolean = false,
         dllMap: DllMap? = null,
         useInitMethod: Boolean = false,
+        multiplatform: Boolean = false,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
+        if (multiplatform) return generateKmp(scoped, targetPackage, className)
+
         val toplevel = KotlinToplevelBuilder(
             targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput, variadicArgs,
-            win32Mode, dllMap, useInitMethod
+            win32Mode, dllMap, useInitMethod,
         )
         scoped.accept(toplevel)
-        val files = toplevel.getFiles().toMutableList()
-        if (toplevel.needsObjCRuntime) {
-            files.add(ObjCRuntimeTemplate.generate(targetPackage))
-            files.add(ObjCSubclassingTemplate.generate(targetPackage))
+        return toplevel.getFiles().toMutableList().apply {
+            if (toplevel.needsObjCRuntime) {
+                add(ObjCRuntimeTemplate.generate(targetPackage))
+                add(ObjCSubclassingTemplate.generate(targetPackage))
+            }
         }
-        return files
+    }
+
+    private fun generateKmp(
+        scoped: Declaration.Scoped,
+        targetPackage: String,
+        className: String,
+    ): List<KotlinSourceFile> = buildList {
+        KotlinKmpCommonBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpJvmBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpAndroidBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpNativeBuilder(targetPackage, className).also { scoped.accept(it); addAll(it.getFiles()) }
     }
 
     private fun sanitizeClassName(name: String): String =

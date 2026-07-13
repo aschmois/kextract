@@ -117,6 +117,10 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Generate init() method instead of eager static initializers"
     ).flag()
 
+    val multiplatform by option("-m", "--multiplatform",
+        help = "Generate Kotlin Multiplatform bindings using the kffi runtime",
+    ).flag()
+
     // ── Positional ───────────────────────────────────────────────────────────
 
     val headers by argument("headers", help = "C/ObjC header files to process").multiple(required = true)
@@ -198,6 +202,7 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             win32Mode          = win32Mode,
             dllMap             = dllMap,
             useInitMethod      = initMethod,
+            multiplatform      = multiplatform,
         )
 
         val exitCode = KextractTool(logger).runGeneration(headers, options)

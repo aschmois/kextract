@@ -12,6 +12,7 @@ import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.clang.Cursor
 import org.graphiks.kextract.clang.CursorKind
 import org.graphiks.kextract.clang.CursorLanguage
+import org.graphiks.kextract.clang.EvalResult
 import org.graphiks.kextract.clang.LinkageKind
 import org.graphiks.kextract.clang.PrintingPolicy
 import org.graphiks.kextract.clang.PrintingPolicyProperty
@@ -97,7 +98,7 @@ internal class TreeMaker {
             CursorKind.StructDecl -> createRecord(c, Declaration.Scoped.Kind.STRUCT)
             CursorKind.UnionDecl -> createRecord(c, Declaration.Scoped.Kind.UNION)
             CursorKind.TypedefDecl -> createTypedefNew(c)
-            CursorKind.VarDecl -> createVar(c, Declaration.Variable.Kind.GLOBAL)
+            CursorKind.VarDecl -> createGlobalVar(c)
             // Objective-C declarations
             CursorKind.ObjCInterfaceDecl -> createObjCClass(c)
             CursorKind.ObjCProtocolDecl  -> createObjCProtocol(c)
@@ -361,6 +362,22 @@ internal class TreeMaker {
         checkCursorAnyNew(c, CursorKind.VarDecl, CursorKind.FieldDecl, CursorKind.ParmDecl)
         val type = toType(c)
         return withNestedTypesNew(Declaration.`var`(kind, CursorPosition.of(c), c.spelling(), type), c, false)
+    }
+
+    private fun createGlobalVar(c: Cursor): Declaration {
+        if (c.isBitField()) throw AssertionError("Cannot get here!")
+        checkCursorNew(c, CursorKind.VarDecl)
+        val type = toType(c)
+        if (c.type().isConstQualifierdType()) {
+            val initializer = c.getVarDeclInitializer()
+            val evaluated = if (initializer.isInvalid()) c.eval() else initializer.eval()
+            evaluated.use { result ->
+                if (result.getKind() == EvalResult.Kind.Integral) {
+                    return Declaration.constant(CursorPosition.of(c), c.spelling(), result.getAsInt(), type)
+                }
+            }
+        }
+        return withNestedTypesNew(Declaration.`var`(Declaration.Variable.Kind.GLOBAL, CursorPosition.of(c), c.spelling(), type), c, false)
     }
 
     private fun <D : Declaration> withNestedTypesNew(d: D, c: Cursor, ignoreNestedParams: Boolean): D {

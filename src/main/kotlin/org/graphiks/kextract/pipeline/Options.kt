@@ -19,6 +19,7 @@ data class Options(
     val win32Mode: Boolean = false,
     val dllMap: DllMap? = null,
     val useInitMethod: Boolean = false,
+    val multiplatform: Boolean = false,
 ) {
     /** A shared library descriptor. */
     data class Library(val libSpec: String, val specKind: SpecKind) {
