@@ -48,6 +48,16 @@ class Cursor internal constructor(segment: MemorySegment, owner: ClangDisposable
         return LibClang.CXStrToString(s)
     }
 
+    fun rawCommentText(): String {
+        val s = clang_Cursor_getRawCommentText(LibClang.STRING_ALLOCATOR.get(), segment)
+        return LibClang.CXStrToString(s)
+    }
+
+    fun briefCommentText(): String {
+        val s = clang_Cursor_getBriefCommentText(LibClang.STRING_ALLOCATOR.get(), segment)
+        return LibClang.CXStrToString(s)
+    }
+
     fun equalCursor(other: Cursor): Boolean = clang_equalCursors(segment, other.segment) != 0
 
     fun type(): Type               = Type(clang_getCursorType(owner, segment), owner)

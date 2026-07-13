@@ -115,4 +115,16 @@ class KmpRefreshIntegrationTest : FreeSpec({
             output.toFile().deleteRecursively()
         }
     }
+
+    "KMP common output preserves C documentation" {
+        val generated = generateKmp(
+            """
+            /** Completes all work submitted before this call. */
+            void wgpuQueueDone(void);
+            """.trimIndent(),
+        )
+
+        generated.getValue("commonMain") shouldContain
+            "Completes all work submitted before this call."
+    }
 })

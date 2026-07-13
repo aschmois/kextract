@@ -3,6 +3,7 @@
 package org.graphiks.kextract.kotlin.builders
 
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
@@ -49,6 +50,7 @@ class KotlinKmpCommonBuilder(
                     return
                 }
 
+                emitKDoc(decl)
                 builder.appendLine("expect interface $structName {")
                 builder.indent()
 
@@ -56,6 +58,7 @@ class KotlinKmpCommonBuilder(
                 decl.members().filterIsInstance<Declaration.Variable>().filterNot(Skip::isPresent).forEach { field ->
                     val fieldName = field.name()
                     val fieldType = typeMapper.mapType(field.type())
+                    emitKDoc(field)
                     if (fieldType == "CString") {
                         builder.appendLine("var $fieldName: CString?")
                     } else if (fieldType.startsWith("ArrayHolder")) {
@@ -111,6 +114,7 @@ class KotlinKmpCommonBuilder(
     private fun emitEnumClass(name: String, constants: List<Declaration.Constant>) {
         builder.appendLine("typealias ${name} = UInt")
         for (c in constants) {
+            emitKDoc(c)
             builder.appendLine("const val ${c.name()} : ${name} = ${c.value().toLongValue()}u")
         }
         builder.appendLine()
@@ -125,6 +129,7 @@ class KotlinKmpCommonBuilder(
             builder.appendLine("companion object {")
             builder.indent()
             for (c in constants) {
+                emitKDoc(c)
                 builder.appendLine("val ${c.name()} = ${name}(${c.value().toLongValue().toKotlinLongLiteral()})")
             }
             builder.unindent()
@@ -159,10 +164,12 @@ class KotlinKmpCommonBuilder(
             val flagName = typedef.name()
             if (!generatedNames.add(flagName)) return@forEach
 
+            emitKDoc(typedef)
             builder.appendLine("typealias $flagName = ULong")
             constants
                 .filter { it.name().startsWith("${flagName}_") }
                 .forEach { constant ->
+                    emitKDoc(constant)
                     builder.appendLine("const val ${constant.name()} : $flagName = ${constant.value().toLongValue().toKotlinULongLiteral()}")
                 }
             builder.appendLine()
@@ -176,15 +183,18 @@ class KotlinKmpCommonBuilder(
             .filterNot { it == unionField }
         val unionFields = nativeDisplayUnionFields(decl)
 
+        emitKDoc(decl)
         builder.appendLine("expect interface WGPUNativeDisplayHandle {")
         builder.indent()
 
         fields.forEach { field ->
+            emitKDoc(field)
             builder.appendLine("var ${field.name()}: ${typeMapper.mapType(field.type())}")
         }
         unionFields.forEach { field ->
             val type = typeMapper.mapType(field.type())
             val setter = field.name().replaceFirstChar { it.titlecase() }
+            emitKDoc(field)
             builder.appendLine("val ${field.name()}: $type?")
             builder.appendLine("fun set$setter(value: $type)")
         }
@@ -237,6 +247,7 @@ class KotlinKmpCommonBuilder(
             val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
             "$name: ${typeMapper.mapFunctionType(param.type())}"
         }.joinToString(", ")
+        emitKDoc(decl)
         builder.appendLine("expect fun ${decl.name()}($params): $returnType")
         builder.appendLine()
         emitCallbackConvenienceOverload(decl)
@@ -260,6 +271,7 @@ class KotlinKmpCommonBuilder(
                 if (pointeeName.isNotEmpty() && pointeeName.endsWith("Impl")) {
                     opaqueHandleAliases[pointeeName] = name
                     if (!generatedNames.add(name)) return
+                    emitKDoc(decl)
                     builder.appendLine("expect value class $name(val handler: NativeAddress)")
                     builder.appendLine()
                 }
@@ -272,6 +284,44 @@ class KotlinKmpCommonBuilder(
     override fun visitObjCCategory(decl: Declaration.ObjCCategory) {}
 
     fun getFiles(): List<KotlinSourceFile> = files
+
+    private fun emitKDoc(decl: Declaration) {
+        emitKDoc(DeclarationImpl.SourceComment.get(decl))
+    }
+
+    private fun emitKDoc(comment: DeclarationImpl.SourceComment?) {
+        val text = normalizeKDoc(comment ?: return) ?: return
+        builder.appendLine("/**")
+        text.lines().forEach { line ->
+            if (line.isBlank()) {
+                builder.appendLine(" *")
+            } else {
+                builder.appendLine(" * ${line.replace("*/", "* /").replace("/*", "/ *")}")
+            }
+        }
+        builder.appendLine(" */")
+    }
+
+    private fun normalizeKDoc(comment: DeclarationImpl.SourceComment): String? {
+        val source = comment.raw.takeIf { it.isNotBlank() } ?: comment.brief
+        val lines = source.trim()
+            .removePrefix("/**")
+            .removePrefix("/*!")
+            .removePrefix("/*")
+            .removeSuffix("*/")
+            .lines()
+            .map { line ->
+                line.trim()
+                    .removePrefix("///")
+                    .removePrefix("//!")
+                    .removePrefix("//")
+                    .removePrefix("*")
+                    .trim()
+            }
+            .dropWhile { it.isBlank() }
+            .dropLastWhile { it.isBlank() }
+        return lines.joinToString("\n").takeIf { it.isNotBlank() }
+    }
 
     private fun emitCallbackExpect(name: String, function: Type.Function) {
         builder.appendLine("expect class $name : AutoCloseable {")
