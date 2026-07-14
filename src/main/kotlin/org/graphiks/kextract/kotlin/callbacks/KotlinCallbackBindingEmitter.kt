@@ -20,30 +20,76 @@ class KotlinCallbackBindingEmitter(
         callbackInfoBindings.forEach { emitCallbackInfoFactory(builder, it, callbackModelsByCanonicalId) }
     }
 
-    fun emitJvm(builder: SourceBuilder, bindings: List<ValidatedDirectFunctionBinding>) {
+    fun emitJvm(
+        builder: SourceBuilder,
+        bindings: List<ValidatedDirectFunctionBinding>,
+        toRawArgument: (String, Type) -> String,
+    ) {
         bindings.forEach { binding ->
             val name = binding.function.name()
+            val parameters = applicationParameters(binding)
             builder.appendLine("@Suppress(\"UNUSED_VARIABLE\")")
-            builder.appendLine("internal actual fun ${preflightName(binding)}() {")
+            emitPreflightHeader(builder, binding, parameters, actual = true)
             builder.indent()
+            parameters.forEach { parameter ->
+                builder.appendLine(
+                    "val ${parameter.preparedName} = ${toRawArgument(parameter.name, parameter.variable.type())}",
+                )
+            }
             builder.appendLine("val address = ${name}_ADDR")
             builder.appendLine("val handle = ${name}_HANDLE")
+            builder.appendLine("return { ${preparedCallLambdaParameters(binding)} ->")
+            builder.indent()
+            builder.appendLine("handle.invokeExact(")
+            builder.indent()
+            preparedPlatformArguments(binding, parameters, toRawArgument).forEach { argument ->
+                builder.appendLine("$argument,")
+            }
+            builder.unindent()
+            builder.appendLine(")")
+            builder.unindent()
+            builder.appendLine("}")
             builder.unindent()
             builder.appendLine("}")
             builder.appendLine()
         }
     }
 
-    fun emitNative(builder: SourceBuilder, bindings: List<ValidatedDirectFunctionBinding>) {
+    fun emitNative(
+        builder: SourceBuilder,
+        bindings: List<ValidatedDirectFunctionBinding>,
+        toNativeArgument: (String, Type) -> String,
+    ) {
         bindings.forEach { binding ->
-            builder.appendLine("internal actual fun ${preflightName(binding)}() = Unit")
+            val parameters = applicationParameters(binding)
+            emitPreflightHeader(builder, binding, parameters, actual = true)
+            builder.indent()
+            parameters.forEach { parameter ->
+                builder.appendLine(
+                    "val ${parameter.preparedName} = ${toNativeArgument(parameter.name, parameter.variable.type())}",
+                )
+            }
+            builder.appendLine("return { ${preparedCallLambdaParameters(binding)} ->")
+            builder.indent()
+            builder.appendLine("webgpu.native.${binding.function.name()}(")
+            builder.indent()
+            preparedPlatformArguments(binding, parameters, toNativeArgument).forEach { argument ->
+                builder.appendLine("$argument,")
+            }
+            builder.unindent()
+            builder.appendLine(")")
+            builder.unindent()
+            builder.appendLine("}")
+            builder.unindent()
+            builder.appendLine("}")
             builder.appendLine()
         }
     }
 
     fun emitAndroid(builder: SourceBuilder, bindings: List<ValidatedDirectFunctionBinding>) {
         bindings.forEach { binding ->
-            builder.appendLine("internal actual fun ${preflightName(binding)}() {")
+            val parameters = applicationParameters(binding)
+            emitPreflightHeader(builder, binding, parameters, actual = true, returnType = "Nothing")
             builder.indent()
             builder.appendLine("throw UnsupportedOperationException(")
             builder.indent()
@@ -61,7 +107,7 @@ class KotlinCallbackBindingEmitter(
         binding: ValidatedDirectFunctionBinding,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
-        builder.appendLine("internal expect fun ${preflightName(binding)}()")
+        emitPreflightHeader(builder, binding, applicationParameters(binding), actual = false)
         builder.appendLine()
         emitDirectRegistrationOverload(builder, binding, callbackModelsByCanonicalId)
         if (binding.routingUserdataParameter == null) {
@@ -86,8 +132,7 @@ class KotlinCallbackBindingEmitter(
         builder.unindent()
         builder.appendLine("): CallbackRegistration<$callbackType> {")
         builder.indent()
-        emitValidatedLocals(builder, parameters)
-        builder.appendLine("${preflightName(binding)}()")
+        builder.appendLine("val preparedCall = ${preflightCall(binding, parameters)}")
         builder.appendLine("val prepared = $callbackType.prepare(")
         builder.indent()
         builder.appendLine("policy = policy,")
@@ -97,7 +142,7 @@ class KotlinCallbackBindingEmitter(
         builder.appendLine(")")
         builder.appendLine("return CallbackRuntime.activateForNativeCall(prepared) { registration ->")
         builder.indent()
-        builder.appendLine(rawCall(binding, parameters, "registration"))
+        builder.appendLine(preparedCallInvocation(binding, "registration"))
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
@@ -122,8 +167,7 @@ class KotlinCallbackBindingEmitter(
         builder.unindent()
         builder.appendLine("): CallbackRegistration<$callbackType> {")
         builder.indent()
-        emitValidatedLocals(builder, parameters)
-        builder.appendLine("${preflightName(binding)}()")
+        builder.appendLine("val preparedCall = ${preflightCall(binding, parameters)}")
         builder.appendLine("val registration = $callbackType.rearmAfterNativeQuiescence(")
         builder.indent()
         builder.appendLine("policy = policy,")
@@ -133,7 +177,7 @@ class KotlinCallbackBindingEmitter(
         builder.appendLine(")")
         builder.appendLine("try {")
         builder.indent()
-        builder.appendLine(rawCall(binding, parameters, "registration"))
+        builder.appendLine(preparedCallInvocation(binding, "registration"))
         builder.appendLine("return registration")
         builder.unindent()
         builder.appendLine("} catch (failure: Throwable) {")
@@ -216,33 +260,63 @@ class KotlinCallbackBindingEmitter(
         builder.appendLine("callback: $callbackType,")
     }
 
-    private fun emitValidatedLocals(
+    private fun emitPreflightHeader(
         builder: SourceBuilder,
+        binding: ValidatedDirectFunctionBinding,
         parameters: List<RenderedParameter>,
+        actual: Boolean,
+        returnType: String = preparedCallType(binding),
     ) {
-        parameters.forEach { parameter ->
-            builder.appendLine("val ${parameter.validatedName} = ${parameter.name}")
+        val modifier = if (actual) "actual" else "expect"
+        if (parameters.isEmpty()) {
+            val suffix = if (actual) " {" else ""
+            builder.appendLine("internal $modifier fun ${preflightName(binding)}(): $returnType$suffix")
+            return
         }
+        builder.appendLine("internal $modifier fun ${preflightName(binding)}(")
+        builder.indent()
+        parameters.forEach { parameter ->
+            builder.appendLine("${parameter.name}: ${mapType(parameter.variable.type())},")
+        }
+        builder.unindent()
+        val suffix = if (actual) " {" else ""
+        builder.appendLine("): $returnType$suffix")
     }
 
-    private fun rawCall(
+    private fun preflightCall(
         binding: ValidatedDirectFunctionBinding,
         applicationParameters: List<RenderedParameter>,
+    ): String = "${preflightName(binding)}(${applicationParameters.joinToString(", ", transform = RenderedParameter::name)})"
+
+    private fun preparedCallInvocation(
+        binding: ValidatedDirectFunctionBinding,
         registrationName: String,
     ): String {
+        val arguments = buildList {
+            add("$registrationName.callback")
+            if (binding.routingUserdataParameter != null) add("$registrationName.userdata")
+        }
+        return "preparedCall(${arguments.joinToString(", ")})"
+    }
+
+    private fun preparedPlatformArguments(
+        binding: ValidatedDirectFunctionBinding,
+        applicationParameters: List<RenderedParameter>,
+        convertAddress: (String, Type) -> String,
+    ): List<String> {
         val arguments = binding.function.parameters().map { parameter ->
             when {
-                parameter === binding.callbackParameter -> "$registrationName.callback"
-                parameter === binding.routingUserdataParameter -> "$registrationName.userdata"
-                else -> applicationParameters.single { it.variable === parameter }.validatedName
+                parameter === binding.callbackParameter -> convertAddress("callback", parameter.type())
+                parameter === binding.routingUserdataParameter -> convertAddress("userdata", parameter.type())
+                else -> applicationParameters.single { it.variable === parameter }.preparedName
             }
         }
-        return "${binding.function.name()}(${arguments.joinToString(", ")})"
+        return arguments
     }
 
     private fun applicationParameters(binding: ValidatedDirectFunctionBinding): List<RenderedParameter> {
         val names = KotlinIdentifierAllocator(RESERVED_PARAMETER_NAMES)
-        return binding.function.parameters().mapIndexedNotNull { index, parameter ->
+        val parameters = binding.function.parameters().mapIndexedNotNull { index, parameter ->
             if (parameter === binding.callbackParameter || parameter === binding.routingUserdataParameter) {
                 null
             } else {
@@ -250,14 +324,32 @@ class KotlinCallbackBindingEmitter(
                 RenderedParameter(
                     variable = parameter,
                     name = name,
-                    validatedName = names.allocate(
-                        "validated${name.replaceFirstChar(Char::uppercaseChar)}",
-                        "validatedArg$index",
-                    ),
+                    preparedName = "",
                 )
             }
         }
+        val preparedNames = KotlinIdentifierAllocator(
+            RESERVED_PARAMETER_NAMES + parameters.map(RenderedParameter::name) + PLATFORM_LOCAL_NAMES,
+        )
+        return parameters.mapIndexed { index, parameter ->
+            parameter.copy(
+                preparedName = preparedNames.allocate(
+                    "prepared${parameter.name.replaceFirstChar(Char::uppercaseChar)}",
+                    "preparedArg$index",
+                ),
+            )
+        }
     }
+
+    private fun preparedCallLambdaParameters(binding: ValidatedDirectFunctionBinding): String =
+        if (binding.routingUserdataParameter == null) "callback" else "callback, userdata"
+
+    private fun preparedCallType(binding: ValidatedDirectFunctionBinding): String =
+        if (binding.routingUserdataParameter == null) {
+            "(NativeAddress?) -> Unit"
+        } else {
+            "(NativeAddress?, NativeAddress?) -> Unit"
+        }
 
     private fun preflightName(binding: ValidatedDirectFunctionBinding): String =
         "${binding.function.name()}CallbackBindingPreflight"
@@ -265,7 +357,7 @@ class KotlinCallbackBindingEmitter(
     private data class RenderedParameter(
         val variable: Declaration.Variable,
         val name: String,
-        val validatedName: String,
+        val preparedName: String,
     )
 
     private data class RenderedCallbackInfoParameter(
@@ -284,6 +376,12 @@ class KotlinCallbackBindingEmitter(
             "preparedCall",
             "allocator",
             "mode",
+        )
+        val PLATFORM_LOCAL_NAMES = setOf(
+            "address",
+            "handle",
+            "callback",
+            "userdata",
         )
     }
 }

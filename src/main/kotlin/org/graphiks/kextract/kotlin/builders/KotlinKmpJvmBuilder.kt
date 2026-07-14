@@ -238,6 +238,7 @@ class KotlinKmpJvmBuilder(
                 KotlinCallbackBindingEmitter(typeMapper::mapFunctionType).emitJvm(
                     builder,
                     callbackBindings.directFunctionBindings,
+                    ::toRawJvmArgument,
                 )
             }
             else -> {}

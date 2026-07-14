@@ -361,6 +361,7 @@ class KotlinKmpNativeBuilder(
                 KotlinCallbackBindingEmitter(typeMapper::mapFunctionType).emitNative(
                     builder,
                     callbackBindings.directFunctionBindings,
+                    ::toNativeArgument,
                 )
             }
             else -> {}

@@ -415,7 +415,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
                     binding.function = "function:sample_set_callback"
                     binding.callbackParameter = "callback"
                     binding.callbackType = "typedef:SampleCallback"
-                    binding.routingUserdataParameter = "userdata2"
+                    binding.routingUserdataParameter = "userdata"
                 },
                 DirectFunctionBinding().also { binding ->
                     binding.function = "function:sample_set_no_userdata_callback"
@@ -426,9 +426,14 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         }
         val generated = generateKmp(
             """
-                typedef void (*SampleCallback)(unsigned int value, void * userdata1, void * userdata2);
+                typedef struct SamplePayload { int value; } SamplePayload;
+                typedef void (*SampleCallback)(void * userdata);
                 typedef void (*NoUserdataCallback)(unsigned int value);
-                void sample_set_callback(unsigned int limit, SampleCallback callback, void * userdata2);
+                void sample_set_callback(
+                    SamplePayload payload,
+                    SampleCallback callback,
+                    void * userdata
+                );
                 void sample_set_no_userdata_callback(unsigned int limit, NoUserdataCallback callback);
             """.trimIndent(),
             config,
@@ -438,46 +443,88 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         val native = generated.getValue("nativeMain")
         val android = generated.getValue("androidMain")
 
-        common shouldContain "internal expect fun sample_set_callbackCallbackBindingPreflight()"
+        common shouldContain """
+            internal expect fun sample_set_callbackCallbackBindingPreflight(
+                payload: SamplePayload,
+            ): (NativeAddress?, NativeAddress?) -> Unit
+        """.trimIndent()
+        common shouldContain """
+            internal expect fun sample_set_no_userdata_callbackCallbackBindingPreflight(
+                limit: UInt,
+            ): (NativeAddress?) -> Unit
+        """.trimIndent()
         common shouldContain """
             fun sample_set_callback(
-                limit: UInt,
+                payload: SamplePayload,
                 policy: CallbackPolicy,
                 onError: CallbackExceptionHandler = CallbackExceptionHandler.Default,
                 callback: SampleCallback,
             ): CallbackRegistration<SampleCallback> {
         """.trimIndent()
         val safeSetter = common
-            .substringAfter("fun sample_set_callback(\n    limit: UInt,\n    policy: CallbackPolicy,")
+            .substringAfter("fun sample_set_callback(\n    payload: SamplePayload,\n    policy: CallbackPolicy,")
             .substringBefore("\n}\n")
-        safeSetter shouldContain "val validatedLimit = limit"
-        safeSetter shouldContain "sample_set_callbackCallbackBindingPreflight()"
+        safeSetter shouldContain "val preparedCall = sample_set_callbackCallbackBindingPreflight(payload)"
         safeSetter shouldContain "val prepared = SampleCallback.prepare("
         safeSetter shouldContain "return CallbackRuntime.activateForNativeCall(prepared) { registration ->"
-        safeSetter shouldContain "sample_set_callback(validatedLimit, registration.callback, registration.userdata)"
-        safeSetter shouldNotContain "userdata2: NativeAddress?"
-        (safeSetter.indexOf("val validatedLimit = limit") <
-            safeSetter.indexOf("sample_set_callbackCallbackBindingPreflight()")) shouldBe true
-        (safeSetter.indexOf("sample_set_callbackCallbackBindingPreflight()") <
+        safeSetter shouldContain "preparedCall(registration.callback, registration.userdata)"
+        safeSetter shouldNotContain "sample_set_callback(payload, registration.callback, registration.userdata)"
+        safeSetter shouldNotContain "userdata: NativeAddress?"
+        safeSetter shouldNotContain "val validatedPayload = payload"
+        (safeSetter.indexOf("val preparedCall = sample_set_callbackCallbackBindingPreflight(payload)") <
             safeSetter.indexOf("val prepared = SampleCallback.prepare(")) shouldBe true
         (safeSetter.indexOf("activateForNativeCall") <
-            safeSetter.indexOf("sample_set_callback(validatedLimit, registration.callback, registration.userdata)")) shouldBe true
+            safeSetter.indexOf("preparedCall(registration.callback, registration.userdata)")) shouldBe true
 
         common shouldContain """
             @UnsafeCallbackRearmApi
             fun rearmAfterNativeQuiescence(
         """.trimIndent()
+        val rearmSetter = common
+            .substringAfter("fun rearmAfterNativeQuiescence(\n    limit: UInt,\n    policy: CallbackPolicy,")
+            .substringBefore("\n}\n")
+        rearmSetter shouldContain
+            "val preparedCall = sample_set_no_userdata_callbackCallbackBindingPreflight(limit)"
+        rearmSetter shouldContain "preparedCall(registration.callback)"
+        rearmSetter shouldNotContain "sample_set_no_userdata_callback(limit, registration.callback)"
+        rearmSetter shouldNotContain "val validatedLimit = limit"
+        (rearmSetter.indexOf("val preparedCall = sample_set_no_userdata_callbackCallbackBindingPreflight(limit)") <
+            rearmSetter.indexOf("val registration = NoUserdataCallback.rearmAfterNativeQuiescence(")) shouldBe true
         common shouldNotContain "rearmAfterNativeQuiescence: Boolean"
         common shouldNotContain "allowRearm"
 
         jvm shouldContain """
-            internal actual fun sample_set_callbackCallbackBindingPreflight() {
+            internal actual fun sample_set_callbackCallbackBindingPreflight(
+                payload: SamplePayload,
+            ): (NativeAddress?, NativeAddress?) -> Unit {
+                val preparedPayload = payload.handler.handler
                 val address = sample_set_callback_ADDR
                 val handle = sample_set_callback_HANDLE
+                return { callback, userdata ->
+                    handle.invokeExact(
+                        preparedPayload,
+                        callback?.handler ?: MemorySegment.NULL,
+                        userdata?.handler ?: MemorySegment.NULL,
+                    )
+                }
             }
         """.trimIndent()
-        native shouldContain "internal actual fun sample_set_callbackCallbackBindingPreflight() = Unit"
-        android shouldContain "internal actual fun sample_set_callbackCallbackBindingPreflight()"
+        (jvm.indexOf("val preparedPayload = payload.handler.handler") <
+            jvm.indexOf("val address = sample_set_callback_ADDR")) shouldBe true
+        native shouldContain """
+            internal actual fun sample_set_callbackCallbackBindingPreflight(
+                payload: SamplePayload,
+            ): (NativeAddress?, NativeAddress?) -> Unit {
+                val preparedPayload = payload.toCValue()
+        """.trimIndent()
+        native shouldContain "return { callback, userdata ->"
+        native shouldContain "webgpu.native.sample_set_callback("
+        native shouldContain "preparedPayload,"
+        android shouldContain """
+            internal actual fun sample_set_callbackCallbackBindingPreflight(
+                payload: SamplePayload,
+            ): Nothing {
+        """.trimIndent()
         android shouldContain "throw UnsupportedOperationException("
         android shouldNotContain "CallbackRuntime.activateForNativeCall"
     }
