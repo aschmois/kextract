@@ -95,12 +95,19 @@ internal enum class KotlinKmpRuntimeSymbol(
     ;
 }
 
+private data class KotlinKmpJnaHelperNames(
+    val byReference: String,
+    val byValue: String,
+)
+
 internal class KotlinKmpNamePlan private constructor(
     val topLevelNames: Set<String>,
     val renderedRuntimeNames: Set<String>,
     private val runtimeNames: Map<KotlinKmpRuntimeSymbol, String>,
     private val declarationNames: IdentityHashMap<Declaration, String>,
     private val memberNames: IdentityHashMap<Declaration.Variable, String>,
+    private val jnaHelperNames: IdentityHashMap<Declaration.Scoped, KotlinKmpJnaHelperNames>,
+    private val jnaHelperNamesByRecordName: Map<String, KotlinKmpJnaHelperNames>,
 ) {
     fun runtime(symbol: KotlinKmpRuntimeSymbol): String = runtimeNames.getValue(symbol)
 
@@ -117,11 +124,20 @@ internal class KotlinKmpNamePlan private constructor(
 
     fun member(field: Declaration.Variable): String = memberNames.getValue(field)
 
+    fun jnaByReference(record: Declaration.Scoped): String = jnaHelperNames.getValue(record).byReference
+
+    fun jnaByValue(record: Declaration.Scoped): String = jnaHelperNames.getValue(record).byValue
+
+    fun jnaByReference(recordName: String): String = jnaHelperNamesByRecordName.getValue(recordName).byReference
+
+    fun jnaByValue(recordName: String): String = jnaHelperNamesByRecordName.getValue(recordName).byValue
+
     companion object {
         private val RECORD_RESERVED_MEMBERS = setOf(
             "handler",
             "Companion",
             "ByReference",
+            "ByValue",
             "layout",
             "allocate",
             "allocateArray",
@@ -143,6 +159,7 @@ internal class KotlinKmpNamePlan private constructor(
             }
             val declarationNames = IdentityHashMap<Declaration, String>()
             val memberNames = IdentityHashMap<Declaration.Variable, String>()
+            val jnaHelperNames = IdentityHashMap<Declaration.Scoped, KotlinKmpJnaHelperNames>()
 
             val collector = object {
                 fun collectType(type: Type) {
@@ -172,13 +189,18 @@ internal class KotlinKmpNamePlan private constructor(
                                 !Skip.isPresent(declaration) &&
                                 declaration.kind() in setOf(Declaration.Scoped.Kind.STRUCT, Declaration.Scoped.Kind.UNION)
                             ) {
-                                val memberAllocator = KotlinIdentifierAllocator(RECORD_RESERVED_MEMBERS)
-                                declaration.members()
+                                val fields = declaration.members()
                                     .filterIsInstance<Declaration.Variable>()
                                     .filterNot(Skip::isPresent)
-                                    .forEach { field ->
-                                        memberNames[field] = memberAllocator.allocate(field.name(), "field")
-                                    }
+                                val memberAllocator = KotlinIdentifierAllocator(RECORD_RESERVED_MEMBERS)
+                                fields.forEach { field ->
+                                    memberNames[field] = memberAllocator.allocate(field.name(), "field")
+                                }
+                                val jnaHelperAllocator = KotlinIdentifierAllocator(fields.map(Declaration.Variable::name))
+                                jnaHelperNames[declaration] = KotlinKmpJnaHelperNames(
+                                    byReference = jnaHelperAllocator.allocate("ByReference", "JnaByReference"),
+                                    byValue = jnaHelperAllocator.allocate("ByValue", "JnaByValue"),
+                                )
                             }
                             declaration.members().forEach(::collect)
                         }
@@ -186,6 +208,9 @@ internal class KotlinKmpNamePlan private constructor(
                 }
             }
             collector.collect(scoped)
+            val jnaHelperNamesByRecordName = jnaHelperNames.entries.associate { (record, names) ->
+                declarationNames.getValue(record) to names
+            }
 
             return KotlinKmpNamePlan(
                 topLevelNames = cTopLevelNames,
@@ -193,6 +218,8 @@ internal class KotlinKmpNamePlan private constructor(
                 runtimeNames = runtimeNames,
                 declarationNames = declarationNames,
                 memberNames = memberNames,
+                jnaHelperNames = jnaHelperNames,
+                jnaHelperNamesByRecordName = jnaHelperNamesByRecordName,
             )
         }
     }

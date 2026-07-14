@@ -14,6 +14,7 @@ internal data class GeneratedKmpSources(
     val common: String,
     val jvm: String,
     val native: String,
+    val android: String,
 )
 
 internal fun generateKmpSources(
@@ -37,6 +38,7 @@ internal fun generateKmpSources(
 
         fun readSourceSet(name: String): String = Files.walk(output.resolve(name)).use { paths ->
             paths.filter { it.fileName.toString().endsWith(".kt") }
+                .sorted(Comparator.comparing { it.toString() })
                 .map { it.toFile().readText() }
                 .toList()
                 .joinToString("\n")
@@ -46,6 +48,7 @@ internal fun generateKmpSources(
             common = readSourceSet("commonMain"),
             jvm = readSourceSet("jvmMain"),
             native = readSourceSet("nativeMain"),
+            android = readSourceSet("androidMain"),
         )
     } finally {
         input.toFile().delete()

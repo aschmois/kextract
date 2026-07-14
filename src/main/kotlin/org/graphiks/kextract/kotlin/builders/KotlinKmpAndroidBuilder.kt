@@ -81,11 +81,15 @@ internal class KotlinKmpAndroidBuilder(
                 if (!generatedNames.add(structName)) return
                 generatedStructNames.add(structName)
                 if (structName == "WGPUNativeDisplayHandle") {
-                    emitNativeDisplayHandle()
+                    emitNativeDisplayHandle(decl)
                     return
                 }
 
                 val fields = decl.members().filterIsInstance<Declaration.Variable>().filterNot(Skip::isPresent)
+                val jnaByReference = namePlan.jnaByReference(decl)
+                val jnaByValue = namePlan.jnaByValue(decl)
+                val rawJnaByReference = "$androidPackage.$structName.$jnaByReference"
+                val rawJnaByValue = "$androidPackage.$structName.$jnaByValue"
 
                 // 1. Generate the Bridge Actual Interface
                 builder.appendLine("actual interface $structName {")
@@ -111,13 +115,13 @@ internal class KotlinKmpAndroidBuilder(
                 builder.indent()
                 builder.appendLine("actual operator fun invoke(address: $nativeAddress): $structName {")
                 builder.indent()
-                builder.appendLine("return ByReference($androidPackage.$structName.ByReference(address))")
+                builder.appendLine("return ByReference($rawJnaByReference(address))")
                 builder.unindent()
                 builder.appendLine("}")
                 builder.appendLine()
                 builder.appendLine("actual fun allocate(allocator: $memoryAllocator): $structName {")
                 builder.indent()
-                builder.appendLine("val ref = $androidPackage.$structName.ByReference()")
+                builder.appendLine("val ref = $rawJnaByReference()")
                 builder.appendLine("allocator.register(ref)")
                 builder.appendLine("return ByReference(ref)")
                 builder.unindent()
@@ -125,11 +129,11 @@ internal class KotlinKmpAndroidBuilder(
                 builder.appendLine()
                 builder.appendLine("actual fun allocateArray(allocator: $memoryAllocator, size: UInt, provider: (UInt, $structName) -> Unit): $arrayHolder<$structName> {")
                 builder.indent()
-                builder.appendLine("val ref = $androidPackage.$structName.ByValue()")
+                builder.appendLine("val ref = $rawJnaByValue()")
                 builder.appendLine("val array = ref.toArray(size.toInt())")
                 builder.appendLine("array.forEachIndexed { index, struct ->")
                 builder.indent()
-                builder.appendLine("provider(index.toUInt(), ByValue(struct as $androidPackage.$structName.ByValue))")
+                builder.appendLine("provider(index.toUInt(), ByValue(struct as $rawJnaByValue))")
                 builder.unindent()
                 builder.appendLine("}")
                 builder.appendLine("val pointer = if (size == 0u) com.sun.jna.Pointer.NULL else array.first().pointer")
@@ -141,7 +145,7 @@ internal class KotlinKmpAndroidBuilder(
 
                 // Generate ByReference Implementation
                 builder.appendLine()
-                builder.appendLine("class ByReference(val handle: $androidPackage.$structName.ByReference = $androidPackage.$structName.ByReference(com.sun.jna.Pointer.NULL)) : $structName {")
+                builder.appendLine("class ByReference(val handle: $rawJnaByReference = $rawJnaByReference(com.sun.jna.Pointer.NULL)) : $structName {")
                 builder.indent()
                 fields.forEach { field ->
                     val fieldName = field.name()
@@ -170,23 +174,24 @@ internal class KotlinKmpAndroidBuilder(
                         val isOpt = fieldType == cString || fieldType.startsWith(arrayHolder) || fieldType.endsWith("?")
                         val nonOpt = fieldType.removeSuffix("?")
                         val jnaType = mapJnaType(field.type())
+                        val rawFieldJnaByReference = requireNotNull(jnaByReferenceType(field.type()))
                         if (fieldType.startsWith(arrayHolder)) {
                             builder.appendLine("get() = handle.$fieldName?.let { $nonOpt.ByReference(it) }")
                             builder.appendLine("set(value) { handle.$fieldName = (value as? $nonOpt.ByReference)?.handle }")
                         } else if (nonOpt == "WGPUNativeDisplayHandle") {
                             if (isOpt) {
-                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($androidPackage.WGPUNativeDisplayHandle.ByReference(it)) }")
+                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($rawFieldJnaByReference(it)) }")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as? WGPUNativeDisplayHandle.ByReference)?.handle?.pointer }")
                             } else {
-                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($androidPackage.WGPUNativeDisplayHandle.ByReference(it)) } ?: error(\"$fieldName is null\")")
+                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($rawFieldJnaByReference(it)) } ?: error(\"$fieldName is null\")")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as WGPUNativeDisplayHandle.ByReference).handle.pointer }")
                             }
                         } else if (jnaType == "$jnaPointer?") {
                             if (isOpt) {
-                                builder.appendLine("get() = handle.$fieldName?.let { $nonOpt.ByReference($androidPackage.$nonOpt.ByReference(it)) }")
+                                builder.appendLine("get() = handle.$fieldName?.let { $nonOpt.ByReference($rawFieldJnaByReference(it)) }")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as? $nonOpt.ByReference)?.handle?.pointer }")
                             } else {
-                                builder.appendLine("get() = handle.$fieldName?.let { $fieldType.ByReference($androidPackage.$fieldType.ByReference(it)) } ?: error(\"$fieldName is null\")")
+                                builder.appendLine("get() = handle.$fieldName?.let { $fieldType.ByReference($rawFieldJnaByReference(it)) } ?: error(\"$fieldName is null\")")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as $fieldType.ByReference).handle.pointer }")
                             }
                         } else {
@@ -269,7 +274,7 @@ internal class KotlinKmpAndroidBuilder(
 
                 // Generate ByValue Implementation
                 builder.appendLine()
-                builder.appendLine("class ByValue(val handle: $androidPackage.$structName.ByValue = $androidPackage.$structName.ByValue(com.sun.jna.Pointer.NULL)) : $structName {")
+                builder.appendLine("class ByValue(val handle: $rawJnaByValue = $rawJnaByValue(com.sun.jna.Pointer.NULL)) : $structName {")
                 builder.indent()
                 fields.forEach { field ->
                     val fieldName = field.name()
@@ -298,23 +303,24 @@ internal class KotlinKmpAndroidBuilder(
                         val isOpt = fieldType == cString || fieldType.startsWith(arrayHolder) || fieldType.endsWith("?")
                         val nonOpt = fieldType.removeSuffix("?")
                         val jnaType = mapJnaType(field.type())
+                        val rawFieldJnaByReference = requireNotNull(jnaByReferenceType(field.type()))
                         if (fieldType.startsWith(arrayHolder)) {
                             builder.appendLine("get() = handle.$fieldName?.let { $nonOpt.ByReference(it) }")
                             builder.appendLine("set(value) { handle.$fieldName = (value as? $nonOpt.ByReference)?.handle }")
                         } else if (nonOpt == "WGPUNativeDisplayHandle") {
                             if (isOpt) {
-                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($androidPackage.WGPUNativeDisplayHandle.ByReference(it)) }")
+                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($rawFieldJnaByReference(it)) }")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as? WGPUNativeDisplayHandle.ByReference)?.handle?.pointer }")
                             } else {
-                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($androidPackage.WGPUNativeDisplayHandle.ByReference(it)) } ?: error(\"$fieldName is null\")")
+                                builder.appendLine("get() = handle.$fieldName?.let { WGPUNativeDisplayHandle.ByReference($rawFieldJnaByReference(it)) } ?: error(\"$fieldName is null\")")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as WGPUNativeDisplayHandle.ByReference).handle.pointer }")
                             }
                         } else if (jnaType == "$jnaPointer?") {
                             if (isOpt) {
-                                builder.appendLine("get() = handle.$fieldName?.let { $nonOpt.ByReference($androidPackage.$nonOpt.ByReference(it)) }")
+                                builder.appendLine("get() = handle.$fieldName?.let { $nonOpt.ByReference($rawFieldJnaByReference(it)) }")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as? $nonOpt.ByReference)?.handle?.pointer }")
                             } else {
-                                builder.appendLine("get() = handle.$fieldName?.let { $fieldType.ByReference($androidPackage.$fieldType.ByReference(it)) } ?: error(\"$fieldName is null\")")
+                                builder.appendLine("get() = handle.$fieldName?.let { $fieldType.ByReference($rawFieldJnaByReference(it)) } ?: error(\"$fieldName is null\")")
                                 builder.appendLine("set(value) { handle.$fieldName = (value as $fieldType.ByReference).handle.pointer }")
                             }
                         } else {
@@ -411,8 +417,8 @@ internal class KotlinKmpAndroidBuilder(
                 }
                 jnaBuilder.appendLine("override fun getFieldOrder() = listOf<String>(${fields.joinToString(", ") { "\"${it.name()}\"" }})")
 
-                jnaBuilder.appendLine("class ByReference(pointer: $jnaPointer? = null) : $structName(pointer), $jnaStructure.ByReference")
-                jnaBuilder.appendLine("class ByValue(pointer: $jnaPointer? = null) : $structName(pointer), $jnaStructure.ByValue")
+                jnaBuilder.appendLine("class $jnaByReference(pointer: $jnaPointer? = null) : $structName(pointer), $jnaStructure.ByReference")
+                jnaBuilder.appendLine("class $jnaByValue(pointer: $jnaPointer? = null) : $structName(pointer), $jnaStructure.ByValue")
                 jnaBuilder.unindent()
                 jnaBuilder.appendLine("}")
                 jnaBuilder.appendLine()
@@ -491,7 +497,10 @@ internal class KotlinKmpAndroidBuilder(
 
     fun getFiles(): List<KotlinSourceFile> = files
 
-    private fun emitNativeDisplayHandle() {
+    private fun emitNativeDisplayHandle(decl: Declaration.Scoped) {
+        val rawJnaByReference =
+            "$androidPackage.WGPUNativeDisplayHandle.${namePlan.jnaByReference(decl)}"
+        val rawJnaByValue = "$androidPackage.WGPUNativeDisplayHandle.${namePlan.jnaByValue(decl)}"
         builder.appendLine("actual interface WGPUNativeDisplayHandle {")
         builder.indent()
         builder.appendLine("actual var type: WGPUNativeDisplayHandleType")
@@ -504,27 +513,27 @@ internal class KotlinKmpAndroidBuilder(
         builder.appendLine("actual val handler: $nativeAddress")
         builder.appendLine("actual companion object {")
         builder.indent()
-        builder.appendLine("actual operator fun invoke(address: $nativeAddress): WGPUNativeDisplayHandle = ByReference($androidPackage.WGPUNativeDisplayHandle.ByReference(address))")
+        builder.appendLine("actual operator fun invoke(address: $nativeAddress): WGPUNativeDisplayHandle = ByReference($rawJnaByReference(address))")
         builder.appendLine("actual fun allocate(allocator: $memoryAllocator): WGPUNativeDisplayHandle {")
         builder.indent()
-        builder.appendLine("val ref = $androidPackage.WGPUNativeDisplayHandle.ByReference()")
+        builder.appendLine("val ref = $rawJnaByReference()")
         builder.appendLine("allocator.register(ref)")
         builder.appendLine("return ByReference(ref)")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine("actual fun allocateArray(allocator: $memoryAllocator, size: UInt, provider: (UInt, WGPUNativeDisplayHandle) -> Unit): $arrayHolder<WGPUNativeDisplayHandle> {")
         builder.indent()
-        builder.appendLine("val ref = $androidPackage.WGPUNativeDisplayHandle.ByValue()")
+        builder.appendLine("val ref = $rawJnaByValue()")
         builder.appendLine("val array = ref.toArray(size.toInt())")
-        builder.appendLine("array.forEachIndexed { index, struct -> provider(index.toUInt(), ByValue(struct as $androidPackage.WGPUNativeDisplayHandle.ByValue)) }")
+        builder.appendLine("array.forEachIndexed { index, struct -> provider(index.toUInt(), ByValue(struct as $rawJnaByValue)) }")
         builder.appendLine("val pointer = if (size == 0u) com.sun.jna.Pointer.NULL else array.first().pointer")
         builder.appendLine("return $arrayHolder(pointer)")
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
         builder.appendLine("}")
-        emitNativeDisplayHandleAndroidImpl("ByReference", "$androidPackage.WGPUNativeDisplayHandle.ByReference")
-        emitNativeDisplayHandleAndroidImpl("ByValue", "$androidPackage.WGPUNativeDisplayHandle.ByValue")
+        emitNativeDisplayHandleAndroidImpl("ByReference", rawJnaByReference)
+        emitNativeDisplayHandleAndroidImpl("ByValue", rawJnaByValue)
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
@@ -536,13 +545,15 @@ internal class KotlinKmpAndroidBuilder(
         jnaBuilder.appendLine("override fun getFieldOrder() = listOf<String>(\"type\", \"data\")")
         jnaBuilder.appendLine("class Data : com.sun.jna.Union(), $jnaStructure.ByValue {")
         jnaBuilder.indent()
-        jnaBuilder.appendLine("@$jvmField var xlib: WGPUXlibDisplayHandle.ByValue = WGPUXlibDisplayHandle.ByValue()")
-        jnaBuilder.appendLine("@$jvmField var xcb: WGPUXcbDisplayHandle.ByValue = WGPUXcbDisplayHandle.ByValue()")
-        jnaBuilder.appendLine("@$jvmField var wayland: WGPUWaylandDisplayHandle.ByValue = WGPUWaylandDisplayHandle.ByValue()")
+        listOf("WGPUXlibDisplayHandle", "WGPUXcbDisplayHandle", "WGPUWaylandDisplayHandle").forEach { type ->
+            val field = type.removePrefix("WGPU").removeSuffix("DisplayHandle").lowercase()
+            val helper = "$type.${namePlan.jnaByValue(type)}"
+            jnaBuilder.appendLine("@$jvmField var $field: $helper = $helper()")
+        }
         jnaBuilder.unindent()
         jnaBuilder.appendLine("}")
-        jnaBuilder.appendLine("class ByReference(pointer: $jnaPointer? = null) : WGPUNativeDisplayHandle(pointer), $jnaStructure.ByReference")
-        jnaBuilder.appendLine("class ByValue(pointer: $jnaPointer? = null) : WGPUNativeDisplayHandle(pointer), $jnaStructure.ByValue")
+        jnaBuilder.appendLine("class ${namePlan.jnaByReference(decl)}(pointer: $jnaPointer? = null) : WGPUNativeDisplayHandle(pointer), $jnaStructure.ByReference")
+        jnaBuilder.appendLine("class ${namePlan.jnaByValue(decl)}(pointer: $jnaPointer? = null) : WGPUNativeDisplayHandle(pointer), $jnaStructure.ByValue")
         jnaBuilder.unindent()
         jnaBuilder.appendLine("}")
         jnaBuilder.appendLine()
@@ -572,7 +583,7 @@ internal class KotlinKmpAndroidBuilder(
             builder.appendLine("override fun set$setter(value: $type) {")
             builder.indent()
             builder.appendLine("handle.type = WGPUNativeDisplayHandleType_$setter.toInt()")
-            builder.appendLine("val copy = $androidPackage.$type.ByValue(value.handler)")
+            builder.appendLine("val copy = $androidPackage.$type.${namePlan.jnaByValue(type)}(value.handler)")
             builder.appendLine("copy.read()")
             builder.appendLine("handle.data.$field = copy")
             builder.appendLine("handle.data.writeField(\"$field\")")
@@ -606,14 +617,29 @@ internal class KotlinKmpAndroidBuilder(
         name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask") || name == "WGPUInstanceBackend" || name == "WGPUInstanceFlag" || name == "WGPUFlags"
 
     private fun inlineRecordJnaType(type: Type): String? =
-        canonicalRecordName(type)
-            ?.takeIf { it.isNotEmpty() && !it.contains("unnamed") }
-            ?.let { "$androidPackage.$it.ByValue" }
+        inlineRecordDeclaration(type)
+            ?.takeIf { record -> record.name().isNotEmpty() && !record.name().contains("unnamed") }
+            ?.let { record ->
+                "$androidPackage.${namePlan.declaration(record)}.${namePlan.jnaByValue(record)}"
+            }
 
-    private fun canonicalRecordName(type: Type): String? = when {
-        type is Type.Declared && isStructType(type) -> type.tree().name()
-        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> canonicalRecordName(type.type())
+    private fun inlineRecordDeclaration(type: Type): Declaration.Scoped? = when {
+        type is Type.Declared && isStructType(type) -> type.tree()
+        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> inlineRecordDeclaration(type.type())
         else -> null
+    }
+
+    private fun canonicalRecordDeclaration(type: Type): Declaration.Scoped? = when (type) {
+        is Type.Declared -> type.tree().takeIf { record ->
+            record.kind() == Declaration.Scoped.Kind.STRUCT || record.kind() == Declaration.Scoped.Kind.UNION
+        }
+        is Type.Delegated -> canonicalRecordDeclaration(type.type())
+        is Type.Array -> canonicalRecordDeclaration(type.elementType())
+        else -> null
+    }
+
+    private fun jnaByReferenceType(type: Type): String? = canonicalRecordDeclaration(type)?.let { record ->
+        "$androidPackage.${namePlan.declaration(record)}.${namePlan.jnaByReference(record)}"
     }
 
     private fun emitInlineRecordAccessors(fieldName: String, fieldType: String) {
@@ -762,10 +788,9 @@ internal class KotlinKmpAndroidBuilder(
     }
 
     private fun getDefaultJnaValue(type: Type): String {
+        inlineRecordJnaType(type)?.let { return "$it()" }
         val jnaType = mapJnaType(type)
-        return when {
-            jnaType.endsWith(".ByValue") -> "$jnaType()"
-            else -> when (jnaType) {
+        return when (jnaType) {
             "Int" -> "0"
             "Long" -> "0L"
             "Byte" -> "0"
@@ -773,7 +798,6 @@ internal class KotlinKmpAndroidBuilder(
             "Float" -> "0.0f"
             "Double" -> "0.0"
             else -> "null"
-            }
         }
     }
 }

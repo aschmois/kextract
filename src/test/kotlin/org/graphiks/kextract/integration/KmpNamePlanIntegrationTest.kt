@@ -52,6 +52,44 @@ class KmpNamePlanIntegrationTest : FreeSpec({
         )
     }
 
+    "ByValue is reserved for generated Native and Android wrapper classes" {
+        val generated = generateKmpSources(
+            """
+            typedef struct ValueCollision {
+                int ByValue;
+            } ValueCollision;
+            """.trimIndent(),
+        )
+
+        generated.common shouldContain "var ByValue_2: Int"
+        generated.native shouldContain "actual var ByValue_2: Int"
+        generated.native shouldContain "value class ByValue("
+        generated.android shouldContain "actual var ByValue_2: Int"
+        generated.android shouldContain "class ByValue("
+    }
+
+    "Android raw JNA helper names avoid raw C field names" {
+        val generated = generateKmpSources(
+            """
+            typedef struct JnaHelperCollision {
+                int ByReference;
+                int ByValue;
+            } JnaHelperCollision;
+            """.trimIndent(),
+        )
+
+        generated.android shouldContain "@JvmField var ByReference: Int = 0"
+        generated.android shouldContain "@JvmField var ByValue: Int = 0"
+        generated.android shouldContain
+            "class ByReference_2(pointer: Pointer? = null) : JnaHelperCollision(pointer), Structure.ByReference"
+        generated.android shouldContain
+            "class ByValue_2(pointer: Pointer? = null) : JnaHelperCollision(pointer), Structure.ByValue"
+        generated.android shouldContain
+            "sample.bindings.android.JnaHelperCollision.ByReference_2(address)"
+        generated.android shouldContain
+            "sample.bindings.android.JnaHelperCollision.ByValue_2()"
+    }
+
     "runtime classifiers are aliased whenever a C classifier shadows them" {
         val runtimeSymbolClass = Class.forName("org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol")
         val preferredName = runtimeSymbolClass.getMethod("getPreferredName")
@@ -62,7 +100,7 @@ class KmpNamePlanIntegrationTest : FreeSpec({
             if (!preferred.matches(Regex("[A-Za-z_][A-Za-z0-9_]*"))) return@mapNotNull null
             val sourceSetNames = (sourceSets.invoke(symbol) as Set<*>)
                 .mapTo(mutableSetOf()) { (it as Enum<*>).name }
-            val sourceSet = listOf(SourceSet.JVM, SourceSet.NATIVE, SourceSet.COMMON)
+            val sourceSet = listOf(SourceSet.JVM, SourceSet.NATIVE, SourceSet.COMMON, SourceSet.ANDROID)
                 .firstOrNull { it.name in sourceSetNames }
                 ?: return@mapNotNull null
             RuntimeImportCase(qualifiedName.invoke(symbol) as String, sourceSet)
@@ -70,7 +108,8 @@ class KmpNamePlanIntegrationTest : FreeSpec({
         val header =
             cases.joinToString("\n") { case ->
                 "typedef struct ${case.preferredName} { int value; } ${case.preferredName};"
-            } + "\ntypedef struct RuntimeAliasExercise { reinterpret nested; } RuntimeAliasExercise;"
+            } + "\ntypedef struct RuntimeAliasExercise { reinterpret nested; } RuntimeAliasExercise;" +
+                "\ntypedef union RuntimeAndroidAliasExercise { int value; } RuntimeAndroidAliasExercise;"
         val generated = generateKmpSources(header)
 
         cases.forEach { case ->
@@ -83,6 +122,11 @@ class KmpNamePlanIntegrationTest : FreeSpec({
         generated.native shouldContain ".Kffipointed"
         generated.native shouldContain ".Kffiptr"
         generated.native shouldContain ".KffiuseContents {"
+        generated.android shouldContain
+            "open class RuntimeAliasExercise(pointer: KffiPointer? = null) : KffiStructure(pointer)"
+        generated.android shouldContain
+            "open class RuntimeAndroidAliasExercise(pointer: KffiPointer? = null) : KffiUnion(pointer)"
+        generated.android shouldContain "@KffiJvmField var"
     }
 })
 
@@ -96,11 +140,13 @@ private data class RuntimeImportCase(
 private enum class SourceSet {
     COMMON,
     JVM,
-    NATIVE;
+    NATIVE,
+    ANDROID;
 
     fun source(generated: GeneratedKmpSources): String = when (this) {
         COMMON -> generated.common
         JVM -> generated.jvm
         NATIVE -> generated.native
+        ANDROID -> generated.android
     }
 }
