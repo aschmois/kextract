@@ -190,6 +190,14 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    @Suppress("UNCHECKED_CAST")
+    fun generatedCallbackReservedIdentifiers(): Set<String> {
+        val field = Class.forName("org.graphiks.kextract.kotlin.KotlinGeneratorKt")
+            .getDeclaredField("GENERATED_CALLBACK_RESERVED_IDENTIFIERS")
+            .apply { isAccessible = true }
+        return field.get(null) as Set<String>
+    }
+
     val genericCallbacks = """
         typedef void (*SampleCallback)(unsigned int value, void * userdata1, void * userdata2);
         typedef void (*NoUserdataCallback)(unsigned int value);
@@ -237,35 +245,6 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
             void * userdata
         );
     """.trimIndent()
-
-    val generatedCallbackExternalIdentifiers = listOf(
-        "Callback",
-        "CallbackType",
-        "CallbackPolicy",
-        "CallbackRegistration",
-        "PreparedCallbackRegistration",
-        "CallbackExceptionHandler",
-        "CallbackRuntime",
-        "CallbackRuntimeApi",
-        "UnsafeCallbackRearmApi",
-        "NativeAddress",
-        "MemoryAllocator",
-        "CString",
-        "ArrayHolder",
-        "CStructure",
-        "FunctionDescriptor",
-        "MethodHandle",
-        "MethodHandles",
-        "Linker",
-        "Arena",
-        "MemorySegment",
-        "ValueLayout",
-        "JvmStatic",
-        "CValue",
-        "COpaquePointer",
-        "COpaquePointerVar",
-        "staticCFunction",
-    )
 
     "callback names are valid and collision-free in every generated target" {
         val config = CallbackBindingsConfig().also { bindings ->
@@ -326,8 +305,9 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
     }
 
     "callback names allocate away from every external identifier rendered by callback emitters" {
+        val reservedIdentifiers = generatedCallbackReservedIdentifiers()
         val generated = generateKmp(
-            generatedCallbackExternalIdentifiers.joinToString("\n") { name ->
+            reservedIdentifiers.joinToString("\n") { name ->
                 "typedef void (*$name)(void);"
             },
         )
@@ -336,7 +316,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         val native = generated.getValue("nativeMain")
         val android = generated.getValue("androidMain")
 
-        generatedCallbackExternalIdentifiers.forEach { rawName ->
+        reservedIdentifiers.forEach { rawName ->
             val allocatedName = "${rawName}_2"
             common shouldContain "fun interface $allocatedName : Callback"
             common shouldContain "canonicalId = \"typedef:$rawName\""
@@ -347,6 +327,58 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         common shouldNotContain "fun interface Callback : Callback"
 
         compileGeneratedJvmFixture(common, jvm)
+    }
+
+    "JVM callback named OptIn preserves the external annotation classifier" {
+        val generated = generateKmp("typedef void (*OptIn)(void);")
+        val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
+
+        compileGeneratedJvmFixture(common, jvm)
+        common shouldContain "fun interface OptIn_2 : Callback"
+        common shouldContain "canonicalId = \"typedef:OptIn\""
+        jvm shouldContain "@OptIn(CallbackRuntimeApi::class)\nprivate object OptIn_2Trampoline"
+    }
+
+    "direct binding callback named Suppress preserves the external annotation classifier" {
+        val config = CallbackBindingsConfig().also { bindings ->
+            bindings.directFunctionBindings = listOf(
+                DirectFunctionBinding().also { binding ->
+                    binding.function = "function:set_suppress_callback"
+                    binding.callbackParameter = "callback"
+                    binding.callbackType = "typedef:Suppress"
+                },
+            )
+        }
+        val generated = generateKmp(
+            """
+                typedef void (*Suppress)(void);
+                void set_suppress_callback(Suppress callback);
+            """.trimIndent(),
+            config,
+        )
+        val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
+
+        compileGeneratedJvmFixture(common, jvm)
+        common shouldContain "fun interface Suppress_2 : Callback"
+        common shouldContain "canonicalId = \"typedef:Suppress\""
+        jvm shouldContain """
+            @Suppress("UNUSED_VARIABLE")
+            internal actual fun set_suppress_callbackCallbackBindingPreflight()
+        """.trimIndent()
+    }
+
+    "Android callback named UnsupportedOperationException preserves the external exception classifier" {
+        val generated = generateKmp("typedef void (*UnsupportedOperationException)(void);")
+        val common = generated.getValue("commonMain")
+        val android = generated.getValue("androidMain")
+
+        common shouldContain "fun interface UnsupportedOperationException_2 : Callback"
+        common shouldContain "canonicalId = \"typedef:UnsupportedOperationException\""
+        android shouldContain "actual fun UnsupportedOperationException_2.Companion.register("
+        android shouldContain "throw UnsupportedOperationException("
+        android shouldNotContain "throw UnsupportedOperationException_2("
     }
 
     "Native callback names preserve the external COpaquePointerVar reinterpret type" {

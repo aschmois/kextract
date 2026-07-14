@@ -43,6 +43,9 @@ internal val GENERATED_CALLBACK_RESERVED_IDENTIFIERS = setOf(
     "COpaquePointer",
     "COpaquePointerVar",
     "staticCFunction",
+    "OptIn",
+    "Suppress",
+    "UnsupportedOperationException",
 )
 
 /**
