@@ -113,4 +113,54 @@ class KmpJvmPackedLayoutTest : FreeSpec({
         generated.jvm shouldNotContain
             "MemoryLayout.sequenceLayout(2, ValueLayout.JAVA_INT).withByteAlignment(1)"
     }
+
+    "packed nested aggregates render a recursively under-aligned record variant" {
+        val generated = generateKmpSources(
+            """
+            typedef struct Inner { int x; } Inner;
+            typedef struct __attribute__((packed)) Outer { char tag; Inner inner; } Outer;
+            """.trimIndent(),
+        )
+
+        val result = compileAndInvokeGeneratedKmpJvm(
+            generated = generated,
+            probePackage = "sample.probe",
+            probeSource =
+                """
+                package sample.probe
+
+                import java.lang.foreign.MemoryLayout.PathElement.groupElement
+                import sample.bindings.Inner
+                import sample.bindings.Outer
+
+                fun inspectPackedNestedAggregate(): LongArray {
+                    val inner = Outer.layout.select(groupElement("inner"))
+                    val x = inner.select(groupElement("x"))
+                    return longArrayOf(
+                        Inner.layout.byteSize(),
+                        Inner.layout.byteAlignment(),
+                        Inner.layout.byteOffset(groupElement("x")),
+                        Outer.layout.byteSize(),
+                        Outer.layout.byteAlignment(),
+                        Outer.layout.byteOffset(groupElement("tag")),
+                        Outer.layout.byteOffset(groupElement("inner")),
+                        Outer.layout.byteOffset(groupElement("inner"), groupElement("x")),
+                        inner.byteSize(),
+                        inner.byteAlignment(),
+                        inner.byteOffset(groupElement("x")),
+                        x.byteSize(),
+                        x.byteAlignment(),
+                    )
+                }
+                """.trimIndent(),
+            facadeClassName = "ProbeKt",
+            methodName = "inspectPackedNestedAggregate",
+        ) as LongArray
+
+        result.toList() shouldBe listOf(4L, 4L, 0L, 5L, 1L, 0L, 1L, 1L, 4L, 1L, 0L, 4L, 1L)
+        generated.jvm shouldNotContain
+            "Inner.layout.withByteAlignment(1).withName(\"inner\")"
+        generated.jvm shouldContain
+            "ValueLayout.JAVA_INT.withByteAlignment(1).withName(\"x\")"
+    }
 })

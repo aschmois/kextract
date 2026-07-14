@@ -5,6 +5,7 @@ import org.graphiks.kextract.DeclarationImpl.ClangAlignOf
 import org.graphiks.kextract.DeclarationImpl.ClangOffsetOf
 import org.graphiks.kextract.DeclarationImpl.ClangSizeOf
 import org.graphiks.kextract.DeclarationImpl.Skip
+import org.graphiks.kextract.Type
 import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_LAYOUT
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.VALUE_LAYOUT
@@ -32,7 +33,7 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
                     !Skip.isPresent(declaration) &&
                     declaration.kind() in setOf(Declaration.Scoped.Kind.STRUCT, Declaration.Scoped.Kind.UNION)
                 ) {
-                    layouts[declaration] = createLayout(declaration, names)
+                    layouts[declaration] = createLayout(declaration, names, recordStack = mutableListOf())
                 }
                 declaration.members().forEach(::collect)
             }
@@ -44,37 +45,61 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
         private fun createLayout(
             declaration: Declaration.Scoped,
             names: KotlinKmpNamePlan,
+            alignmentCeiling: Long? = null,
+            recordStack: MutableList<Declaration.Scoped>,
         ): KotlinJvmRecordLayout {
-            val owner = declaration.name()
-            val sizeBytes = bitsToBytes(
-                metric = "size",
-                owner = owner,
-                bits = requireNotNull(ClangSizeOf.get(declaration)) {
-                    "$owner has no Clang size"
-                },
-            )
-            val alignmentBytes = requireAlignment(
-                owner,
-                bitsToBytes(
-                    metric = "alignment",
+            val cycleStart = recordStack.indexOfFirst { it === declaration }
+            require(cycleStart < 0) {
+                val cycle = recordStack.subList(cycleStart, recordStack.size) + declaration
+                "JVM record layout has a by-value cycle: ${cycle.joinToString(" -> ") { it.name() }}"
+            }
+            recordStack.add(declaration)
+            try {
+                val owner = declaration.name()
+                val sizeBytes = bitsToBytes(
+                    metric = "size",
                     owner = owner,
-                    bits = requireNotNull(ClangAlignOf.get(declaration)) {
-                        "$owner has no Clang alignment"
+                    bits = requireNotNull(ClangSizeOf.get(declaration)) {
+                        "$owner has no Clang size"
                     },
-                ),
-            )
-            val members = declaration.members()
-                .filterIsInstance<Declaration.Variable>()
-                .filterNot(Skip::isPresent)
-                .map { field -> createMemberLayout(declaration, field, sizeBytes, alignmentBytes, names) }
+                )
+                val naturalAlignmentBytes = requireAlignment(
+                    owner,
+                    bitsToBytes(
+                        metric = "alignment",
+                        owner = owner,
+                        bits = requireNotNull(ClangAlignOf.get(declaration)) {
+                            "$owner has no Clang alignment"
+                        },
+                    ),
+                )
+                val alignmentBytes = alignmentCeiling
+                    ?.let { ceiling -> minOf(naturalAlignmentBytes, requireAlignment(owner, ceiling)) }
+                    ?: naturalAlignmentBytes
+                val members = declaration.members()
+                    .filterIsInstance<Declaration.Variable>()
+                    .filterNot(Skip::isPresent)
+                    .map { field ->
+                        createMemberLayout(
+                            declaration,
+                            field,
+                            sizeBytes,
+                            alignmentBytes,
+                            names,
+                            recordStack,
+                        )
+                    }
 
-            validateMembers(declaration, sizeBytes, members)
-            return KotlinJvmRecordLayout(
-                declaration = declaration,
-                sizeBytes = sizeBytes,
-                alignmentBytes = alignmentBytes,
-                members = members,
-            )
+                validateMembers(declaration, sizeBytes, members)
+                return KotlinJvmRecordLayout(
+                    declaration = declaration,
+                    sizeBytes = sizeBytes,
+                    alignmentBytes = alignmentBytes,
+                    members = members,
+                )
+            } finally {
+                recordStack.removeAt(recordStack.lastIndex)
+            }
         }
 
         private fun createMemberLayout(
@@ -83,6 +108,7 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
             recordSizeBytes: Long,
             recordAlignmentBytes: Long,
             names: KotlinKmpNamePlan,
+            recordStack: MutableList<Declaration.Scoped>,
         ): KotlinJvmRecordMemberLayout {
             val owner = "${declaration.name()}.${field.name()}"
             val offsetBytes = bitsToBytes(
@@ -125,11 +151,33 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
                 offsetBytes = offsetBytes,
                 sizeBytes = sizeBytes,
                 alignmentBytes = alignmentBytes,
-                layoutExpression = planRuntimeNames(
-                    LayoutUtils.layoutString(field.type(), alignmentBytes),
-                    names,
-                ),
+                layoutExpression = layoutString(field.type(), alignmentBytes, names, recordStack),
             )
+        }
+
+        private fun layoutString(
+            type: Type,
+            byteAlignment: Long,
+            names: KotlinKmpNamePlan,
+            recordStack: MutableList<Declaration.Scoped>,
+        ): String = when {
+            type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER ->
+                planRuntimeNames(LayoutUtils.layoutString(type, byteAlignment), names)
+            type is Type.Delegated -> layoutString(type.type(), byteAlignment, names, recordStack)
+            type is Type.Array ->
+                "${names.runtime(MEMORY_LAYOUT)}.sequenceLayout(${type.elementCount() ?: 0L}, " +
+                    "${layoutString(type.elementType(), byteAlignment, names, recordStack)})" +
+                    ".withByteAlignment($byteAlignment)"
+            type is Type.Declared && type.tree().kind() in setOf(
+                Declaration.Scoped.Kind.STRUCT,
+                Declaration.Scoped.Kind.UNION,
+            ) -> createLayout(
+                declaration = type.tree(),
+                names = names,
+                alignmentCeiling = byteAlignment,
+                recordStack = recordStack,
+            ).renderExpression()
+            else -> planRuntimeNames(LayoutUtils.layoutString(type, byteAlignment), names)
         }
 
         private fun validateMembers(

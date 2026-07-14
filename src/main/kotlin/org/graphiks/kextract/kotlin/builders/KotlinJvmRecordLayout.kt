@@ -20,20 +20,9 @@ internal data class KotlinJvmRecordLayout(
 ) {
     fun render(builder: SourceBuilder) {
         val memoryLayout = "java.lang.foreign.MemoryLayout"
-        val layoutElements = when (declaration.kind()) {
-            Declaration.Scoped.Kind.STRUCT -> structLayoutElements(memoryLayout)
-            Declaration.Scoped.Kind.UNION -> members.map { member ->
-                "${member.layoutExpression}.withName(\"${member.cName}\")"
-            }
-            else -> error("Expected struct or union, found ${declaration.kind()}")
-        }
-        val factory = when (declaration.kind()) {
-            Declaration.Scoped.Kind.STRUCT -> "structLayout"
-            Declaration.Scoped.Kind.UNION -> "unionLayout"
-            else -> error("Expected struct or union, found ${declaration.kind()}")
-        }
+        val layoutElements = layoutElements(memoryLayout)
 
-        builder.appendLine("val layout: java.lang.foreign.GroupLayout = $memoryLayout.$factory(")
+        builder.appendLine("val layout: java.lang.foreign.GroupLayout = $memoryLayout.${factory()}(")
         builder.indent()
         layoutElements.forEachIndexed { index, expression ->
             val comma = if (index < layoutElements.lastIndex) "," else ""
@@ -43,6 +32,24 @@ internal data class KotlinJvmRecordLayout(
         builder.appendLine(
             ").withByteAlignment($alignmentBytes).withName(\"${declaration.name()}\")",
         )
+    }
+
+    internal fun renderExpression(): String {
+        val memoryLayout = "java.lang.foreign.MemoryLayout"
+        return "$memoryLayout.${factory()}(${layoutElements(memoryLayout).joinToString(", ")})" +
+            ".withByteAlignment($alignmentBytes).withName(\"${declaration.name()}\")"
+    }
+
+    private fun factory(): String = when (declaration.kind()) {
+        Declaration.Scoped.Kind.STRUCT -> "structLayout"
+        Declaration.Scoped.Kind.UNION -> "unionLayout"
+        else -> error("Expected struct or union, found ${declaration.kind()}")
+    }
+
+    private fun layoutElements(memoryLayout: String): List<String> = when (declaration.kind()) {
+        Declaration.Scoped.Kind.STRUCT -> structLayoutElements(memoryLayout)
+        Declaration.Scoped.Kind.UNION -> unionLayoutElements(memoryLayout)
+        else -> error("Expected struct or union, found ${declaration.kind()}")
     }
 
     private fun structLayoutElements(memoryLayout: String): List<String> = buildList {
@@ -55,5 +62,13 @@ internal data class KotlinJvmRecordLayout(
         }
         val finalPadding = sizeBytes - previousEnd
         if (finalPadding > 0L) add("$memoryLayout.paddingLayout($finalPadding)")
+    }
+
+    private fun unionLayoutElements(memoryLayout: String): List<String> = buildList {
+        members.forEach { member ->
+            add("${member.layoutExpression}.withName(\"${member.cName}\")")
+        }
+        val largestMemberSize = members.maxOfOrNull(KotlinJvmRecordMemberLayout::sizeBytes) ?: 0L
+        if (largestMemberSize < sizeBytes) add("$memoryLayout.paddingLayout($sizeBytes)")
     }
 }

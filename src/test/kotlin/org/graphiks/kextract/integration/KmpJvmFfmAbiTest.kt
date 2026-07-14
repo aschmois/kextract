@@ -71,4 +71,46 @@ class KmpJvmFfmAbiTest : FreeSpec({
             (u32.get(segment, 0L) as Int) shouldBe 0x40000000
         }
     }
+
+    "generated JVM union preserves Clang tail padding and remains sequence-compatible" {
+        val generated = generateKmpSources(
+            """
+            typedef union U {
+                char bytes[3];
+                short s;
+            } U;
+            """.trimIndent(),
+        )
+
+        val result = compileAndInvokeGeneratedKmpJvm(
+            generated = generated,
+            probePackage = "sample.probe",
+            probeSource =
+                """
+                package sample.probe
+
+                import java.lang.foreign.MemoryLayout
+                import java.lang.foreign.MemoryLayout.PathElement.groupElement
+                import sample.bindings.U
+
+                fun inspectUnionTailPadding(): LongArray {
+                    val sequence = MemoryLayout.sequenceLayout(2, U.layout)
+                    return longArrayOf(
+                        U.layout.byteSize(),
+                        U.layout.byteAlignment(),
+                        U.layout.byteOffset(groupElement("bytes")),
+                        U.layout.byteOffset(groupElement("s")),
+                        sequence.byteSize(),
+                        sequence.byteAlignment(),
+                    )
+                }
+                """.trimIndent(),
+            facadeClassName = "ProbeKt",
+            methodName = "inspectUnionTailPadding",
+        ) as LongArray
+
+        result.toList() shouldBe listOf(4L, 2L, 0L, 0L, 8L, 2L)
+        generated.jvm shouldContain "MemoryLayout.unionLayout("
+        generated.jvm shouldContain "java.lang.foreign.MemoryLayout.paddingLayout(4)"
+    }
 })
