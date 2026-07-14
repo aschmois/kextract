@@ -1,5 +1,6 @@
 package org.graphiks.kextract.pipeline
 
+import org.graphiks.kextract.callbacks.CallbackBindingsConfig
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayOutputStream
@@ -88,22 +89,48 @@ class KextractToolTest {
     }
 
     @Test
-    fun `pipeline rejects an invalid automatic callback without metadata`() {
-        val header = tempDir.resolve("invalid-callback.h").also {
-            it.writeText("typedef int (*InvalidPipelineHandler)(void);")
+    fun `legacy generation accepts callbacks without analyzing callback metadata`() {
+        val header = tempDir.resolve("legacy-callback.h").also {
+            it.writeText(
+                """
+                    typedef int (*LegacyComparator)(const void *, const void *);
+                    int legacy_sort(LegacyComparator comparator);
+                """.trimIndent(),
+            )
         }
-        val errors = ByteArrayOutputStream()
-        val logger = Logger(PrintWriter(ByteArrayOutputStream(), true), PrintWriter(errors, true))
+        val logger = Logger(
+            PrintWriter(ByteArrayOutputStream(), true),
+            PrintWriter(ByteArrayOutputStream(), true),
+        )
 
         val exitCode = KextractTool(logger).runGeneration(
             listOf(header.toString()),
             Options(outputDir = tempDir.resolve("output").toString()),
         )
 
-        assertEquals(KextractTool.FAILURE, exitCode)
-        assertContains(
-            errors.toString(),
-            "typedef:InvalidPipelineHandler: callback return type must be void, found int",
+        assertEquals(KextractTool.SUCCESS, exitCode)
+    }
+
+    @Test
+    fun `programmatic callback bindings require multiplatform generation`() {
+        val header = tempDir.resolve("programmatic-callback-gate.h").also {
+            it.writeText("typedef void (*ProgrammaticCallbackGate)(void);")
+        }
+        val errors = ByteArrayOutputStream()
+        val logger = Logger(
+            PrintWriter(ByteArrayOutputStream(), true),
+            PrintWriter(errors, true),
         )
+
+        val exitCode = KextractTool(logger).runGeneration(
+            listOf(header.toString()),
+            Options(
+                outputDir = tempDir.resolve("programmatic-gate-output").toString(),
+                callbackBindings = CallbackBindingsConfig(),
+            ),
+        )
+
+        assertEquals(KextractTool.FAILURE, exitCode)
+        assertContains(errors.toString(), "callbackBindings requires multiplatform generation")
     }
 }

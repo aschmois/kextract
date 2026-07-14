@@ -13,6 +13,8 @@ import org.graphiks.kextract.callbacks.DirectFunctionBinding
 import org.graphiks.kextract.pipeline.KextractTool
 import org.graphiks.kextract.pipeline.Logger
 import org.graphiks.kextract.pipeline.Options
+import java.io.ByteArrayOutputStream
+import java.io.PrintWriter
 import java.nio.file.Files
 
 class CallbackGeneratorIntegrationTest : FreeSpec({
@@ -48,6 +50,28 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    fun generateKmpFailure(header: String): String {
+        val input = Files.createTempFile("kextract-invalid-callback-carrier", ".h")
+        val output = Files.createTempDirectory("kextract-invalid-callback-carrier-out")
+        val errors = ByteArrayOutputStream()
+        return try {
+            input.toFile().writeText(header)
+            KextractTool(
+                Logger(
+                    PrintWriter(ByteArrayOutputStream(), true),
+                    PrintWriter(errors, true),
+                ),
+            ).runGeneration(
+                listOf(input.toString()),
+                Options(outputDir = output.toString(), multiplatform = true),
+            ) shouldBe KextractTool.FAILURE
+            errors.toString()
+        } finally {
+            input.toFile().delete()
+            output.toFile().deleteRecursively()
+        }
+    }
+
     val genericCallbacks = """
         typedef void (*SampleCallback)(unsigned int value, void * userdata1, void * userdata2);
         typedef void (*NoUserdataCallback)(unsigned int value);
@@ -61,17 +85,17 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
     """.trimIndent()
 
     val abiCallbacks = """
-        typedef enum LargeStatus {
+        typedef enum LargeStatus : unsigned long long {
             LargeStatus_Zero = 0,
             LargeStatus_High = 0x100000000ULL
         } LargeStatus;
 
-        typedef enum LargeOptions {
+        typedef enum LargeOptions : unsigned long long {
             LargeOptions_None = 0,
             LargeOptions_High = 0x100000000ULL
         } LargeOptions;
 
-        typedef enum NarrowOptions {
+        typedef enum NarrowOptions : unsigned int {
             NarrowOptions_None = 0,
             NarrowOptions_High = 0x80000000U
         } NarrowOptions;
@@ -412,6 +436,39 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
             "staticCFunction<ULong, ULong, CValue<webgpu.native.SamplePayload>, COpaquePointer?, COpaquePointer?, Unit> { status, options, payload, device, userdata ->"
         native shouldContain "status.toULong() as LargeStatus,"
         native shouldContain "LargeOptions(options.toLong()),"
+    }
+
+    "signed long callback scalars fail with a target-independent diagnostic" {
+        generateKmpFailure("typedef void (*LongCallback)(long value);") shouldContain
+            "Unsupported multiplatform callback C ABI scalar 'long': " +
+            "target-dependent width (LP64 vs LLP64); use a fixed-width C integer type"
+    }
+
+    "unsigned long callback scalars fail with the same target-independent diagnostic" {
+        generateKmpFailure("typedef void (*UnsignedLongCallback)(unsigned long value);") shouldContain
+            "Unsupported multiplatform callback C ABI scalar 'long': " +
+            "target-dependent width (LP64 vs LLP64); use a fixed-width C integer type"
+    }
+
+    "long double callback scalars fail with a target-independent diagnostic" {
+        generateKmpFailure("typedef void (*LongDoubleCallback)(long double value);") shouldContain
+            "Unsupported multiplatform callback C ABI scalar 'long double': " +
+            "target-dependent size and format; use double or an explicit fixed-width representation"
+    }
+
+    "fixed-width callback scalars retain stable JVM and Native carriers" {
+        val generated = generateKmp(
+            """
+                typedef void (*StableCallback)(long long signed_value,
+                                               unsigned long long unsigned_value,
+                                               double floating_value);
+            """.trimIndent(),
+        )
+
+        generated.getValue("jvmMain") shouldContain
+            "FunctionDescriptor.ofVoid(ValueLayout.JAVA_LONG, ValueLayout.JAVA_LONG, ValueLayout.JAVA_DOUBLE)"
+        generated.getValue("nativeMain") shouldContain
+            "staticCFunction<Long, ULong, Double, Unit>"
     }
 
     "unsigned narrow options zero-extend into the application Long" {

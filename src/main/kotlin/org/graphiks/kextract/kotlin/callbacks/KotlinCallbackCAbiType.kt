@@ -4,7 +4,6 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.ClangEnumType
 import org.graphiks.kextract.DeclarationImpl.JavaName
 import org.graphiks.kextract.Type
-import org.graphiks.kextract.TypeImpl
 import org.graphiks.kextract.pipeline.isEnum
 import org.graphiks.kextract.pipeline.isStructOrUnion
 
@@ -96,17 +95,24 @@ sealed interface KotlinCallbackCAbiType {
             Type.Primitive.Kind.Char16 -> Scalar(Scalar.Kind.CHAR16, unsigned = true)
             Type.Primitive.Kind.Short -> Scalar(Scalar.Kind.I16, unsigned)
             Type.Primitive.Kind.Int -> Scalar(Scalar.Kind.I32, unsigned)
-            Type.Primitive.Kind.Long ->
-                Scalar(if (TypeImpl.IS_WINDOWS) Scalar.Kind.I32 else Scalar.Kind.I64, unsigned)
+            Type.Primitive.Kind.Long -> unsupportedVariableWidthScalar(
+                "long",
+                "target-dependent width (LP64 vs LLP64); use a fixed-width C integer type",
+            )
             Type.Primitive.Kind.LongLong -> Scalar(Scalar.Kind.I64, unsigned)
             Type.Primitive.Kind.Float -> Scalar(Scalar.Kind.F32, unsigned = false)
             Type.Primitive.Kind.Double -> Scalar(Scalar.Kind.F64, unsigned = false)
-            Type.Primitive.Kind.LongDouble -> {
-                if (!TypeImpl.IS_WINDOWS) unsupportedScalar(kind)
-                Scalar(Scalar.Kind.F64, unsigned = false)
-            }
+            Type.Primitive.Kind.LongDouble -> unsupportedVariableWidthScalar(
+                "long double",
+                "target-dependent size and format; use double or an explicit fixed-width representation",
+            )
             else -> unsupportedScalar(kind)
         }
+
+        private fun unsupportedVariableWidthScalar(name: String, reason: String): Nothing =
+            throw UnsupportedOperationException(
+                "Unsupported multiplatform callback C ABI scalar '$name': $reason",
+            )
 
         private fun unsupportedScalar(kind: Type.Primitive.Kind): Nothing =
             throw UnsupportedOperationException("Unsupported callback C ABI scalar: $kind")

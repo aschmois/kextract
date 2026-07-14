@@ -7,6 +7,7 @@ import org.graphiks.kextract.Type
 import org.graphiks.kextract.callbacks.CallbackAnalyzer
 import org.graphiks.kextract.callbacks.CallbackBindingsConfig
 import org.graphiks.kextract.callbacks.CanonicalDeclarationIndex
+import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
@@ -172,17 +173,27 @@ class KextractTool(private val logger: Logger) {
         headerName: String,
         options: Options
     ): List<KotlinSourceFile> {
+        require(options.multiplatform || options.callbackBindings == null) {
+            "callbackBindings requires multiplatform generation"
+        }
         var d = decl
         d = IncludeFilter(options.includeHelper).scan(d)
         d = DuplicateFilter().scan(d)
-        d = UnsupportedFilter(logger).scan(d)
+        d = UnsupportedFilter(
+            logger,
+            allowVariableWidthCallbackScalars = options.multiplatform,
+        ).scan(d)
         d = MissingDepChecker(logger).scan(d)
         if (logger.hasErrors()) return emptyList()
 
-        val callbackBindings = CallbackAnalyzer.validate(
-            CanonicalDeclarationIndex(d),
-            options.callbackBindings ?: CallbackBindingsConfig(),
-        )
+        val callbackBindings = if (options.multiplatform) {
+            CallbackAnalyzer.validate(
+                CanonicalDeclarationIndex(d),
+                options.callbackBindings ?: CallbackBindingsConfig(),
+            )
+        } else {
+            ValidatedCallbackBindings.EMPTY
+        }
         val transformed = NameMangler(headerName).scan(d)
         return KotlinGenerator().generate(
             transformed, headerName, options.targetPackage,

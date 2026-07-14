@@ -11,6 +11,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -186,6 +187,7 @@ class CommandLineTest {
 
         KextractCommand(logger).main(
             listOf(
+                "--multiplatform",
                 "--callback-bindings", bindings.toString(),
                 "--output", output.toString(),
                 header.toString(),
@@ -195,5 +197,32 @@ class CommandLineTest {
         Files.walk(output).use { files ->
             assertTrue(files.anyMatch { Files.isRegularFile(it) })
         }
+    }
+
+    @Test
+    fun `callback bindings require multiplatform generation`() {
+        val header = tempDir.resolve("cli-callback-gate.h").also {
+            Files.writeString(it, "typedef void (*CliCallbackGate)(void);")
+        }
+        val bindings = tempDir.resolve("cli-callback-gate.yml").also {
+            Files.writeString(it, "{}")
+        }
+        val output = tempDir.resolve("generated-without-multiplatform")
+        val logger = Logger(
+            PrintWriter(ByteArrayOutputStream(), true),
+            PrintWriter(ByteArrayOutputStream(), true),
+        )
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            KextractCommand(logger).main(
+                listOf(
+                    "--callback-bindings", bindings.toString(),
+                    "--output", output.toString(),
+                    header.toString(),
+                ),
+            )
+        }
+
+        assertEquals("--callback-bindings requires --multiplatform", failure.message)
     }
 }

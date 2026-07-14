@@ -190,6 +190,9 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             if (dllMapPath != null) throw IllegalArgumentException("--dll-map requires --win32")
             null
         }
+        if (callbackBindingsPath != null && !multiplatform) {
+            throw IllegalArgumentException("--callback-bindings requires --multiplatform")
+        }
         val callbackBindings = callbackBindingsPath?.let {
             CallbackBindingsLoader.load(Path.of(it))
         }
