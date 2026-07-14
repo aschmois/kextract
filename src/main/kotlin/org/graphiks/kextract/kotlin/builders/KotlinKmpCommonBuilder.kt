@@ -17,6 +17,7 @@ class KotlinKmpCommonBuilder(
     private val targetPackage: String,
     private val className: String,
     private val callbackModels: List<KotlinCallbackModel>,
+    private val callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     private val callbackBindings: ValidatedCallbackBindings,
 ) : Declaration.Visitor<Unit> {
 
@@ -124,6 +125,7 @@ class KotlinKmpCommonBuilder(
                     builder,
                     callbackBindings.directFunctionBindings,
                     callbackBindings.callbackInfoBindings,
+                    callbackModelsByCanonicalId,
                 )
             }
             else -> {}

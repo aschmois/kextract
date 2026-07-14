@@ -13,6 +13,7 @@ import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.objc.ObjCRuntimeTemplate
 import org.graphiks.kextract.kotlin.objc.ObjCSubclassingTemplate
+import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 import org.graphiks.kextract.pipeline.Options
 
 /**
@@ -50,8 +51,19 @@ class KotlinGenerator {
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
-            val callbackModels = callbackBindings.callbacks.map(KotlinCallbackModel::from)
-            return generateKmp(scoped, targetPackage, className, callbackModels, callbackBindings)
+            val callbackNames = KotlinIdentifierAllocator()
+            val callbackModels = callbackBindings.callbacks.map { callback ->
+                KotlinCallbackModel.from(callback, callbackNames)
+            }
+            val callbackModelsByCanonicalId = callbackModels.associateBy(KotlinCallbackModel::canonicalId)
+            return generateKmp(
+                scoped,
+                targetPackage,
+                className,
+                callbackModels,
+                callbackModelsByCanonicalId,
+                callbackBindings,
+            )
         }
 
         val toplevel = KotlinToplevelBuilder(
@@ -72,9 +84,16 @@ class KotlinGenerator {
         targetPackage: String,
         className: String,
         callbackModels: List<KotlinCallbackModel>,
+        callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
         callbackBindings: ValidatedCallbackBindings,
     ): List<KotlinSourceFile> = buildList {
-        KotlinKmpCommonBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpCommonBuilder(
+            targetPackage,
+            className,
+            callbackModels,
+            callbackModelsByCanonicalId,
+            callbackBindings,
+        ).also { scoped.accept(it); addAll(it.getFiles()) }
         KotlinKmpJvmBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
         KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
         KotlinKmpNativeBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }

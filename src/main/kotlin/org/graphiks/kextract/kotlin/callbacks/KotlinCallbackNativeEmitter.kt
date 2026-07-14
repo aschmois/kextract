@@ -32,7 +32,7 @@ class KotlinCallbackNativeEmitter(
 
         builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
         builder.appendLine(
-            "private val ${callback.typeName}Trampoline = " +
+            "private val ${callback.trampolineName} = " +
                 "staticCFunction<${functionTypes.joinToString(", ")}> $lambdaStart",
         )
         builder.indent()
@@ -40,7 +40,7 @@ class KotlinCallbackNativeEmitter(
         builder.indent()
         builder.appendLine("CallbackRuntime.dispatchSafely(")
         builder.indent()
-        builder.appendLine("type = ${callback.typeName}Type,")
+        builder.appendLine("type = ${callback.runtimeTypeName},")
         val routingUserdata = callback.routingUserdataParameter?.name?.let { "$it?.let(::NativeAddress)" } ?: "null"
         builder.appendLine("userdata = $routingUserdata,")
         builder.unindent()
@@ -93,8 +93,8 @@ class KotlinCallbackNativeEmitter(
         val registrationType = if (internal) "PreparedCallbackRegistration" else "CallbackRegistration"
         builder.appendLine("): $registrationType<${callback.typeName}> = CallbackRuntime.$operation(")
         builder.indent()
-        builder.appendLine("type = ${callback.typeName}Type,")
-        builder.appendLine("trampoline = NativeAddress(${callback.typeName}Trampoline),")
+        builder.appendLine("type = ${callback.runtimeTypeName},")
+        builder.appendLine("trampoline = NativeAddress(${callback.trampolineName}),")
         builder.appendLine("policy = policy,")
         builder.appendLine("onError = onError,")
         builder.appendLine("callback = callback,")

@@ -5,6 +5,7 @@ import org.graphiks.kextract.Type
 import org.graphiks.kextract.callbacks.ValidatedCallbackInfoBinding
 import org.graphiks.kextract.callbacks.ValidatedDirectFunctionBinding
 import org.graphiks.kextract.kotlin.builders.SourceBuilder
+import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 
 class KotlinCallbackBindingEmitter(
     private val mapType: (Type) -> String,
@@ -13,9 +14,10 @@ class KotlinCallbackBindingEmitter(
         builder: SourceBuilder,
         directBindings: List<ValidatedDirectFunctionBinding>,
         callbackInfoBindings: List<ValidatedCallbackInfoBinding>,
+        callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
-        directBindings.forEach { emitDirectCommon(builder, it) }
-        callbackInfoBindings.forEach { emitCallbackInfoFactory(builder, it) }
+        directBindings.forEach { emitDirectCommon(builder, it, callbackModelsByCanonicalId) }
+        callbackInfoBindings.forEach { emitCallbackInfoFactory(builder, it, callbackModelsByCanonicalId) }
     }
 
     fun emitJvm(builder: SourceBuilder, bindings: List<ValidatedDirectFunctionBinding>) {
@@ -57,21 +59,23 @@ class KotlinCallbackBindingEmitter(
     private fun emitDirectCommon(
         builder: SourceBuilder,
         binding: ValidatedDirectFunctionBinding,
+        callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
         builder.appendLine("internal expect fun ${preflightName(binding)}()")
         builder.appendLine()
-        emitDirectRegistrationOverload(builder, binding)
+        emitDirectRegistrationOverload(builder, binding, callbackModelsByCanonicalId)
         if (binding.routingUserdataParameter == null) {
-            emitDirectRearmOverload(builder, binding)
+            emitDirectRearmOverload(builder, binding, callbackModelsByCanonicalId)
         }
     }
 
     private fun emitDirectRegistrationOverload(
         builder: SourceBuilder,
         binding: ValidatedDirectFunctionBinding,
+        callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
         val parameters = applicationParameters(binding)
-        val callbackType = binding.callback.typedef.name()
+        val callbackType = callbackModelsByCanonicalId.getValue(binding.callback.id).typeName
         builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
         builder.appendLine("fun ${binding.function.name()}(")
         builder.indent()
@@ -104,9 +108,10 @@ class KotlinCallbackBindingEmitter(
     private fun emitDirectRearmOverload(
         builder: SourceBuilder,
         binding: ValidatedDirectFunctionBinding,
+        callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
         val parameters = applicationParameters(binding)
-        val callbackType = binding.callback.typedef.name()
+        val callbackType = callbackModelsByCanonicalId.getValue(binding.callback.id).typeName
         builder.appendLine("@UnsafeCallbackRearmApi")
         builder.appendLine("fun rearmAfterNativeQuiescence(")
         builder.indent()
@@ -145,9 +150,17 @@ class KotlinCallbackBindingEmitter(
     private fun emitCallbackInfoFactory(
         builder: SourceBuilder,
         binding: ValidatedCallbackInfoBinding,
+        callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
         val structType = binding.struct.name()
-        val callbackType = binding.callback.typedef.name()
+        val callbackType = callbackModelsByCanonicalId.getValue(binding.callback.id).typeName
+        val parameterNames = KotlinIdentifierAllocator(RESERVED_PARAMETER_NAMES)
+        val applicationUserdataParameters = binding.applicationUserdataFields.mapIndexed { index, field ->
+            RenderedCallbackInfoParameter(
+                variable = field,
+                name = parameterNames.allocate(field.name(), "arg$index"),
+            )
+        }
         builder.appendLine("/**")
         builder.appendLine(" * ${binding.owner.lifetime.name}: the owning native call copies the callback-info value or containing descriptor, so the allocator scope may close after the call while the registration remains live.")
         builder.appendLine(" *")
@@ -160,8 +173,8 @@ class KotlinCallbackBindingEmitter(
             builder.appendLine("mode: ${mode.type.name()},")
         }
         builder.appendLine("registration: CallbackRegistration<$callbackType>,")
-        binding.applicationUserdataFields.forEach { field ->
-            builder.appendLine("${field.name()}: NativeAddress? = null,")
+        applicationUserdataParameters.forEach { parameter ->
+            builder.appendLine("${parameter.name}: NativeAddress? = null,")
         }
         builder.unindent()
         builder.appendLine("): $structType {")
@@ -171,8 +184,8 @@ class KotlinCallbackBindingEmitter(
         binding.mode?.let { mode -> builder.appendLine("info.${mode.field.name()} = mode") }
         builder.appendLine("info.${binding.callbackField.name()} = registration.callback")
         builder.appendLine("info.${binding.routingUserdataField.name()} = registration.userdata")
-        binding.applicationUserdataFields.forEach { field ->
-            builder.appendLine("info.${field.name()} = ${field.name()}")
+        applicationUserdataParameters.forEach { parameter ->
+            builder.appendLine("info.${parameter.variable.name()} = ${parameter.name}")
         }
         builder.appendLine("return info")
         builder.unindent()
@@ -227,19 +240,24 @@ class KotlinCallbackBindingEmitter(
         return "${binding.function.name()}(${arguments.joinToString(", ")})"
     }
 
-    private fun applicationParameters(binding: ValidatedDirectFunctionBinding): List<RenderedParameter> =
-        binding.function.parameters().mapIndexedNotNull { index, parameter ->
+    private fun applicationParameters(binding: ValidatedDirectFunctionBinding): List<RenderedParameter> {
+        val names = KotlinIdentifierAllocator(RESERVED_PARAMETER_NAMES)
+        return binding.function.parameters().mapIndexedNotNull { index, parameter ->
             if (parameter === binding.callbackParameter || parameter === binding.routingUserdataParameter) {
                 null
             } else {
-                val name = parameter.name().takeIf(String::isNotEmpty) ?: "arg$index"
+                val name = names.allocate(parameter.name(), "arg$index")
                 RenderedParameter(
                     variable = parameter,
                     name = name,
-                    validatedName = "validated${name.replaceFirstChar(Char::uppercaseChar)}",
+                    validatedName = names.allocate(
+                        "validated${name.replaceFirstChar(Char::uppercaseChar)}",
+                        "validatedArg$index",
+                    ),
                 )
             }
         }
+    }
 
     private fun preflightName(binding: ValidatedDirectFunctionBinding): String =
         "${binding.function.name()}CallbackBindingPreflight"
@@ -249,4 +267,23 @@ class KotlinCallbackBindingEmitter(
         val name: String,
         val validatedName: String,
     )
+
+    private data class RenderedCallbackInfoParameter(
+        val variable: Declaration.Variable,
+        val name: String,
+    )
+
+    private companion object {
+        val RESERVED_PARAMETER_NAMES = setOf(
+            "callback",
+            "failure",
+            "policy",
+            "onError",
+            "registration",
+            "prepared",
+            "preparedCall",
+            "allocator",
+            "mode",
+        )
+    }
 }

@@ -63,7 +63,7 @@ class KotlinCallbackCommonEmitter(
 
     private fun emitCallbackType(builder: SourceBuilder, callback: KotlinCallbackModel) {
         builder.appendLine("@CallbackRuntimeApi")
-        builder.appendLine("internal val ${callback.typeName}Type: CallbackType<${callback.typeName}> = CallbackType(")
+        builder.appendLine("internal val ${callback.runtimeTypeName}: CallbackType<${callback.typeName}> = CallbackType(")
         builder.indent()
         builder.appendLine("canonicalId = \"${callback.canonicalId}\",")
         builder.appendLine("hasRoutingUserdata = ${callback.hasRoutingUserdata},")

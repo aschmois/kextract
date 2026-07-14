@@ -13,6 +13,8 @@ import org.graphiks.kextract.callbacks.DirectFunctionBinding
 import org.graphiks.kextract.pipeline.KextractTool
 import org.graphiks.kextract.pipeline.Logger
 import org.graphiks.kextract.pipeline.Options
+import org.jetbrains.kotlin.cli.common.ExitCode
+import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
 import java.io.ByteArrayOutputStream
 import java.io.PrintWriter
 import java.nio.file.Files
@@ -72,6 +74,122 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    fun compileGeneratedJvmFixture(commonSource: String, jvmSource: String) {
+        val workspace = Files.createTempDirectory("kextract-callback-name-classes")
+        try {
+            val common = workspace.resolve("callbackNamesCommon.kt")
+            val jvm = workspace.resolve("callbackNamesJvm.kt")
+            val kffiCommon = workspace.resolve("kffiCommon.kt")
+            val kffiJvm = workspace.resolve("kffiJvm.kt")
+            val output = Files.createDirectories(workspace.resolve("classes"))
+            common.toFile().writeText(commonSource)
+            jvm.toFile().writeText(jvmSource)
+            kffiCommon.toFile().writeText(
+                """
+                package io.ygdrasil.kffi
+
+                expect class NativeAddress
+                interface Callback
+                enum class CallbackPolicy { ONCE, REPEATING }
+                fun interface CallbackExceptionHandler {
+                    fun onException(error: Throwable)
+                    companion object {
+                        val Default = CallbackExceptionHandler { }
+                    }
+                }
+                interface CallbackRegistration<C : Callback> : AutoCloseable {
+                    val callback: NativeAddress
+                    val userdata: NativeAddress?
+                }
+                @RequiresOptIn
+                annotation class CallbackRuntimeApi
+                @RequiresOptIn
+                annotation class UnsafeCallbackRearmApi
+                @CallbackRuntimeApi
+                class CallbackType<C : Callback>(
+                    val canonicalId: String,
+                    val hasRoutingUserdata: Boolean,
+                )
+                @CallbackRuntimeApi
+                class PreparedCallbackRegistration<C : Callback>
+                @OptIn(CallbackRuntimeApi::class)
+                object CallbackRuntime {
+                    fun <C : Callback> register(
+                        type: CallbackType<C>,
+                        trampoline: NativeAddress,
+                        policy: CallbackPolicy,
+                        onError: CallbackExceptionHandler,
+                        callback: C,
+                    ): CallbackRegistration<C> = error("fixture")
+                    fun <C : Callback> prepare(
+                        type: CallbackType<C>,
+                        trampoline: NativeAddress,
+                        policy: CallbackPolicy,
+                        onError: CallbackExceptionHandler,
+                        callback: C,
+                    ): PreparedCallbackRegistration<C> = error("fixture")
+                    fun <C : Callback> rearmAfterNativeQuiescence(
+                        type: CallbackType<C>,
+                        trampoline: NativeAddress,
+                        policy: CallbackPolicy,
+                        onError: CallbackExceptionHandler,
+                        callback: C,
+                    ): CallbackRegistration<C> = error("fixture")
+                    fun <C : Callback> activateForNativeCall(
+                        prepared: PreparedCallbackRegistration<C>,
+                        call: (CallbackRegistration<C>) -> Unit,
+                    ): CallbackRegistration<C> = error("fixture")
+                    fun <C : Callback> dispatchSafely(
+                        type: CallbackType<C>,
+                        userdata: NativeAddress?,
+                        call: (C) -> Unit,
+                    ) = Unit
+                    fun reportUnroutedFailure(failure: Throwable) = Unit
+                }
+                expect value class CString(val handler: NativeAddress)
+                @JvmInline
+                value class ArrayHolder<T>(val handler: NativeAddress)
+                expect class MemoryAllocator()
+                interface CStructure {
+                    val handler: NativeAddress
+                }
+                """.trimIndent(),
+            )
+            kffiJvm.toFile().writeText(
+                """
+                package io.ygdrasil.kffi
+
+                import java.lang.foreign.MemorySegment
+
+                class JvmNativeAddress(val handler: MemorySegment)
+                actual typealias NativeAddress = JvmNativeAddress
+                @JvmInline
+                actual value class CString actual constructor(actual val handler: NativeAddress)
+                actual class MemoryAllocator actual constructor()
+                fun findOrThrow(name: String): MemorySegment = MemorySegment.NULL
+                """.trimIndent(),
+            )
+
+            K2JVMCompiler().exec(
+                System.err,
+                "-no-stdlib",
+                "-no-reflect",
+                "-Xmulti-platform",
+                "-Xcommon-sources=$common,$kffiCommon",
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                output.toString(),
+                common.toString(),
+                jvm.toString(),
+                kffiCommon.toString(),
+                kffiJvm.toString(),
+            ) shouldBe ExitCode.OK
+        } finally {
+            workspace.toFile().deleteRecursively()
+        }
+    }
+
     val genericCallbacks = """
         typedef void (*SampleCallback)(unsigned int value, void * userdata1, void * userdata2);
         typedef void (*NoUserdataCallback)(unsigned int value);
@@ -119,6 +237,64 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
             void * userdata
         );
     """.trimIndent()
+
+    "callback names are valid and collision-free in every generated target" {
+        val config = CallbackBindingsConfig().also { bindings ->
+            bindings.directFunctionBindings = listOf(
+                DirectFunctionBinding().also { binding ->
+                    binding.function = "function:set_class_callback"
+                    binding.callbackParameter = "callback"
+                    binding.callbackType = "typedef:class"
+                    binding.routingUserdataParameter = "userdata"
+                },
+            )
+        }
+        val generated = generateKmp(
+            """
+                typedef void (*class)(int callback,
+                                      int failure,
+                                      int policy,
+                                      int onError,
+                                      int fun,
+                                      int fun_,
+                                      void *userdata);
+                void set_class_callback(int policy, class callback, void *userdata);
+            """.trimIndent(),
+            config,
+        )
+        val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
+        val native = generated.getValue("nativeMain")
+        val android = generated.getValue("androidMain")
+
+        common shouldContain "fun interface class_ : Callback"
+        common shouldContain "fun_: Int,"
+        common shouldContain "fun__2: Int,"
+        common shouldContain "canonicalId = \"typedef:class\""
+        common shouldContain "policy_2: Int,"
+        common shouldContain "callback: class_,"
+        common shouldContain """
+            fun set_class_callback(
+                policy_2: Int,
+                policy: CallbackPolicy,
+                onError: CallbackExceptionHandler = CallbackExceptionHandler.Default,
+                callback: class_,
+            ): CallbackRegistration<class_>
+        """.trimIndent()
+        common shouldNotContain "policy: Int,\n    policy: CallbackPolicy,"
+        jvm shouldContain "private object class_Trampoline"
+        jvm shouldContain "actual fun class_.Companion.register("
+        jvm shouldContain "findOrThrow(\"set_class_callback\")"
+        native shouldContain "private val class_Trampoline = staticCFunction"
+        native shouldContain "actual fun class_.Companion.register("
+        android shouldContain "actual fun class_.Companion.register("
+        listOf(common, jvm, native).forEach { source ->
+            source shouldContain "fun_"
+            source shouldContain "fun__2"
+        }
+
+        compileGeneratedJvmFixture(common, jvm)
+    }
 
     "configured direct callback helpers are transactional on every platform" {
         val config = CallbackBindingsConfig().also { bindings ->

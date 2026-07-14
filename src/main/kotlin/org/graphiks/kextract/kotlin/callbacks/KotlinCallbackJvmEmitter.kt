@@ -31,14 +31,14 @@ class KotlinCallbackJvmEmitter(
             ")"
 
         builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
-        builder.appendLine("private object ${callback.typeName}Trampoline {")
+        builder.appendLine("private object ${callback.trampolineName} {")
         builder.indent()
         builder.appendLine("private val descriptor: FunctionDescriptor = $descriptor")
         builder.appendLine("private val methodHandle: MethodHandle by lazy {")
         builder.indent()
         builder.appendLine("MethodHandles.lookup().findStatic(")
         builder.indent()
-        builder.appendLine("${callback.typeName}Trampoline::class.java,")
+        builder.appendLine("${callback.trampolineName}::class.java,")
         builder.appendLine("\"invoke\",")
         builder.appendLine("descriptor.toMethodType(),")
         builder.unindent()
@@ -64,7 +64,7 @@ class KotlinCallbackJvmEmitter(
         builder.indent()
         builder.appendLine("CallbackRuntime.dispatchSafely(")
         builder.indent()
-        builder.appendLine("type = ${callback.typeName}Type,")
+        builder.appendLine("type = ${callback.runtimeTypeName},")
         val routingUserdata = callback.routingUserdataParameter
             ?.name
             ?.let { "$it.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)" }
@@ -122,8 +122,8 @@ class KotlinCallbackJvmEmitter(
         val registrationType = if (internal) "PreparedCallbackRegistration" else "CallbackRegistration"
         builder.appendLine("): $registrationType<${callback.typeName}> = CallbackRuntime.$operation(")
         builder.indent()
-        builder.appendLine("type = ${callback.typeName}Type,")
-        builder.appendLine("trampoline = ${callback.typeName}Trampoline.address,")
+        builder.appendLine("type = ${callback.runtimeTypeName},")
+        builder.appendLine("trampoline = ${callback.trampolineName}.address,")
         builder.appendLine("policy = policy,")
         builder.appendLine("onError = onError,")
         builder.appendLine("callback = callback,")
