@@ -43,6 +43,13 @@ internal class KmpTypeMapper(
 
     fun callbackFunction(type: Type): Type.Function? = type.callbackFunctionOrNull()
 
+    fun pointerDepth(type: Type): Int = when {
+        type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER ->
+            1 + pointerDepth(type.type())
+        type is Type.Delegated -> pointerDepth(type.type())
+        else -> 0
+    }
+
     fun declaredUnion(type: Type): Declaration.Scoped? = when (type) {
         is Type.Declared -> type.tree().takeIf { it.kind() == Declaration.Scoped.Kind.UNION }
         is Type.Delegated -> declaredUnion(type.type())
@@ -86,6 +93,7 @@ internal class KmpTypeMapper(
     }
 
     private fun mapPointer(pointee: Type, charNullable: Boolean): String = when {
+        pointerDepth(pointee) > 0 -> "NativeAddress?"
         pointee is Type.Primitive && pointee.kind() == Type.Primitive.Kind.Char -> if (charNullable) "CString?" else "CString"
         pointee is Type.Delegated && isGeneratedReferenceTypedef(pointee) -> "${referenceTypeName(pointee)}?"
         pointee is Type.Declared && pointee.tree().kind() in setOf(Declaration.Scoped.Kind.STRUCT, Declaration.Scoped.Kind.UNION) -> {

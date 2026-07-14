@@ -99,36 +99,7 @@ class KotlinKmpJvmBuilder(
                 builder.indent()
 
                 // Define layout
-                builder.appendLine("val layout: GroupLayout = MemoryLayout.structLayout(")
-                builder.indent()
-                var currentOffsetBits = 0L
-                fields.forEachIndexed { i, field ->
-                    val offsetBits = org.graphiks.kextract.DeclarationImpl.ClangOffsetOf.get(field)
-                    if (offsetBits != null && offsetBits > currentOffsetBits) {
-                        val paddingBytes = (offsetBits - currentOffsetBits) / 8
-                        if (paddingBytes > 0) {
-                            builder.appendLine("MemoryLayout.paddingLayout($paddingBytes),")
-                        }
-                    }
-                    val layout = LayoutUtils.layoutString(field.type())
-                    val sizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(field) ?: 0L
-                    currentOffsetBits = (offsetBits ?: currentOffsetBits) + sizeBits
-
-                    val hasNext = i < fields.count() - 1
-                    val structSizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(decl) ?: 0L
-                    val needsEndPadding = !hasNext && structSizeBits > currentOffsetBits
-                    val comma = if (hasNext || needsEndPadding) "," else ""
-                    builder.appendLine("${layout}.withName(\"${field.name()}\")${comma}")
-                }
-                val structSizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(decl) ?: 0L
-                if (structSizeBits > currentOffsetBits) {
-                    val paddingBytes = (structSizeBits - currentOffsetBits) / 8
-                    if (paddingBytes > 0) {
-                        builder.appendLine("MemoryLayout.paddingLayout($paddingBytes)")
-                    }
-                }
-                builder.unindent()
-                builder.appendLine(").withName(\"$structName\")")
+                emitGroupLayout(decl, fields)
                 builder.appendLine()
 
                 // VarHandles for value fields
@@ -442,6 +413,69 @@ class KotlinKmpJvmBuilder(
     override fun visitObjCCategory(decl: Declaration.ObjCCategory) {}
 
     fun getFiles(): List<KotlinSourceFile> = files
+
+    private fun emitGroupLayout(
+        decl: Declaration.Scoped,
+        fields: List<Declaration.Variable>,
+    ) {
+        when (decl.kind()) {
+            Declaration.Scoped.Kind.STRUCT -> emitStructLayout(decl, fields)
+            Declaration.Scoped.Kind.UNION -> emitUnionLayout(decl, fields)
+            else -> error("Expected struct or union, found ${decl.kind()}")
+        }
+    }
+
+    private fun emitStructLayout(
+        decl: Declaration.Scoped,
+        fields: List<Declaration.Variable>,
+    ) {
+        builder.appendLine("val layout: GroupLayout = MemoryLayout.structLayout(")
+        builder.indent()
+        var currentOffsetBits = 0L
+        fields.forEachIndexed { i, field ->
+            val offsetBits = org.graphiks.kextract.DeclarationImpl.ClangOffsetOf.get(field)
+            if (offsetBits != null && offsetBits > currentOffsetBits) {
+                val paddingBytes = (offsetBits - currentOffsetBits) / 8
+                if (paddingBytes > 0) {
+                    builder.appendLine("MemoryLayout.paddingLayout($paddingBytes),")
+                }
+            }
+            val layout = LayoutUtils.layoutString(field.type())
+            val sizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(field) ?: 0L
+            currentOffsetBits = (offsetBits ?: currentOffsetBits) + sizeBits
+
+            val hasNext = i < fields.count() - 1
+            val structSizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(decl) ?: 0L
+            val needsEndPadding = !hasNext && structSizeBits > currentOffsetBits
+            val comma = if (hasNext || needsEndPadding) "," else ""
+            builder.appendLine("${layout}.withName(\"${field.name()}\")${comma}")
+        }
+        val structSizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(decl) ?: 0L
+        if (structSizeBits > currentOffsetBits) {
+            val paddingBytes = (structSizeBits - currentOffsetBits) / 8
+            if (paddingBytes > 0) {
+                builder.appendLine("MemoryLayout.paddingLayout($paddingBytes)")
+            }
+        }
+        builder.unindent()
+        builder.appendLine(").withName(\"${decl.name()}\")")
+    }
+
+    private fun emitUnionLayout(
+        decl: Declaration.Scoped,
+        fields: List<Declaration.Variable>,
+    ) {
+        builder.appendLine("val layout: GroupLayout = MemoryLayout.unionLayout(")
+        builder.indent()
+        fields.forEachIndexed { index, field ->
+            val comma = if (index < fields.lastIndex) "," else ""
+            builder.appendLine(
+                "${LayoutUtils.layoutString(field.type())}.withName(\"${field.name()}\")$comma",
+            )
+        }
+        builder.unindent()
+        builder.appendLine(").withName(\"${decl.name()}\")")
+    }
 
     private fun emitFunction(decl: Declaration.Function) {
         val name = decl.name()

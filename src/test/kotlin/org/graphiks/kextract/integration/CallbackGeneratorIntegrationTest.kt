@@ -381,7 +381,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         android shouldNotContain "throw UnsupportedOperationException_2("
     }
 
-    "Native callback names preserve the external COpaquePointerVar reinterpret type" {
+    "outer opaque handle pointers in callbacks preserve raw address semantics" {
         val generated = generateKmp(
             """
                 typedef struct ExternalImpl * External;
@@ -389,13 +389,23 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
             """.trimIndent(),
         )
         val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
         val native = generated.getValue("nativeMain")
+        val android = generated.getValue("androidMain")
 
         common shouldContain "fun interface COpaquePointerVar_2 : Callback"
         common shouldContain "canonicalId = \"typedef:COpaquePointerVar\""
+        common shouldContain "fun invoke(value: NativeAddress?)"
+        jvm shouldContain
+            "callback.invoke(value.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress))"
         native shouldContain "private val COpaquePointerVar_2Trampoline = staticCFunction"
-        native shouldContain "value?.reinterpret<COpaquePointerVar>()?.pointed?.value"
+        native shouldContain "callback.invoke(value?.let(::NativeAddress))"
         native shouldNotContain "reinterpret<COpaquePointerVar_2>()"
+        android shouldContain "actual fun COpaquePointerVar_2.Companion.register("
+        generated.values.forEach { source ->
+            source shouldNotContain "value: External?"
+            source shouldNotContain "value?.reinterpret<COpaquePointerVar>()?.pointed?.value"
+        }
     }
 
     "configured direct callback helpers are transactional on every platform" {
@@ -769,13 +779,20 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         generated.getValue("nativeMain") shouldContain "SamplePayload.ByValue(payload),"
     }
 
-    "pointer-to-opaque-handle callback parameters load the handle slot post-claim" {
+    "pointer-to-opaque-handle callback parameters expose the raw buffer address" {
         val generated = generateKmp(abiCallbacks)
 
+        generated.getValue("commonMain") shouldContain "device: NativeAddress?,"
         generated.getValue("jvmMain") shouldContain
-            "device.takeIf { it != MemorySegment.NULL }?.reinterpret(ValueLayout.ADDRESS.byteSize())?.get(ValueLayout.ADDRESS, 0L)?.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)?.let { WGPUDevice(it) },"
+            "device.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress),"
         generated.getValue("nativeMain") shouldContain
-            "device?.reinterpret<COpaquePointerVar>()?.pointed?.value?.let(::NativeAddress)?.let { WGPUDevice(it) },"
+            "device?.let(::NativeAddress),"
+        generated.getValue("androidMain") shouldContain
+            "actual fun AbiCallback.Companion.register("
+        generated.values.forEach { source ->
+            source shouldNotContain "device: WGPUDevice?"
+            source shouldNotContain "device?.reinterpret<COpaquePointerVar>()?.pointed?.value"
+        }
     }
 
     "platform trampolines preserve the analyzed routing userdata position" {

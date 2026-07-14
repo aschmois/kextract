@@ -132,6 +132,25 @@ class GeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    "KMP aggregate layout generation" - {
+        "JVM unions use union layouts" {
+            val header = """
+                typedef union WGPUScalar {
+                    unsigned int u32;
+                    float f32;
+                    unsigned long long u64;
+                } WGPUScalar;
+            """.trimIndent()
+
+            val jvm = generateKmpFile(header, "jvmMain", "Jvm")
+
+            jvm shouldContain "actual interface WGPUScalar : CStructure"
+            val declaration = jvm.substringAfter("actual interface WGPUScalar")
+            declaration shouldContain "MemoryLayout.unionLayout("
+            declaration shouldNotContain "MemoryLayout.structLayout("
+        }
+    }
+
     "KMP function generation" - {
         "emits common and JVM wrappers for WGPU functions" {
             val header = """

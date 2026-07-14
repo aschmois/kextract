@@ -455,7 +455,11 @@ class KotlinKmpNativeBuilder(
                     else -> nativePointerVarType(type)
                 }
                 if (cast == null) {
-                    "$name?.pointer?.takeIf { $name.rawValue != 0L }"
+                    if (typeMapper.pointerDepth(type) > 1) {
+                        "$name?.pointer?.takeIf { $name.rawValue != 0L }?.reinterpret()"
+                    } else {
+                        "$name?.pointer?.takeIf { $name.rawValue != 0L }"
+                    }
                 } else {
                     "$name?.pointer?.takeIf { $name.rawValue != 0L }?.reinterpret<$cast>()"
                 }

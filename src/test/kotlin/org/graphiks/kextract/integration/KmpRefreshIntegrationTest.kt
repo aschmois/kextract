@@ -92,6 +92,36 @@ class KmpRefreshIntegrationTest : FreeSpec({
         generated.getValue("androidMain") shouldContain "actual value class WGPUDevice"
     }
 
+    "multiplatform mode preserves pointer depth for opaque handle output arrays" {
+        val generated = generateKmp(
+            """
+            typedef struct WGPUInstanceImpl *WGPUInstance;
+            typedef struct WGPUAdapterImpl *WGPUAdapter;
+            unsigned long long wgpuInstanceEnumerateAdapters(
+                WGPUInstance instance,
+                void const *options,
+                WGPUAdapter *adapters
+            );
+            """.trimIndent(),
+        )
+
+        generated.getValue("commonMain") shouldContain
+            "expect fun wgpuInstanceEnumerateAdapters(instance: WGPUInstance?, options: NativeAddress?, adapters: NativeAddress?): ULong"
+        generated.getValue("androidMain") shouldContain
+            "actual fun wgpuInstanceEnumerateAdapters(instance: WGPUInstance?, options: NativeAddress?, adapters: NativeAddress?): ULong"
+        generated.getValue("jvmMain") shouldContain
+            "actual fun wgpuInstanceEnumerateAdapters(instance: WGPUInstance?, options: NativeAddress?, adapters: NativeAddress?): ULong"
+        generated.getValue("jvmMain") shouldContain
+            "adapters?.handler ?: MemorySegment.NULL"
+        generated.getValue("nativeMain") shouldContain
+            "actual fun wgpuInstanceEnumerateAdapters(instance: WGPUInstance?, options: NativeAddress?, adapters: NativeAddress?): ULong"
+        generated.getValue("nativeMain") shouldContain
+            "adapters?.pointer?.takeIf { adapters.rawValue != 0L }?.reinterpret()"
+        generated.values.forEach { source ->
+            source shouldNotContain "adapters: WGPUAdapter?"
+        }
+    }
+
     "multiplatform mode resolves forward-declared struct typedef fields" {
         val generated = generateKmpFromIncludedHeader(
             """
