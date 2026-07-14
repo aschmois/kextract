@@ -16,6 +16,9 @@ object LayoutUtils {
         require(byteAlignment > 0L && byteAlignment.countOneBits() == 1) {
             "Invalid byte alignment: $byteAlignment"
         }
+        if (type is Type.Delegated && type.kind() != Type.Delegated.Kind.POINTER) {
+            return layoutString(type.type(), byteAlignment)
+        }
         val layout = if (type is Type.Array) {
             "MemoryLayout.sequenceLayout(${type.elementCount() ?: 0L}, " +
                 "${layoutString(type.elementType(), byteAlignment)})"
