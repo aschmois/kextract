@@ -13,9 +13,24 @@ class KotlinIdentifierAllocatorTest : FreeSpec({
         names.allocate("callback", "arg3") shouldBe "callback_2"
         names.allocate("", "arg4") shouldBe "arg4"
     }
+
+    "uses the fallback for Kotlin-reserved underscore-only identifiers" {
+        val names = KotlinIdentifierAllocatorFixture()
+
+        names.allocate("_", "arg0") shouldBe "arg0"
+        names.allocate("__", "arg1") shouldBe "arg1"
+        names.allocate("___", "arg2") shouldBe "arg2"
+        names.allocate("_", "__") shouldBe "generated"
+    }
+
+    "mangles the reserved future keyword typeof" {
+        val names = KotlinIdentifierAllocatorFixture()
+
+        names.allocate("typeof", "arg0") shouldBe "typeof_"
+    }
 })
 
-private class KotlinIdentifierAllocatorFixture(reserved: Iterable<String>) {
+private class KotlinIdentifierAllocatorFixture(reserved: Iterable<String> = emptyList()) {
     private val allocatorClass = Class.forName(
         "org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator",
     )

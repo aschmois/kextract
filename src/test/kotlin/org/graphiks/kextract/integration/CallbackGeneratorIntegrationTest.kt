@@ -238,6 +238,23 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         );
     """.trimIndent()
 
+    val callbackRuntimeTypeNames = listOf(
+        "Callback",
+        "CallbackType",
+        "CallbackPolicy",
+        "CallbackRegistration",
+        "PreparedCallbackRegistration",
+        "CallbackExceptionHandler",
+        "CallbackRuntime",
+        "CallbackRuntimeApi",
+        "UnsafeCallbackRearmApi",
+        "NativeAddress",
+        "MemoryAllocator",
+        "CString",
+        "ArrayHolder",
+        "CStructure",
+    )
+
     "callback names are valid and collision-free in every generated target" {
         val config = CallbackBindingsConfig().also { bindings ->
             bindings.directFunctionBindings = listOf(
@@ -292,6 +309,30 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
             source shouldContain "fun_"
             source shouldContain "fun__2"
         }
+
+        compileGeneratedJvmFixture(common, jvm)
+    }
+
+    "callback names allocate away from imported KFFI runtime types" {
+        val generated = generateKmp(
+            callbackRuntimeTypeNames.joinToString("\n") { name ->
+                "typedef void (*$name)(void);"
+            },
+        )
+        val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
+        val native = generated.getValue("nativeMain")
+        val android = generated.getValue("androidMain")
+
+        callbackRuntimeTypeNames.forEach { rawName ->
+            val allocatedName = "${rawName}_2"
+            common shouldContain "fun interface $allocatedName : Callback"
+            common shouldContain "canonicalId = \"typedef:$rawName\""
+            jvm shouldContain "actual fun $allocatedName.Companion.register("
+            native shouldContain "actual fun $allocatedName.Companion.register("
+            android shouldContain "actual fun $allocatedName.Companion.register("
+        }
+        common shouldNotContain "fun interface Callback : Callback"
 
         compileGeneratedJvmFixture(common, jvm)
     }

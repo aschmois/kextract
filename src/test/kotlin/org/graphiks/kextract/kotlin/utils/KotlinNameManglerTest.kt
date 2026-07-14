@@ -13,6 +13,11 @@ class KotlinNameManglerTest {
     }
 
     @Test
+    fun `mangles the reserved future keyword typeof`() {
+        assertEquals("typeof_", KotlinNameMangler.mangle("typeof"))
+    }
+
+    @Test
     fun `replaces invalid characters`() {
         assertEquals("foo_bar", KotlinNameMangler.mangle("foo\$bar"))
     }

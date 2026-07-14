@@ -16,6 +16,23 @@ import org.graphiks.kextract.kotlin.objc.ObjCSubclassingTemplate
 import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 import org.graphiks.kextract.pipeline.Options
 
+internal val CALLBACK_RUNTIME_RESERVED_TYPE_NAMES = setOf(
+    "Callback",
+    "CallbackType",
+    "CallbackPolicy",
+    "CallbackRegistration",
+    "PreparedCallbackRegistration",
+    "CallbackExceptionHandler",
+    "CallbackRuntime",
+    "CallbackRuntimeApi",
+    "UnsafeCallbackRearmApi",
+    "NativeAddress",
+    "MemoryAllocator",
+    "CString",
+    "ArrayHolder",
+    "CStructure",
+)
+
 /**
  * Main entry point for Kotlin code generation.
  * This class is callable from Java (via KextractTool).
@@ -51,7 +68,7 @@ class KotlinGenerator {
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
-            val callbackNames = KotlinIdentifierAllocator()
+            val callbackNames = KotlinIdentifierAllocator(CALLBACK_RUNTIME_RESERVED_TYPE_NAMES)
             val callbackModels = callbackBindings.callbacks.map { callback ->
                 KotlinCallbackModel.from(callback, callbackNames)
             }
