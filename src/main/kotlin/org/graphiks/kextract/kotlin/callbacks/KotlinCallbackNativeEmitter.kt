@@ -1,11 +1,29 @@
 package org.graphiks.kextract.kotlin.callbacks
 
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_OPAQUE_POINTER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_OPAQUE_POINTER_VAR
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_VALUE
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_EXCEPTION_HANDLER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_POLICY
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_REGISTRATION
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME_API
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.OPT_IN
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.POINTED
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.PREPARED_CALLBACK_REGISTRATION
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.REINTERPRET
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.STATIC_C_FUNCTION
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSAFE_CALLBACK_REARM_API
 import org.graphiks.kextract.kotlin.builders.SourceBuilder
 import org.graphiks.kextract.pipeline.isEnum
 
-class KotlinCallbackNativeEmitter(
+internal class KotlinCallbackNativeEmitter(
     private val mapType: (Type) -> String,
+    private val namePlan: KotlinKmpNamePlan,
 ) {
     fun emit(builder: SourceBuilder, callbacks: List<KotlinCallbackModel>) {
         callbacks.forEach { callback ->
@@ -13,7 +31,7 @@ class KotlinCallbackNativeEmitter(
             emitRegistrationOperation(builder, callback, "register", internal = false)
             emitRegistrationOperation(builder, callback, "prepare", internal = true)
             if (!callback.hasRoutingUserdata) {
-                builder.appendLine("@UnsafeCallbackRearmApi")
+                builder.appendLine("@${namePlan.runtime(UNSAFE_CALLBACK_REARM_API)}")
                 emitRegistrationOperation(
                     builder,
                     callback,
@@ -26,22 +44,22 @@ class KotlinCallbackNativeEmitter(
 
     private fun emitTrampoline(builder: SourceBuilder, callback: KotlinCallbackModel) {
         val rawParameters = callback.rawParameters()
-        val functionTypes = rawParameters.map { it.cAbiType.nativeCarrier } + "Unit"
+        val functionTypes = rawParameters.map { planNativeCarrier(it.cAbiType.nativeCarrier) } + "Unit"
         val parameterNames = rawParameters.joinToString(", ") { it.name }
         val lambdaStart = if (parameterNames.isEmpty()) "{" else "{ $parameterNames ->"
 
-        builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
+        builder.appendLine("@${namePlan.runtime(OPT_IN)}(${namePlan.runtime(CALLBACK_RUNTIME_API)}::class)")
         builder.appendLine(
             "private val ${callback.trampolineName} = " +
-                "staticCFunction<${functionTypes.joinToString(", ")}> $lambdaStart",
+                "${namePlan.runtime(STATIC_C_FUNCTION)}<${functionTypes.joinToString(", ")}> $lambdaStart",
         )
         builder.indent()
         builder.appendLine("try {")
         builder.indent()
-        builder.appendLine("CallbackRuntime.dispatchSafely(")
+        builder.appendLine("${namePlan.runtime(CALLBACK_RUNTIME)}.dispatchSafely(")
         builder.indent()
         builder.appendLine("type = ${callback.runtimeTypeName},")
-        val routingUserdata = callback.routingUserdataParameter?.name?.let { "$it?.let(::NativeAddress)" } ?: "null"
+        val routingUserdata = callback.routingUserdataParameter?.name?.let { "$it?.let(::${namePlan.runtime(NATIVE_ADDRESS)})" } ?: "null"
         builder.appendLine("userdata = $routingUserdata,")
         builder.unindent()
         builder.appendLine(") { callback ->")
@@ -52,7 +70,7 @@ class KotlinCallbackNativeEmitter(
         builder.unindent()
         builder.appendLine("} catch (failure: Throwable) {")
         builder.indent()
-        builder.appendLine("CallbackRuntime.reportUnroutedFailure(failure)")
+        builder.appendLine("${namePlan.runtime(CALLBACK_RUNTIME)}.reportUnroutedFailure(failure)")
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
@@ -82,19 +100,19 @@ class KotlinCallbackNativeEmitter(
         operation: String,
         internal: Boolean,
     ) {
-        builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
+        builder.appendLine("@${namePlan.runtime(OPT_IN)}(${namePlan.runtime(CALLBACK_RUNTIME_API)}::class)")
         val visibility = if (internal) "internal " else ""
         builder.appendLine("${visibility}actual fun ${callback.typeName}.Companion.$operation(")
         builder.indent()
-        builder.appendLine("policy: CallbackPolicy,")
-        builder.appendLine("onError: CallbackExceptionHandler,")
+        builder.appendLine("policy: ${namePlan.runtime(CALLBACK_POLICY)},")
+        builder.appendLine("onError: ${namePlan.runtime(CALLBACK_EXCEPTION_HANDLER)},")
         builder.appendLine("callback: ${callback.typeName},")
         builder.unindent()
-        val registrationType = if (internal) "PreparedCallbackRegistration" else "CallbackRegistration"
-        builder.appendLine("): $registrationType<${callback.typeName}> = CallbackRuntime.$operation(")
+        val registrationType = if (internal) namePlan.runtime(PREPARED_CALLBACK_REGISTRATION) else namePlan.runtime(CALLBACK_REGISTRATION)
+        builder.appendLine("): $registrationType<${callback.typeName}> = ${namePlan.runtime(CALLBACK_RUNTIME)}.$operation(")
         builder.indent()
         builder.appendLine("type = ${callback.runtimeTypeName},")
-        builder.appendLine("trampoline = NativeAddress(${callback.trampolineName}),")
+        builder.appendLine("trampoline = ${namePlan.runtime(NATIVE_ADDRESS)}(${callback.trampolineName}),")
         builder.appendLine("policy = policy,")
         builder.appendLine("onError = onError,")
         builder.appendLine("callback = callback,")
@@ -112,17 +130,17 @@ class KotlinCallbackNativeEmitter(
             isEnum(type) && isOptionsStyle(mapped) -> "$mapped($name.toLong())"
             isEnum(type) -> enumApplicationValue(name, mapped, cAbiType)
             cAbiType is KotlinCallbackCAbiType.StructValue -> "$mapped.ByValue($name)"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "NativeAddress?" ->
-                "$name?.let(::NativeAddress)"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "CString?" ->
-                "$name?.let(::NativeAddress)?.let(::CString)"
+            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(NATIVE_ADDRESS)}?" ->
+                "$name?.let(::${namePlan.runtime(NATIVE_ADDRESS)})"
+            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(C_STRING)}?" ->
+                "$name?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let(::${namePlan.runtime(C_STRING)})"
             cAbiType is KotlinCallbackCAbiType.Address && mapped.endsWith("?") -> {
                 val nonNullable = mapped.removeSuffix("?")
                 if (cAbiType.pointerDepth > 1) {
-                    "$name?.reinterpret<COpaquePointerVar>()?.pointed?.value" +
-                        "?.let(::NativeAddress)?.let { $nonNullable(it) }"
+                    "$name?.${namePlan.runtime(REINTERPRET)}<${namePlan.runtime(C_OPAQUE_POINTER_VAR)}>()?.${namePlan.runtime(POINTED)}?.value" +
+                        "?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let { $nonNullable(it) }"
                 } else {
-                    "$name?.let(::NativeAddress)?.let { $nonNullable(it) }"
+                    "$name?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let { $nonNullable(it) }"
                 }
             }
             else -> name
@@ -156,4 +174,10 @@ class KotlinCallbackNativeEmitter(
 
     private fun KotlinCallbackModel.rawParameters(): List<KotlinCallbackParameter> =
         (parameters + listOfNotNull(routingUserdataParameter)).sortedBy(KotlinCallbackParameter::index)
+
+    private fun planNativeCarrier(carrier: String): String = when {
+        carrier == "COpaquePointer?" -> "${namePlan.runtime(C_OPAQUE_POINTER)}?"
+        carrier.startsWith("CValue<") -> carrier.replaceFirst("CValue", namePlan.runtime(C_VALUE))
+        else -> carrier
+    }
 }

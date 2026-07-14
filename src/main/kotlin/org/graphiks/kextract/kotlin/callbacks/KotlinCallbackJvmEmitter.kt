@@ -1,11 +1,31 @@
 package org.graphiks.kextract.kotlin.callbacks
 
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARENA
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_EXCEPTION_HANDLER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_POLICY
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_REGISTRATION
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME_API
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.FUNCTION_DESCRIPTOR
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JVM_STATIC
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.LINKER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_SEGMENT
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.METHOD_HANDLE
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.METHOD_HANDLES
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.OPT_IN
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.PREPARED_CALLBACK_REGISTRATION
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSAFE_CALLBACK_REARM_API
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.VALUE_LAYOUT
 import org.graphiks.kextract.kotlin.builders.SourceBuilder
 import org.graphiks.kextract.pipeline.isEnum
 
-class KotlinCallbackJvmEmitter(
+internal class KotlinCallbackJvmEmitter(
     private val mapType: (Type) -> String,
+    private val namePlan: KotlinKmpNamePlan,
 ) {
     fun emit(builder: SourceBuilder, callbacks: List<KotlinCallbackModel>) {
         callbacks.forEach { callback ->
@@ -13,7 +33,7 @@ class KotlinCallbackJvmEmitter(
             emitRegistrationOperation(builder, callback, "register", internal = false)
             emitRegistrationOperation(builder, callback, "prepare", internal = true)
             if (!callback.hasRoutingUserdata) {
-                builder.appendLine("@UnsafeCallbackRearmApi")
+                builder.appendLine("@${namePlan.runtime(UNSAFE_CALLBACK_REARM_API)}")
                 emitRegistrationOperation(
                     builder,
                     callback,
@@ -26,17 +46,18 @@ class KotlinCallbackJvmEmitter(
 
     private fun emitTrampoline(builder: SourceBuilder, callback: KotlinCallbackModel) {
         val rawParameters = callback.rawParameters()
-        val descriptor = "FunctionDescriptor.ofVoid(" +
-            rawParameters.joinToString(", ") { it.cAbiType.jvmLayout } +
+        val functionDescriptor = namePlan.runtime(FUNCTION_DESCRIPTOR)
+        val descriptor = "$functionDescriptor.ofVoid(" +
+            rawParameters.joinToString(", ") { planJvmLayout(it.cAbiType.jvmLayout) } +
             ")"
 
-        builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
+        builder.appendLine("@${namePlan.runtime(OPT_IN)}(${namePlan.runtime(CALLBACK_RUNTIME_API)}::class)")
         builder.appendLine("private object ${callback.trampolineName} {")
         builder.indent()
-        builder.appendLine("private val descriptor: FunctionDescriptor = $descriptor")
-        builder.appendLine("private val methodHandle: MethodHandle by lazy {")
+        builder.appendLine("private val descriptor: $functionDescriptor = $descriptor")
+        builder.appendLine("private val methodHandle: ${namePlan.runtime(METHOD_HANDLE)} by lazy {")
         builder.indent()
-        builder.appendLine("MethodHandles.lookup().findStatic(")
+        builder.appendLine("${namePlan.runtime(METHOD_HANDLES)}.lookup().findStatic(")
         builder.indent()
         builder.appendLine("${callback.trampolineName}::class.java,")
         builder.appendLine("\"invoke\",")
@@ -45,29 +66,29 @@ class KotlinCallbackJvmEmitter(
         builder.appendLine(")")
         builder.unindent()
         builder.appendLine("}")
-        builder.appendLine("val address: NativeAddress by lazy {")
+        builder.appendLine("val address: ${namePlan.runtime(NATIVE_ADDRESS)} by lazy {")
         builder.indent()
-        builder.appendLine("NativeAddress(Linker.nativeLinker().upcallStub(methodHandle, descriptor, Arena.global()))")
+        builder.appendLine("${namePlan.runtime(NATIVE_ADDRESS)}(${namePlan.runtime(LINKER)}.nativeLinker().upcallStub(methodHandle, descriptor, ${namePlan.runtime(ARENA)}.global()))")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
-        builder.appendLine("@JvmStatic")
+        builder.appendLine("@${namePlan.runtime(JVM_STATIC)}")
         builder.appendLine("private fun invoke(")
         builder.indent()
         rawParameters.forEach { parameter ->
-            builder.appendLine("${parameter.name}: ${parameter.cAbiType.jvmCarrier},")
+            builder.appendLine("${parameter.name}: ${planJvmCarrier(parameter.cAbiType.jvmCarrier)},")
         }
         builder.unindent()
         builder.appendLine(") {")
         builder.indent()
         builder.appendLine("try {")
         builder.indent()
-        builder.appendLine("CallbackRuntime.dispatchSafely(")
+        builder.appendLine("${namePlan.runtime(CALLBACK_RUNTIME)}.dispatchSafely(")
         builder.indent()
         builder.appendLine("type = ${callback.runtimeTypeName},")
         val routingUserdata = callback.routingUserdataParameter
             ?.name
-            ?.let { "$it.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)" }
+            ?.let { "$it.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }?.let(::${namePlan.runtime(NATIVE_ADDRESS)})" }
             ?: "null"
         builder.appendLine("userdata = $routingUserdata,")
         builder.unindent()
@@ -79,7 +100,7 @@ class KotlinCallbackJvmEmitter(
         builder.unindent()
         builder.appendLine("} catch (failure: Throwable) {")
         builder.indent()
-        builder.appendLine("CallbackRuntime.reportUnroutedFailure(failure)")
+        builder.appendLine("${namePlan.runtime(CALLBACK_RUNTIME)}.reportUnroutedFailure(failure)")
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
@@ -111,16 +132,16 @@ class KotlinCallbackJvmEmitter(
         operation: String,
         internal: Boolean,
     ) {
-        builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
+        builder.appendLine("@${namePlan.runtime(OPT_IN)}(${namePlan.runtime(CALLBACK_RUNTIME_API)}::class)")
         val visibility = if (internal) "internal " else ""
         builder.appendLine("${visibility}actual fun ${callback.typeName}.Companion.$operation(")
         builder.indent()
-        builder.appendLine("policy: CallbackPolicy,")
-        builder.appendLine("onError: CallbackExceptionHandler,")
+        builder.appendLine("policy: ${namePlan.runtime(CALLBACK_POLICY)},")
+        builder.appendLine("onError: ${namePlan.runtime(CALLBACK_EXCEPTION_HANDLER)},")
         builder.appendLine("callback: ${callback.typeName},")
         builder.unindent()
-        val registrationType = if (internal) "PreparedCallbackRegistration" else "CallbackRegistration"
-        builder.appendLine("): $registrationType<${callback.typeName}> = CallbackRuntime.$operation(")
+        val registrationType = if (internal) namePlan.runtime(PREPARED_CALLBACK_REGISTRATION) else namePlan.runtime(CALLBACK_REGISTRATION)
+        builder.appendLine("): $registrationType<${callback.typeName}> = ${namePlan.runtime(CALLBACK_RUNTIME)}.$operation(")
         builder.indent()
         builder.appendLine("type = ${callback.runtimeTypeName},")
         builder.appendLine("trampoline = ${callback.trampolineName}.address,")
@@ -145,22 +166,22 @@ class KotlinCallbackJvmEmitter(
             mapped == "ULong" -> "$name.toULong()"
             mapped == "UShort" -> "$name.toUShort()"
             mapped == "UByte" -> "$name.toUByte()"
-            cAbiType is KotlinCallbackCAbiType.StructValue -> "$mapped(NativeAddress($name))"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "NativeAddress?" ->
-                "$name.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "CString?" ->
-                "$name.takeIf { it != MemorySegment.NULL }?.let(::NativeAddress)?.let(::CString)"
+            cAbiType is KotlinCallbackCAbiType.StructValue -> "$mapped(${namePlan.runtime(NATIVE_ADDRESS)}($name))"
+            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(NATIVE_ADDRESS)}?" ->
+                "$name.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }?.let(::${namePlan.runtime(NATIVE_ADDRESS)})"
+            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(C_STRING)}?" ->
+                "$name.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let(::${namePlan.runtime(C_STRING)})"
             cAbiType is KotlinCallbackCAbiType.Address && mapped.endsWith("?") -> {
                 val nonNullable = mapped.removeSuffix("?")
                 if (cAbiType.pointerDepth > 1) {
-                    "$name.takeIf { it != MemorySegment.NULL }" +
-                        "?.reinterpret(ValueLayout.ADDRESS.byteSize())" +
-                        "?.get(ValueLayout.ADDRESS, 0L)" +
-                        "?.takeIf { it != MemorySegment.NULL }" +
-                        "?.let(::NativeAddress)?.let { $nonNullable(it) }"
+                        "$name.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }" +
+                        "?.reinterpret(${namePlan.runtime(VALUE_LAYOUT)}.ADDRESS.byteSize())" +
+                        "?.get(${namePlan.runtime(VALUE_LAYOUT)}.ADDRESS, 0L)" +
+                        "?.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }" +
+                        "?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let { $nonNullable(it) }"
                 } else {
-                    "$name.takeIf { it != MemorySegment.NULL }" +
-                        "?.let(::NativeAddress)?.let { $nonNullable(it) }"
+                    "$name.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }" +
+                        "?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let { $nonNullable(it) }"
                 }
             }
             else -> name
@@ -208,4 +229,10 @@ class KotlinCallbackJvmEmitter(
 
     private fun KotlinCallbackModel.rawParameters(): List<KotlinCallbackParameter> =
         (parameters + listOfNotNull(routingUserdataParameter)).sortedBy(KotlinCallbackParameter::index)
+
+    private fun planJvmLayout(layout: String): String =
+        layout.replace("ValueLayout", namePlan.runtime(VALUE_LAYOUT))
+
+    private fun planJvmCarrier(carrier: String): String =
+        if (carrier == "MemorySegment") namePlan.runtime(MEMORY_SEGMENT) else carrier
 }

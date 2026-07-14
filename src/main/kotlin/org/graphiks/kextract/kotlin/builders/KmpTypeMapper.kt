@@ -2,20 +2,29 @@ package org.graphiks.kextract.kotlin.builders
 
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARRAY_HOLDER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
 import org.graphiks.kextract.pipeline.isEnum
 
 internal class KmpTypeMapper(
     private val opaqueHandleAliases: Map<String, String>,
     private val generatedStructNames: Set<String>,
+    private val namePlan: KotlinKmpNamePlan,
     private val arraysAsHolders: Boolean = true,
 ) {
+    private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
+    private val cString = namePlan.runtime(C_STRING)
+    private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
+
     fun mapType(type: Type): String = when {
         type is Type.Primitive -> mapPrimitive(type.kind())
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.UNSIGNED -> mapUnsigned(type.type())
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> mapPointer(type.type(), charNullable = false)
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> mapTypedef(type)
         type is Type.Declared -> declaredName(type)
-        else -> "NativeAddress"
+        else -> nativeAddress
     }
 
     fun mapFunctionType(type: Type): String = when {
@@ -23,10 +32,10 @@ internal class KmpTypeMapper(
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.UNSIGNED -> mapType(type)
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> mapFunctionPointer(type.type())
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> mapFunctionTypedef(type)
-        type is Type.Function -> "NativeAddress?"
+        type is Type.Function -> "$nativeAddress?"
         type is Type.Declared -> declaredName(type)
-        type is Type.Array && arraysAsHolders -> "ArrayHolder<${mapFunctionType(type.elementType()).removeSuffix("?")}>?"
-        else -> "NativeAddress"
+        type is Type.Array && arraysAsHolders -> "$arrayHolder<${mapFunctionType(type.elementType()).removeSuffix("?")}>?"
+        else -> nativeAddress
     }
 
     fun mapPrimitive(kind: Type.Primitive.Kind): String = when (kind) {
@@ -38,7 +47,7 @@ internal class KmpTypeMapper(
         Type.Primitive.Kind.Float -> "Float"
         Type.Primitive.Kind.Double -> "Double"
         Type.Primitive.Kind.Void -> "Unit"
-        else -> "NativeAddress"
+        else -> nativeAddress
     }
 
     fun callbackFunction(type: Type): Type.Function? = type.callbackFunctionOrNull()
@@ -75,8 +84,8 @@ internal class KmpTypeMapper(
     fun isInlineStructOrUnion(type: Type): Boolean {
         val fieldType = mapType(type)
         return canonicalKmpType(type) == "Other" &&
-            fieldType != "NativeAddress" &&
-            fieldType != "CString" &&
+            fieldType != nativeAddress &&
+            fieldType != cString &&
             !fieldType.endsWith("?")
     }
 
@@ -93,16 +102,16 @@ internal class KmpTypeMapper(
     }
 
     private fun mapPointer(pointee: Type, charNullable: Boolean): String = when {
-        pointerDepth(pointee) > 0 -> "NativeAddress?"
-        pointee is Type.Primitive && pointee.kind() == Type.Primitive.Kind.Char -> if (charNullable) "CString?" else "CString"
+        pointerDepth(pointee) > 0 -> "$nativeAddress?"
+        pointee is Type.Primitive && pointee.kind() == Type.Primitive.Kind.Char -> if (charNullable) "$cString?" else cString
         pointee is Type.Delegated && isGeneratedReferenceTypedef(pointee) -> "${referenceTypeName(pointee)}?"
         pointee is Type.Declared && pointee.tree().kind() in setOf(Declaration.Scoped.Kind.STRUCT, Declaration.Scoped.Kind.UNION) -> {
             val name = pointee.tree().name()
             opaqueHandleAliases[name]?.let { "$it?" }
                 ?: name.takeIf { it.endsWith("Impl") }?.removeSuffix("Impl")?.let { "$it?" }
-                ?: if (name.isNotEmpty() && !name.contains("unnamed")) "$name?" else "NativeAddress?"
+                ?: if (name.isNotEmpty() && !name.contains("unnamed")) "${namePlan.declaration(pointee.tree())}?" else "$nativeAddress?"
         }
-        else -> "NativeAddress?"
+        else -> "$nativeAddress?"
     }
 
     private fun mapTypedef(type: Type.Delegated): String {
@@ -116,24 +125,24 @@ internal class KmpTypeMapper(
                     pointeeName.isNotEmpty() && pointeeName.endsWith("Impl") && typedefName != null -> "$typedefName?"
                     pointeeName.isNotEmpty() && pointeeName.endsWith("Impl") -> "${pointeeName.removeSuffix("Impl")}?"
                     pointeeName.isNotEmpty() && !pointeeName.contains("unnamed") -> "$pointeeName?"
-                    else -> "NativeAddress?"
+                    else -> "$nativeAddress?"
                 }
             }
-            return "NativeAddress?"
+            return "$nativeAddress?"
         }
 
         val innerMapped = mapType(inner)
-        if (innerMapped != "NativeAddress" && innerMapped != "NativeAddress?" && !innerMapped.contains("unnamed")) {
+        if (innerMapped != nativeAddress && innerMapped != "$nativeAddress?" && !innerMapped.contains("unnamed")) {
             return innerMapped
         }
         val name = type.name()
-        return if (name != null && !name.contains("unnamed")) name else "NativeAddress"
+        return if (name != null && !name.contains("unnamed")) name else nativeAddress
     }
 
     private fun mapFunctionPointer(pointee: Type): String = when {
-        pointee is Type.Primitive && pointee.kind() == Type.Primitive.Kind.Char -> "CString?"
-        pointee is Type.Function -> "NativeAddress?"
-        pointee is Type.Delegated && pointee.kind() == Type.Delegated.Kind.TYPEDEF && pointee.type() is Type.Function -> "NativeAddress?"
+        pointee is Type.Primitive && pointee.kind() == Type.Primitive.Kind.Char -> "$cString?"
+        pointee is Type.Function -> "$nativeAddress?"
+        pointee is Type.Delegated && pointee.kind() == Type.Delegated.Kind.TYPEDEF && pointee.type() is Type.Function -> "$nativeAddress?"
         else -> mapPointer(pointee, charNullable = true)
     }
 
@@ -141,21 +150,21 @@ internal class KmpTypeMapper(
         val typedefName = type.name()
         val inner = type.type()
         return when {
-            callbackFunction(type) != null -> "NativeAddress?"
-            inner is Type.Function -> "NativeAddress?"
-            inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER && inner.type() is Type.Function -> "NativeAddress?"
+            callbackFunction(type) != null -> "$nativeAddress?"
+            inner is Type.Function -> "$nativeAddress?"
+            inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER && inner.type() is Type.Function -> "$nativeAddress?"
             inner is Type.Delegated && inner.kind() == Type.Delegated.Kind.POINTER ->
-                if (typedefName != null && isGeneratedReferenceTypedef(type)) "$typedefName?" else "NativeAddress?"
+                if (typedefName != null && isGeneratedReferenceTypedef(type)) "$typedefName?" else "$nativeAddress?"
             else -> {
                 val innerMapped = mapType(inner)
-                if (innerMapped != "NativeAddress" && !innerMapped.contains("unnamed")) innerMapped else typedefName ?: "NativeAddress"
+                if (innerMapped != nativeAddress && !innerMapped.contains("unnamed")) innerMapped else typedefName ?: nativeAddress
             }
         }
     }
 
     private fun declaredName(type: Type.Declared): String {
         val name = type.tree().name()
-        return if (name.isNotEmpty() && !name.contains("unnamed")) name else "NativeAddress"
+        return if (name.isNotEmpty() && !name.contains("unnamed")) namePlan.declaration(type.tree()) else nativeAddress
     }
 
     private fun Type.callbackFunctionOrNull(): Type.Function? = when {

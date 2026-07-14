@@ -84,8 +84,8 @@ class KotlinGenerator {
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
-            val externalNames = KotlinKmpExternalNameCollector.collect(scoped, callbackBindings)
-            val callbackNames = KotlinIdentifierAllocator(GENERATED_CALLBACK_RESERVED_IDENTIFIERS + externalNames)
+            val namePlan = KotlinKmpNamePlan.create(scoped, callbackBindings)
+            val callbackNames = KotlinIdentifierAllocator(namePlan.topLevelNames + namePlan.renderedRuntimeNames)
             val callbackModels = callbackBindings.callbacks.map { callback ->
                 KotlinCallbackModel.from(callback, callbackNames)
             }
@@ -107,6 +107,7 @@ class KotlinGenerator {
                 callbackModelsByCanonicalId,
                 directBindingModels,
                 callbackBindings,
+                namePlan,
             )
         }
 
@@ -131,6 +132,7 @@ class KotlinGenerator {
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
         directBindingModels: List<KotlinDirectFunctionBindingModel>,
         callbackBindings: ValidatedCallbackBindings,
+        namePlan: KotlinKmpNamePlan,
     ): List<KotlinSourceFile> = buildList {
         KotlinKmpCommonBuilder(
             targetPackage,
@@ -139,10 +141,11 @@ class KotlinGenerator {
             callbackModelsByCanonicalId,
             directBindingModels,
             callbackBindings,
+            namePlan,
         ).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpJvmBuilder(targetPackage, className, callbackModels, directBindingModels).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, directBindingModels).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpNativeBuilder(targetPackage, className, callbackModels, directBindingModels).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpJvmBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpNativeBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
     }
 
     private fun sanitizeClassName(name: String): String =

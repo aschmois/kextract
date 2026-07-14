@@ -7,6 +7,14 @@ import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
+import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARRAY_HOLDER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_ALLOCATOR
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
+import org.graphiks.kextract.kotlin.KotlinKmpSourceSet
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCAbiType
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCommonEmitter
@@ -14,13 +22,14 @@ import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 
-class KotlinKmpCommonBuilder(
+internal class KotlinKmpCommonBuilder(
     private val targetPackage: String,
     private val className: String,
     private val callbackModels: List<KotlinCallbackModel>,
     private val callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
     private val callbackBindings: ValidatedCallbackBindings,
+    private val namePlan: KotlinKmpNamePlan,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -28,7 +37,11 @@ class KotlinKmpCommonBuilder(
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
     private val opaqueHandleAliases = mutableMapOf<String, String>()
-    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames)
+    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames, namePlan)
+    private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
+    private val cString = namePlan.runtime(C_STRING)
+    private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
+    private val memoryAllocator = namePlan.runtime(MEMORY_ALLOCATOR)
 
     init {
         if (targetPackage.isNotEmpty()) {
@@ -36,21 +49,10 @@ class KotlinKmpCommonBuilder(
             builder.appendLine()
         }
 
-        builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
-        builder.appendLine("import io.ygdrasil.kffi.Callback")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackExceptionHandler")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackPolicy")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackRegistration")
-        if (directBindingModels.isNotEmpty()) {
-            builder.appendLine("import io.ygdrasil.kffi.CallbackRuntime")
-        }
-        builder.appendLine("import io.ygdrasil.kffi.CallbackRuntimeApi")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackType")
-        builder.appendLine("import io.ygdrasil.kffi.PreparedCallbackRegistration")
-        builder.appendLine("import io.ygdrasil.kffi.UnsafeCallbackRearmApi")
-        builder.appendLine("import io.ygdrasil.kffi.CString")
-        builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
-        builder.appendLine("import io.ygdrasil.kffi.MemoryAllocator")
+        KotlinKmpRuntimeSymbol.entries
+            .filter { KotlinKmpSourceSet.COMMON in it.sourceSets }
+            .filter { it != CALLBACK_RUNTIME || directBindingModels.isNotEmpty() }
+            .forEach { builder.appendLine(namePlan.importLine(it)) }
         builder.appendLine()
     }
 
@@ -59,7 +61,7 @@ class KotlinKmpCommonBuilder(
         when (decl.kind()) {
             Declaration.Scoped.Kind.STRUCT,
             Declaration.Scoped.Kind.UNION -> {
-                val structName = decl.name()
+                val structName = namePlan.declaration(decl)
                 if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
@@ -75,28 +77,28 @@ class KotlinKmpCommonBuilder(
 
                 // Visit members
                 decl.members().filterIsInstance<Declaration.Variable>().filterNot(Skip::isPresent).forEach { field ->
-                    val fieldName = field.name()
+                    val fieldName = namePlan.member(field)
                     val fieldType = typeMapper.mapType(field.type())
                     emitKDoc(field)
-                    if (fieldType == "CString") {
-                        builder.appendLine("var $fieldName: CString?")
-                    } else if (fieldType.startsWith("ArrayHolder")) {
+                    if (fieldType == cString) {
+                        builder.appendLine("var $fieldName: $cString?")
+                    } else if (fieldType.startsWith(arrayHolder)) {
                         builder.appendLine("var $fieldName: $fieldType?")
-                    } else if (fieldType.endsWith("?") || fieldType == "NativeAddress") {
+                    } else if (fieldType.endsWith("?") || fieldType == nativeAddress) {
                         builder.appendLine("var $fieldName: $fieldType")
                     } else {
                         builder.appendLine("var $fieldName: $fieldType")
                     }
                 }
 
-                builder.appendLine("val handler: NativeAddress")
+                builder.appendLine("val handler: $nativeAddress")
 
                 // Companion object
                 builder.appendLine("companion object {")
                 builder.indent()
-                builder.appendLine("operator fun invoke(address: NativeAddress): $structName")
-                builder.appendLine("fun allocate(allocator: MemoryAllocator): $structName")
-                builder.appendLine("fun allocateArray(allocator: MemoryAllocator, size: UInt, provider: (UInt, $structName) -> Unit): ArrayHolder<$structName>")
+                builder.appendLine("operator fun invoke(address: $nativeAddress): $structName")
+                builder.appendLine("fun allocate(allocator: $memoryAllocator): $structName")
+                builder.appendLine("fun allocateArray(allocator: $memoryAllocator, size: UInt, provider: (UInt, $structName) -> Unit): $arrayHolder<$structName>")
                 builder.unindent()
                 builder.appendLine("}")
 
@@ -105,7 +107,7 @@ class KotlinKmpCommonBuilder(
                 builder.appendLine()
             }
             Declaration.Scoped.Kind.ENUM -> {
-                val name = decl.name()
+                val name = namePlan.declaration(decl)
                 if (name.isNotEmpty() && !name.contains("unnamed")) {
                     if (!generatedNames.add(name)) return
                     val constants = decl.members().filterIsInstance<Declaration.Constant>().filterNot(Skip::isPresent)
@@ -122,8 +124,8 @@ class KotlinKmpCommonBuilder(
                 for (member in decl.members()) {
                     member.accept(this)
                 }
-                KotlinCallbackCommonEmitter(typeMapper::mapFunctionType).emit(builder, callbackModels)
-                KotlinCallbackBindingEmitter(typeMapper::mapFunctionType).emitCommon(
+                KotlinCallbackCommonEmitter(typeMapper::mapFunctionType, namePlan).emit(builder, callbackModels)
+                KotlinCallbackBindingEmitter(typeMapper::mapFunctionType, namePlan).emitCommon(
                     builder,
                     directBindingModels,
                     callbackBindings.callbackInfoBindings,
@@ -146,7 +148,7 @@ class KotlinKmpCommonBuilder(
     }
 
     private fun emitEnumClass(decl: Declaration.Scoped, constants: List<Declaration.Constant>) {
-        val name = decl.name()
+        val name = namePlan.declaration(decl)
         val scalar = KotlinCallbackCAbiType.from(Type.declared(decl)) as? KotlinCallbackCAbiType.Scalar
             ?: error("Enum $name must have a scalar C ABI type")
         val applicationType = scalar.nativeCarrier
@@ -236,22 +238,22 @@ class KotlinKmpCommonBuilder(
 
         fields.forEach { field ->
             emitKDoc(field)
-            builder.appendLine("var ${field.name()}: ${typeMapper.mapType(field.type())}")
+            builder.appendLine("var ${namePlan.member(field)}: ${typeMapper.mapType(field.type())}")
         }
         unionFields.forEach { field ->
             val type = typeMapper.mapType(field.type())
             val setter = field.name().replaceFirstChar { it.titlecase() }
             emitKDoc(field)
-            builder.appendLine("val ${field.name()}: $type?")
+            builder.appendLine("val ${namePlan.member(field)}: $type?")
             builder.appendLine("fun set$setter(value: $type)")
         }
 
-        builder.appendLine("val handler: NativeAddress")
+        builder.appendLine("val handler: $nativeAddress")
         builder.appendLine("companion object {")
         builder.indent()
-        builder.appendLine("operator fun invoke(address: NativeAddress): WGPUNativeDisplayHandle")
-        builder.appendLine("fun allocate(allocator: MemoryAllocator): WGPUNativeDisplayHandle")
-        builder.appendLine("fun allocateArray(allocator: MemoryAllocator, size: UInt, provider: (UInt, WGPUNativeDisplayHandle) -> Unit): ArrayHolder<WGPUNativeDisplayHandle>")
+        builder.appendLine("operator fun invoke(address: $nativeAddress): WGPUNativeDisplayHandle")
+        builder.appendLine("fun allocate(allocator: $memoryAllocator): WGPUNativeDisplayHandle")
+        builder.appendLine("fun allocateArray(allocator: $memoryAllocator, size: UInt, provider: (UInt, WGPUNativeDisplayHandle) -> Unit): $arrayHolder<WGPUNativeDisplayHandle>")
         builder.unindent()
         builder.appendLine("}")
 
@@ -294,13 +296,13 @@ class KotlinKmpCommonBuilder(
             "$name: ${typeMapper.mapFunctionType(param.type())}"
         }.joinToString(", ")
         emitKDoc(decl)
-        builder.appendLine("expect fun ${decl.name()}($params): $returnType")
+        builder.appendLine("expect fun ${namePlan.declaration(decl)}($params): $returnType")
         builder.appendLine()
     }
     override fun visitVariable(decl: Declaration.Variable) {}
     override fun visitTypedef(decl: Declaration.Typedef) {
         if (Skip.isPresent(decl)) return
-        val name = decl.name()
+        val name = namePlan.declaration(decl)
         if (name.isEmpty()) return
         if (typeMapper.callbackFunction(decl.type()) != null) return
         val inner = decl.type()
@@ -312,7 +314,7 @@ class KotlinKmpCommonBuilder(
                     opaqueHandleAliases[pointeeName] = name
                     if (!generatedNames.add(name)) return
                     emitKDoc(decl)
-                    builder.appendLine("expect value class $name(val handler: NativeAddress)")
+                    builder.appendLine("expect value class $name(val handler: $nativeAddress)")
                     builder.appendLine()
                 }
             }

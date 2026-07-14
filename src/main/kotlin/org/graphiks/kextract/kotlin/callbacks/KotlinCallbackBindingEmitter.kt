@@ -4,11 +4,24 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.callbacks.ValidatedCallbackInfoBinding
 import org.graphiks.kextract.callbacks.ValidatedDirectFunctionBinding
+import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_EXCEPTION_HANDLER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_POLICY
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_REGISTRATION
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME_API
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_ALLOCATOR
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.OPT_IN
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.SUPPRESS
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSAFE_CALLBACK_REARM_API
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSUPPORTED_OPERATION_EXCEPTION
 import org.graphiks.kextract.kotlin.builders.SourceBuilder
 import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 
-class KotlinCallbackBindingEmitter(
+internal class KotlinCallbackBindingEmitter(
     private val mapType: (Type) -> String,
+    private val namePlan: KotlinKmpNamePlan,
 ) {
     fun emitCommon(
         builder: SourceBuilder,
@@ -27,9 +40,9 @@ class KotlinCallbackBindingEmitter(
     ) {
         bindings.forEach { model ->
             val binding = model.binding
-            val name = binding.function.name()
+            val name = namePlan.declaration(binding.function)
             val parameters = applicationParameters(binding)
-            builder.appendLine("@Suppress(\"UNUSED_VARIABLE\")")
+            builder.appendLine("@${namePlan.runtime(SUPPRESS)}(\"UNUSED_VARIABLE\")")
             emitPreflightHeader(builder, binding, model.preflightName, parameters, actual = true)
             builder.indent()
             parameters.forEach { parameter ->
@@ -94,7 +107,7 @@ class KotlinCallbackBindingEmitter(
             val parameters = applicationParameters(binding)
             emitPreflightHeader(builder, binding, model.preflightName, parameters, actual = true)
             builder.indent()
-            builder.appendLine("throw UnsupportedOperationException(")
+            builder.appendLine("throw ${namePlan.runtime(UNSUPPORTED_OPERATION_EXCEPTION)}(")
             builder.indent()
             builder.appendLine("\"Android/JNA safe callback bindings are not supported; use raw bindings or an Android Native target\",")
             builder.unindent()
@@ -133,15 +146,15 @@ class KotlinCallbackBindingEmitter(
     ) {
         val parameters = applicationParameters(binding)
         val callbackType = callbackModelsByCanonicalId.getValue(binding.callback.id).typeName
-        builder.appendLine("@OptIn(CallbackRuntimeApi::class)")
-        builder.appendLine("fun ${binding.function.name()}(")
+        builder.appendLine("@${namePlan.runtime(OPT_IN)}(${namePlan.runtime(CALLBACK_RUNTIME_API)}::class)")
+        builder.appendLine("fun ${namePlan.declaration(binding.function)}(")
         builder.indent()
         parameters.forEach { parameter ->
             builder.appendLine("${parameter.name}: ${mapType(parameter.variable.type())},")
         }
         emitRegistrationParameters(builder, callbackType)
         builder.unindent()
-        builder.appendLine("): CallbackRegistration<$callbackType> {")
+        builder.appendLine("): ${namePlan.runtime(CALLBACK_REGISTRATION)}<$callbackType> {")
         builder.indent()
         builder.appendLine("val preparedCall = ${preflightCall(preflightName, parameters)}")
         builder.appendLine("val prepared = $callbackType.prepare(")
@@ -151,7 +164,7 @@ class KotlinCallbackBindingEmitter(
         builder.appendLine("callback = callback,")
         builder.unindent()
         builder.appendLine(")")
-        builder.appendLine("return CallbackRuntime.activateForNativeCall(prepared) { registration ->")
+        builder.appendLine("return ${namePlan.runtime(CALLBACK_RUNTIME)}.activateForNativeCall(prepared) { registration ->")
         builder.indent()
         builder.appendLine(preparedCallInvocation(binding, "registration"))
         builder.unindent()
@@ -169,7 +182,7 @@ class KotlinCallbackBindingEmitter(
     ) {
         val parameters = applicationParameters(binding)
         val callbackType = callbackModelsByCanonicalId.getValue(binding.callback.id).typeName
-        builder.appendLine("@UnsafeCallbackRearmApi")
+        builder.appendLine("@${namePlan.runtime(UNSAFE_CALLBACK_REARM_API)}")
         builder.appendLine("fun rearmAfterNativeQuiescence(")
         builder.indent()
         parameters.forEach { parameter ->
@@ -177,7 +190,7 @@ class KotlinCallbackBindingEmitter(
         }
         emitRegistrationParameters(builder, callbackType)
         builder.unindent()
-        builder.appendLine("): CallbackRegistration<$callbackType> {")
+        builder.appendLine("): ${namePlan.runtime(CALLBACK_REGISTRATION)}<$callbackType> {")
         builder.indent()
         builder.appendLine("val preparedCall = ${preflightCall(preflightName, parameters)}")
         builder.appendLine("val registration = $callbackType.rearmAfterNativeQuiescence(")
@@ -208,7 +221,7 @@ class KotlinCallbackBindingEmitter(
         binding: ValidatedCallbackInfoBinding,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
-        val structType = binding.struct.name()
+        val structType = namePlan.declaration(binding.struct)
         val callbackType = callbackModelsByCanonicalId.getValue(binding.callback.id).typeName
         val parameterNames = KotlinIdentifierAllocator(RESERVED_PARAMETER_NAMES)
         val applicationUserdataParameters = binding.applicationUserdataFields.mapIndexed { index, field ->
@@ -224,24 +237,24 @@ class KotlinCallbackBindingEmitter(
         builder.appendLine(" */")
         builder.appendLine("fun $structType.Companion.allocate(")
         builder.indent()
-        builder.appendLine("allocator: MemoryAllocator,")
+        builder.appendLine("allocator: ${namePlan.runtime(MEMORY_ALLOCATOR)},")
         binding.mode?.let { mode ->
-            builder.appendLine("mode: ${mode.type.name()},")
+            builder.appendLine("mode: ${namePlan.declaration(mode.type.declaration)},")
         }
-        builder.appendLine("registration: CallbackRegistration<$callbackType>,")
+        builder.appendLine("registration: ${namePlan.runtime(CALLBACK_REGISTRATION)}<$callbackType>,")
         applicationUserdataParameters.forEach { parameter ->
-            builder.appendLine("${parameter.name}: NativeAddress? = null,")
+            builder.appendLine("${parameter.name}: ${namePlan.runtime(NATIVE_ADDRESS)}? = null,")
         }
         builder.unindent()
         builder.appendLine("): $structType {")
         builder.indent()
-        binding.mode?.let { mode -> emitModeValidation(builder, mode.allowedConstants.map(Declaration.Constant::name)) }
+        binding.mode?.let { mode -> emitModeValidation(builder, mode.allowedConstants.map(namePlan::declaration)) }
         builder.appendLine("val info = allocate(allocator)")
-        binding.mode?.let { mode -> builder.appendLine("info.${mode.field.name()} = mode") }
-        builder.appendLine("info.${binding.callbackField.name()} = registration.callback")
-        builder.appendLine("info.${binding.routingUserdataField.name()} = registration.userdata")
+        binding.mode?.let { mode -> builder.appendLine("info.${namePlan.member(mode.field)} = mode") }
+        builder.appendLine("info.${namePlan.member(binding.callbackField)} = registration.callback")
+        builder.appendLine("info.${namePlan.member(binding.routingUserdataField)} = registration.userdata")
         applicationUserdataParameters.forEach { parameter ->
-            builder.appendLine("info.${parameter.variable.name()} = ${parameter.name}")
+            builder.appendLine("info.${namePlan.member(parameter.variable)} = ${parameter.name}")
         }
         builder.appendLine("return info")
         builder.unindent()
@@ -267,8 +280,10 @@ class KotlinCallbackBindingEmitter(
     }
 
     private fun emitRegistrationParameters(builder: SourceBuilder, callbackType: String) {
-        builder.appendLine("policy: CallbackPolicy,")
-        builder.appendLine("onError: CallbackExceptionHandler = CallbackExceptionHandler.Default,")
+        val callbackPolicy = namePlan.runtime(CALLBACK_POLICY)
+        val callbackExceptionHandler = namePlan.runtime(CALLBACK_EXCEPTION_HANDLER)
+        builder.appendLine("policy: $callbackPolicy,")
+        builder.appendLine("onError: $callbackExceptionHandler = $callbackExceptionHandler.Default,")
         builder.appendLine("callback: $callbackType,")
     }
 
@@ -359,9 +374,9 @@ class KotlinCallbackBindingEmitter(
 
     private fun preparedCallType(binding: ValidatedDirectFunctionBinding): String =
         if (binding.routingUserdataParameter == null) {
-            "(NativeAddress?) -> Unit"
+            "(${namePlan.runtime(NATIVE_ADDRESS)}?) -> Unit"
         } else {
-            "(NativeAddress?, NativeAddress?) -> Unit"
+            "(${namePlan.runtime(NATIVE_ADDRESS)}?, ${namePlan.runtime(NATIVE_ADDRESS)}?) -> Unit"
         }
 
     private data class RenderedParameter(

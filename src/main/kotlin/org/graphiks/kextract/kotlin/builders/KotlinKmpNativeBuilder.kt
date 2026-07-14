@@ -5,6 +5,23 @@ package org.graphiks.kextract.kotlin.builders
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARRAY_HOLDER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.BYTE_VAR
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_OPAQUE_POINTER
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_VALUE
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_VALUE_FACTORY
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_ALLOCATOR
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.OPT_IN
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.POINTED
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.PTR
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.REINTERPRET
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.SIZE_OF
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.USE_CONTENTS
+import org.graphiks.kextract.kotlin.KotlinKmpSourceSet
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
@@ -13,11 +30,12 @@ import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.isStructOrUnion
 import org.graphiks.kextract.pipeline.isEnum
 
-class KotlinKmpNativeBuilder(
+internal class KotlinKmpNativeBuilder(
     private val targetPackage: String,
     private val className: String,
     private val callbackModels: List<KotlinCallbackModel>,
     private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
+    private val namePlan: KotlinKmpNamePlan,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -26,29 +44,31 @@ class KotlinKmpNativeBuilder(
     private val generatedStructNames = mutableSetOf<String>()
     private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
     private val opaqueHandleAliases = mutableMapOf<String, String>()
-    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames)
+    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames, namePlan)
+    private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
+    private val cString = namePlan.runtime(C_STRING)
+    private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
+    private val memoryAllocator = namePlan.runtime(MEMORY_ALLOCATOR)
+    private val cValue = namePlan.runtime(C_VALUE)
+    private val cOpaquePointer = namePlan.runtime(C_OPAQUE_POINTER)
+    private val byteVar = namePlan.runtime(BYTE_VAR)
+    private val sizeOf = namePlan.runtime(SIZE_OF)
+    private val pointed = namePlan.runtime(POINTED)
+    private val ptr = namePlan.runtime(PTR)
+    private val reinterpret = namePlan.runtime(REINTERPRET)
+    private val useContents = namePlan.runtime(USE_CONTENTS)
 
     init {
-        builder.appendLine("@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)")
+        builder.appendLine("@file:${namePlan.runtime(OPT_IN)}(kotlinx.cinterop.ExperimentalForeignApi::class)")
         builder.appendLine()
         if (targetPackage.isNotEmpty()) {
             builder.appendLine("package $targetPackage")
             builder.appendLine()
         }
 
-        builder.appendLine("import io.ygdrasil.kffi.NativeAddress")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackExceptionHandler")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackPolicy")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackRegistration")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackRuntime")
-        builder.appendLine("import io.ygdrasil.kffi.CallbackRuntimeApi")
-        builder.appendLine("import io.ygdrasil.kffi.PreparedCallbackRegistration")
-        builder.appendLine("import io.ygdrasil.kffi.UnsafeCallbackRearmApi")
-        builder.appendLine("import io.ygdrasil.kffi.CString")
-        builder.appendLine("import io.ygdrasil.kffi.toCString")
-        builder.appendLine("import io.ygdrasil.kffi.ArrayHolder")
-        builder.appendLine("import io.ygdrasil.kffi.MemoryAllocator")
-        builder.appendLine("import kotlinx.cinterop.*")
+        KotlinKmpRuntimeSymbol.entries
+            .filter { KotlinKmpSourceSet.NATIVE in it.sourceSets }
+            .forEach { builder.appendLine(namePlan.importLine(it)) }
         builder.appendLine()
     }
 
@@ -57,7 +77,7 @@ class KotlinKmpNativeBuilder(
         when (decl.kind()) {
             Declaration.Scoped.Kind.STRUCT,
             Declaration.Scoped.Kind.UNION -> {
-                val structName = decl.name()
+                val structName = namePlan.declaration(decl)
                 if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
@@ -73,47 +93,47 @@ class KotlinKmpNativeBuilder(
                 builder.indent()
 
                 fields.forEach { field ->
-                    val fieldName = field.name()
+                    val fieldName = namePlan.member(field)
                     val fieldType = typeMapper.mapType(field.type())
-                    if (fieldType == "CString") {
-                        builder.appendLine("actual var $fieldName: CString?")
-                    } else if (fieldType.startsWith("ArrayHolder")) {
+                    if (fieldType == cString) {
+                        builder.appendLine("actual var $fieldName: $cString?")
+                    } else if (fieldType.startsWith(arrayHolder)) {
                         builder.appendLine("actual var $fieldName: $fieldType?")
-                    } else if (fieldType.endsWith("?") || fieldType == "NativeAddress") {
+                    } else if (fieldType.endsWith("?") || fieldType == nativeAddress) {
                         builder.appendLine("actual var $fieldName: $fieldType")
                     } else {
                         builder.appendLine("actual var $fieldName: $fieldType")
                     }
                 }
-                builder.appendLine("actual val handler: NativeAddress")
+                builder.appendLine("actual val handler: $nativeAddress")
 
                 // Companion object
                 builder.appendLine("actual companion object {")
                 builder.indent()
-                builder.appendLine("actual operator fun invoke(address: NativeAddress): $structName = ByReference(address)")
+                builder.appendLine("actual operator fun invoke(address: $nativeAddress): $structName = ByReference(address)")
                 if (fields.isEmpty()) {
-                    builder.appendLine("actual fun allocate(allocator: MemoryAllocator): $structName =")
+                    builder.appendLine("actual fun allocate(allocator: $memoryAllocator): $structName =")
                     builder.appendLine("    ByReference(allocator.allocate(8L))")
                 } else {
-                    builder.appendLine("actual fun allocate(allocator: MemoryAllocator): $structName =")
-                    builder.appendLine("    ByReference(allocator.allocate(sizeOf<webgpu.native.$structName>().toLong()))")
+                    builder.appendLine("actual fun allocate(allocator: $memoryAllocator): $structName =")
+                    builder.appendLine("    ByReference(allocator.allocate($sizeOf<webgpu.native.$structName>().toLong()))")
                 }
                 builder.appendLine()
-                builder.appendLine("actual fun allocateArray(allocator: MemoryAllocator, size: UInt, provider: (UInt, $structName) -> Unit): ArrayHolder<$structName> {")
+                builder.appendLine("actual fun allocateArray(allocator: $memoryAllocator, size: UInt, provider: (UInt, $structName) -> Unit): $arrayHolder<$structName> {")
                 builder.indent()
                 if (fields.isEmpty()) {
                     builder.appendLine("val byteSize = 8L")
                 } else {
-                    builder.appendLine("val byteSize = sizeOf<webgpu.native.$structName>().toLong()")
+                    builder.appendLine("val byteSize = $sizeOf<webgpu.native.$structName>().toLong()")
                 }
                 builder.appendLine("val segment = allocator.allocate(byteSize * size.toLong())")
                 builder.appendLine("for (i in 0 until size.toInt()) {")
                 builder.indent()
                 builder.appendLine("val rawAddr = segment.rawValue + i.toLong() * byteSize")
-                builder.appendLine("provider(i.toUInt(), ByReference(NativeAddress(rawAddr)))")
+                builder.appendLine("provider(i.toUInt(), ByReference($nativeAddress(rawAddr)))")
                 builder.unindent()
                 builder.appendLine("}")
-                builder.appendLine("return ArrayHolder(segment)")
+                builder.appendLine("return $arrayHolder(segment)")
                 builder.unindent()
                 builder.appendLine("}")
                 builder.unindent()
@@ -121,77 +141,78 @@ class KotlinKmpNativeBuilder(
  
                 if (fields.isNotEmpty()) {
                     builder.appendLine()
-                    builder.appendLine("    value class ByValue(val handle: CValue<webgpu.native.$structName>) : $structName {")
+                    builder.appendLine("    value class ByValue(val handle: $cValue<webgpu.native.$structName>) : $structName {")
                     builder.indent()
-                    builder.appendLine("override val handler: NativeAddress")
+                    builder.appendLine("override val handler: $nativeAddress")
                     builder.appendLine("    get() = error(\"should not be call on CValue\")")
                     builder.appendLine()
                     fields.forEach { field ->
                         val fieldName = field.name()
+                        val propertyName = namePlan.member(field)
                         val fieldType = typeMapper.mapType(field.type())
-                        if (fieldType == "CString") {
-                            builder.appendLine("override var $fieldName: CString?")
-                        } else if (fieldType.startsWith("ArrayHolder")) {
-                            builder.appendLine("override var $fieldName: $fieldType?")
-                        } else if (fieldType.endsWith("?") || fieldType == "NativeAddress") {
-                            builder.appendLine("override var $fieldName: $fieldType")
+                        if (fieldType == cString) {
+                            builder.appendLine("override var $propertyName: $cString?")
+                        } else if (fieldType.startsWith(arrayHolder)) {
+                            builder.appendLine("override var $propertyName: $fieldType?")
+                        } else if (fieldType.endsWith("?") || fieldType == nativeAddress) {
+                            builder.appendLine("override var $propertyName: $fieldType")
                         } else {
-                            builder.appendLine("override var $fieldName: $fieldType")
+                            builder.appendLine("override var $propertyName: $fieldType")
                         }
                         builder.indent()
                         when (fieldType) {
-                            "CString" -> {
-                                builder.appendLine("get() = handle.useContents { this.$fieldName?.let { CString(NativeAddress(it)) } }")
+                            cString -> {
+                                builder.appendLine("get() = handle.$useContents { this.$fieldName?.let { $cString($nativeAddress(it)) } }")
                                 builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                             }
-                            "NativeAddress" -> {
-                                builder.appendLine("get() = handle.useContents { this.$fieldName?.let(::NativeAddress) ?: NativeAddress(0L) }")
+                            nativeAddress -> {
+                                builder.appendLine("get() = handle.$useContents { this.$fieldName?.let(::$nativeAddress) ?: $nativeAddress(0L) }")
                                 builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                             }
-                            "NativeAddress?" -> {
-                                builder.appendLine("get() = handle.useContents { this.$fieldName?.let(::NativeAddress) }")
+                            "$nativeAddress?" -> {
+                                builder.appendLine("get() = handle.$useContents { this.$fieldName?.let(::$nativeAddress) }")
                                 builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                             }
                             "Boolean" -> {
-                                builder.appendLine("get() = handle.useContents { this.$fieldName }")
+                                builder.appendLine("get() = handle.$useContents { this.$fieldName }")
                                 builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                             }
                             "Byte", "Short", "Int", "Long", "Float", "Double", "UByte", "UShort", "UInt", "ULong" -> {
-                                builder.appendLine("get() = handle.useContents { this.$fieldName }")
+                                builder.appendLine("get() = handle.$useContents { this.$fieldName }")
                                 builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                             }
                             else -> {
                                 if (typeMapper.isInlineStructOrUnion(field.type())) {
-                                    val isOpt = fieldType == "CString" || fieldType.startsWith("ArrayHolder") || fieldType.endsWith("?")
+                                    val isOpt = fieldType == cString || fieldType.startsWith(arrayHolder) || fieldType.endsWith("?")
                                     if (isOpt) {
                                         val nonOpt = fieldType.removeSuffix("?")
-                                        builder.appendLine("get() = handle.useContents { this.$fieldName?.let(::NativeAddress)?.let { $nonOpt.ByReference(it) } }")
+                                        builder.appendLine("get() = handle.$useContents { this.$fieldName?.let(::$nativeAddress)?.let { $nonOpt.ByReference(it) } }")
                                         builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                                     } else {
-                                        builder.appendLine("get() = handle.useContents { $fieldType.ByReference(NativeAddress(this.$fieldName.ptr)) }")
+                                        builder.appendLine("get() = handle.$useContents { $fieldType.ByReference($nativeAddress(this.$fieldName.$ptr)) }")
                                         builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                                     }
                                 } else {
                                     when {
-                                        fieldType == "CString" -> {
-                                            builder.appendLine("get() = handle.useContents { this.$fieldName?.let { CString(NativeAddress(it)) } }")
+                                        fieldType == cString -> {
+                                            builder.appendLine("get() = handle.$useContents { this.$fieldName?.let { $cString($nativeAddress(it)) } }")
                                             builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                                         }
-                                        fieldType == "NativeAddress" -> {
-                                            builder.appendLine("get() = handle.useContents { this.$fieldName?.let(::NativeAddress) ?: NativeAddress(0L) }")
+                                        fieldType == nativeAddress -> {
+                                            builder.appendLine("get() = handle.$useContents { this.$fieldName?.let(::$nativeAddress) ?: $nativeAddress(0L) }")
                                             builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                                         }
-                                        fieldType == "NativeAddress?" -> {
-                                            builder.appendLine("get() = handle.useContents { this.$fieldName?.let(::NativeAddress) }")
+                                        fieldType == "$nativeAddress?" -> {
+                                            builder.appendLine("get() = handle.$useContents { this.$fieldName?.let(::$nativeAddress) }")
                                             builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                                         }
                                         fieldType.endsWith("?") -> {
                                             val nonOpt = fieldType.removeSuffix("?")
-                                            builder.appendLine("get() = handle.useContents { this.$fieldName?.let(::NativeAddress)?.let { $nonOpt(it) } }")
+                                            builder.appendLine("get() = handle.$useContents { this.$fieldName?.let(::$nativeAddress)?.let { $nonOpt(it) } }")
                                             builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                                         }
                                         else -> {
-                                            builder.appendLine("get() = handle.useContents { this.$fieldName as $fieldType }")
+                                            builder.appendLine("get() = handle.$useContents { this.$fieldName as $fieldType }")
                                             builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                                         }
                                     }
@@ -206,41 +227,42 @@ class KotlinKmpNativeBuilder(
 
                 // ByReference implementation using type-safe C-Interop delegation
                 builder.appendLine()
-                builder.appendLine("class ByReference(override val handler: NativeAddress) : $structName {")
+                builder.appendLine("class ByReference(override val handler: $nativeAddress) : $structName {")
                 builder.indent()
                 if (fields.isEmpty()) {
-                    builder.appendLine("private val struct: COpaquePointer")
+                    builder.appendLine("private val struct: $cOpaquePointer")
                     builder.appendLine("    get() = handler.pointer")
                 } else {
                     builder.appendLine("private val struct: webgpu.native.$structName")
-                    builder.appendLine("    get() = handler.pointer.reinterpret<webgpu.native.$structName>().pointed")
+                    builder.appendLine("    get() = handler.pointer.$reinterpret<webgpu.native.$structName>().$pointed")
                 }
                 builder.appendLine()
                 fields.forEach { field ->
                     val fieldName = field.name()
+                    val propertyName = namePlan.member(field)
                     val fieldType = typeMapper.mapType(field.type())
-                    if (fieldType == "CString") {
-                        builder.appendLine("override var $fieldName: CString?")
-                    } else if (fieldType.startsWith("ArrayHolder")) {
-                        builder.appendLine("override var $fieldName: $fieldType?")
-                    } else if (fieldType.endsWith("?") || fieldType == "NativeAddress") {
-                        builder.appendLine("override var $fieldName: $fieldType")
+                    if (fieldType == cString) {
+                        builder.appendLine("override var $propertyName: $cString?")
+                    } else if (fieldType.startsWith(arrayHolder)) {
+                        builder.appendLine("override var $propertyName: $fieldType?")
+                    } else if (fieldType.endsWith("?") || fieldType == nativeAddress) {
+                        builder.appendLine("override var $propertyName: $fieldType")
                     } else {
-                        builder.appendLine("override var $fieldName: $fieldType")
+                        builder.appendLine("override var $propertyName: $fieldType")
                     }
                     builder.indent()
                     when (fieldType) {
-                        "CString" -> {
-                            builder.appendLine("get() = struct.$fieldName?.let { CString(NativeAddress(it)) }")
-                            builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.reinterpret() }")
+                        cString -> {
+                            builder.appendLine("get() = struct.$fieldName?.let { $cString($nativeAddress(it)) }")
+                            builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.$reinterpret() }")
                         }
-                        "NativeAddress" -> {
-                            builder.appendLine("get() = struct.$fieldName?.let(::NativeAddress) ?: NativeAddress(0L)")
-                            builder.appendLine("set(value) { struct.$fieldName = value.pointer.takeIf { value.rawValue != 0L }?.reinterpret() }")
+                        nativeAddress -> {
+                            builder.appendLine("get() = struct.$fieldName?.let(::$nativeAddress) ?: $nativeAddress(0L)")
+                            builder.appendLine("set(value) { struct.$fieldName = value.pointer.takeIf { value.rawValue != 0L }?.$reinterpret() }")
                         }
-                        "NativeAddress?" -> {
-                            builder.appendLine("get() = struct.$fieldName?.let(::NativeAddress)")
-                            builder.appendLine("set(value) { struct.$fieldName = value?.pointer?.takeIf { value.rawValue != 0L }?.reinterpret() }")
+                        "$nativeAddress?" -> {
+                            builder.appendLine("get() = struct.$fieldName?.let(::$nativeAddress)")
+                            builder.appendLine("set(value) { struct.$fieldName = value?.pointer?.takeIf { value.rawValue != 0L }?.$reinterpret() }")
                         }
                         "Boolean" -> {
                             builder.appendLine("get() = struct.$fieldName")
@@ -252,18 +274,18 @@ class KotlinKmpNativeBuilder(
                         }
                         else -> {
                             if (typeMapper.isInlineStructOrUnion(field.type())) {
-                                val isOpt = fieldType == "CString" || fieldType.startsWith("ArrayHolder") || fieldType.endsWith("?")
+                                val isOpt = fieldType == cString || fieldType.startsWith(arrayHolder) || fieldType.endsWith("?")
                                 if (isOpt) {
                                     val nonOpt = fieldType.removeSuffix("?")
-                                    builder.appendLine("get() = struct.$fieldName?.let(::NativeAddress)?.let { $nonOpt.ByReference(it) }")
-                                    builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.reinterpret() }")
+                                    builder.appendLine("get() = struct.$fieldName?.let(::$nativeAddress)?.let { $nonOpt.ByReference(it) }")
+                                    builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.$reinterpret() }")
                                 } else {
-                                    builder.appendLine("get() = $fieldType.ByReference(NativeAddress(struct.$fieldName.ptr))")
+                                    builder.appendLine("get() = $fieldType.ByReference($nativeAddress(struct.$fieldName.$ptr))")
                                     builder.appendLine("set(value) {")
                                     builder.indent()
-                                    builder.appendLine("val destBytes = struct.$fieldName.ptr.reinterpret<ByteVar>()")
-                                    builder.appendLine("val srcBytes = value.handler.pointer.reinterpret<ByteVar>()")
-                                    builder.appendLine("val byteSize = sizeOf<webgpu.native.$fieldType>().toLong()")
+                                    builder.appendLine("val destBytes = struct.$fieldName.$ptr.$reinterpret<$byteVar>()")
+                                    builder.appendLine("val srcBytes = value.handler.pointer.$reinterpret<$byteVar>()")
+                                    builder.appendLine("val byteSize = $sizeOf<webgpu.native.$fieldType>().toLong()")
                                     builder.appendLine("for (i in 0L until byteSize) {")
                                     builder.indent()
                                     builder.appendLine("destBytes[i.toInt()] = srcBytes[i.toInt()]")
@@ -274,22 +296,22 @@ class KotlinKmpNativeBuilder(
                                 }
                             } else {
                                 when {
-                                    fieldType == "CString" -> {
-                                        builder.appendLine("get() = struct.$fieldName?.let { CString(NativeAddress(it)) }")
-                                        builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.reinterpret() }")
+                                    fieldType == cString -> {
+                                        builder.appendLine("get() = struct.$fieldName?.let { $cString($nativeAddress(it)) }")
+                                        builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.$reinterpret() }")
                                     }
-                                    fieldType == "NativeAddress" -> {
-                                        builder.appendLine("get() = struct.$fieldName?.let(::NativeAddress) ?: NativeAddress(0L)")
-                                        builder.appendLine("set(value) { struct.$fieldName = value.pointer.takeIf { value.rawValue != 0L }?.reinterpret() }")
+                                    fieldType == nativeAddress -> {
+                                        builder.appendLine("get() = struct.$fieldName?.let(::$nativeAddress) ?: $nativeAddress(0L)")
+                                        builder.appendLine("set(value) { struct.$fieldName = value.pointer.takeIf { value.rawValue != 0L }?.$reinterpret() }")
                                     }
-                                    fieldType == "NativeAddress?" -> {
-                                        builder.appendLine("get() = struct.$fieldName?.let(::NativeAddress)")
-                                        builder.appendLine("set(value) { struct.$fieldName = value?.pointer?.takeIf { value.rawValue != 0L }?.reinterpret() }")
+                                    fieldType == "$nativeAddress?" -> {
+                                        builder.appendLine("get() = struct.$fieldName?.let(::$nativeAddress)")
+                                        builder.appendLine("set(value) { struct.$fieldName = value?.pointer?.takeIf { value.rawValue != 0L }?.$reinterpret() }")
                                     }
                                     fieldType.endsWith("?") -> {
                                         val nonOpt = fieldType.removeSuffix("?")
-                                        builder.appendLine("get() = struct.$fieldName?.let(::NativeAddress)?.let { $nonOpt(it) }")
-                                        builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.reinterpret() }")
+                                        builder.appendLine("get() = struct.$fieldName?.let(::$nativeAddress)?.let { $nonOpt(it) }")
+                                        builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.$reinterpret() }")
                                     }
                                     else -> {
                                         builder.appendLine("get() = struct.$fieldName as $fieldType")
@@ -310,15 +332,16 @@ class KotlinKmpNativeBuilder(
 
                 // Generate toCValue extension function for structure by-value passing
                 if (fields.isNotEmpty()) {
-                    builder.appendLine("fun $structName.toCValue(): CValue<webgpu.native.$structName> = cValue {")
+                    builder.appendLine("fun $structName.toCValue(): $cValue<webgpu.native.$structName> = ${namePlan.runtime(C_VALUE_FACTORY)} {")
                     builder.indent()
                     fields.forEach { field ->
                         val fieldName = field.name()
+                        val propertyName = namePlan.member(field)
                         val fieldType = typeMapper.mapType(field.type())
                         if (typeMapper.isInlineStructOrUnion(field.type())) {
-                            builder.appendLine("val dest_$fieldName = this.$fieldName.ptr.reinterpret<ByteVar>()")
-                            builder.appendLine("val src_$fieldName = this@toCValue.$fieldName.handler.pointer.reinterpret<ByteVar>()")
-                            builder.appendLine("val size_$fieldName = sizeOf<webgpu.native.$fieldType>().toLong()")
+                            builder.appendLine("val dest_$fieldName = this.$fieldName.$ptr.$reinterpret<$byteVar>()")
+                            builder.appendLine("val src_$fieldName = this@toCValue.$propertyName.handler.pointer.$reinterpret<$byteVar>()")
+                            builder.appendLine("val size_$fieldName = $sizeOf<webgpu.native.$fieldType>().toLong()")
                             builder.appendLine("for (i in 0L until size_$fieldName) {")
                             builder.indent()
                             builder.appendLine("dest_$fieldName[i.toInt()] = src_$fieldName[i.toInt()]")
@@ -326,23 +349,23 @@ class KotlinKmpNativeBuilder(
                             builder.appendLine("}")
                         } else {
                             when (fieldType) {
-                                "CString" -> {
-                                    builder.appendLine("this.$fieldName = this@toCValue.$fieldName?.handler?.pointer?.takeIf { this@toCValue.$fieldName?.handler?.rawValue != 0L }?.reinterpret()")
+                                cString -> {
+                                    builder.appendLine("this.$fieldName = this@toCValue.$propertyName?.handler?.pointer?.takeIf { this@toCValue.$propertyName?.handler?.rawValue != 0L }?.$reinterpret()")
                                 }
-                                "NativeAddress" -> {
-                                    builder.appendLine("this.$fieldName = this@toCValue.$fieldName.pointer?.takeIf { this@toCValue.$fieldName.rawValue != 0L }?.reinterpret()")
+                                nativeAddress -> {
+                                    builder.appendLine("this.$fieldName = this@toCValue.$propertyName.pointer?.takeIf { this@toCValue.$propertyName.rawValue != 0L }?.$reinterpret()")
                                 }
-                                "NativeAddress?" -> {
-                                    builder.appendLine("this.$fieldName = this@toCValue.$fieldName?.pointer?.takeIf { this@toCValue.$fieldName?.rawValue != 0L }?.reinterpret()")
+                                "$nativeAddress?" -> {
+                                    builder.appendLine("this.$fieldName = this@toCValue.$propertyName?.pointer?.takeIf { this@toCValue.$propertyName?.rawValue != 0L }?.$reinterpret()")
                                 }
                                 "Boolean" -> {
-                                    builder.appendLine("this.$fieldName = this@toCValue.$fieldName")
+                                    builder.appendLine("this.$fieldName = this@toCValue.$propertyName")
                                 }
                                 else -> {
                                     if (fieldType.endsWith("?")) {
-                                        builder.appendLine("this.$fieldName = this@toCValue.$fieldName?.handler?.pointer?.takeIf { this@toCValue.$fieldName?.handler?.rawValue != 0L }?.reinterpret()")
+                                        builder.appendLine("this.$fieldName = this@toCValue.$propertyName?.handler?.pointer?.takeIf { this@toCValue.$propertyName?.handler?.rawValue != 0L }?.$reinterpret()")
                                     } else {
-                                        builder.appendLine("this.$fieldName = this@toCValue.$fieldName")
+                                        builder.appendLine("this.$fieldName = this@toCValue.$propertyName")
                                     }
                                 }
                             }
@@ -357,8 +380,8 @@ class KotlinKmpNativeBuilder(
                 for (member in decl.members()) {
                     member.accept(this)
                 }
-                KotlinCallbackNativeEmitter(typeMapper::mapFunctionType).emit(builder, callbackModels)
-                KotlinCallbackBindingEmitter(typeMapper::mapFunctionType).emitNative(
+                KotlinCallbackNativeEmitter(typeMapper::mapFunctionType, namePlan).emit(builder, callbackModels)
+                KotlinCallbackBindingEmitter(typeMapper::mapFunctionType, namePlan).emitNative(
                     builder,
                     directBindingModels,
                     ::toNativeArgument,
@@ -391,7 +414,7 @@ class KotlinKmpNativeBuilder(
             toNativeArgument(name, param.type())
         }.joinToString(", ")
         val call = "webgpu.native.${decl.name()}($args)"
-        builder.appendLine("actual fun ${decl.name()}($params): $returnType {")
+        builder.appendLine("actual fun ${namePlan.declaration(decl)}($params): $returnType {")
         builder.indent()
         emitFunctionReturn(decl.type().returnType(), returnType, call)
         builder.unindent()
@@ -401,7 +424,7 @@ class KotlinKmpNativeBuilder(
     override fun visitVariable(decl: Declaration.Variable) {}
     override fun visitTypedef(decl: Declaration.Typedef) {
         if (Skip.isPresent(decl)) return
-        val name = decl.name()
+        val name = namePlan.declaration(decl)
         if (name.isEmpty()) return
         if (name in callbackTypeNames || typeMapper.callbackFunction(decl.type()) != null) return
         val inner = decl.type()
@@ -412,7 +435,7 @@ class KotlinKmpNativeBuilder(
                 if (pointeeName.isNotEmpty() && pointeeName.endsWith("Impl")) {
                     opaqueHandleAliases[pointeeName] = name
                     if (!generatedNames.add(name)) return
-                    builder.appendLine("actual value class $name actual constructor(actual val handler: NativeAddress)")
+                    builder.appendLine("actual value class $name actual constructor(actual val handler: $nativeAddress)")
                     builder.appendLine()
                 }
             }
@@ -433,11 +456,11 @@ class KotlinKmpNativeBuilder(
         }
         when {
             returnsStructByValue(type) -> builder.appendLine("return $returnType.ByValue($call)")
-            returnType == "NativeAddress?" -> builder.appendLine("return $call?.let(::NativeAddress)")
-            returnType == "CString?" -> builder.appendLine("return $call?.let(::NativeAddress)?.let(::CString)")
+            returnType == "$nativeAddress?" -> builder.appendLine("return $call?.let(::$nativeAddress)")
+            returnType == "$cString?" -> builder.appendLine("return $call?.let(::$nativeAddress)?.let(::$cString)")
             returnType.endsWith("?") && returnsPointer(type) -> {
                 val nonOpt = returnType.removeSuffix("?")
-                builder.appendLine("return $call?.let(::NativeAddress)?.let { $nonOpt(it) }")
+                builder.appendLine("return $call?.let(::$nativeAddress)?.let { $nonOpt(it) }")
             }
             else -> builder.appendLine("return $call")
         }
@@ -446,26 +469,26 @@ class KotlinKmpNativeBuilder(
     private fun toNativeArgument(name: String, type: Type): String {
         val kmpType = typeMapper.mapFunctionType(type)
         return when {
-            kmpType == "CString?" -> "$name?.handler?.pointer?.takeIf { $name.handler.rawValue != 0L }?.reinterpret()"
+            kmpType == "$cString?" -> "$name?.handler?.pointer?.takeIf { $name.handler.rawValue != 0L }?.$reinterpret()"
             typeMapper.callbackFunction(type) != null ->
-                "$name?.pointer?.takeIf { $name.rawValue != 0L }?.reinterpret()"
-            kmpType == "NativeAddress?" -> {
+                "$name?.pointer?.takeIf { $name.rawValue != 0L }?.$reinterpret()"
+            kmpType == "$nativeAddress?" -> {
                 val cast = when (name) {
-                    "dynamicOffsets" -> "UIntVar"
-                    "submissionIndex" -> "ULongVar"
+                    "dynamicOffsets" -> namePlan.runtime(KotlinKmpRuntimeSymbol.UINT_VAR)
+                    "submissionIndex" -> namePlan.runtime(KotlinKmpRuntimeSymbol.ULONG_VAR)
                     else -> nativePointerVarType(type)
                 }
                 if (cast == null) {
                     if (typeMapper.pointerDepth(type) > 1) {
-                        "$name?.pointer?.takeIf { $name.rawValue != 0L }?.reinterpret()"
+                        "$name?.pointer?.takeIf { $name.rawValue != 0L }?.$reinterpret()"
                     } else {
                         "$name?.pointer?.takeIf { $name.rawValue != 0L }"
                     }
                 } else {
-                    "$name?.pointer?.takeIf { $name.rawValue != 0L }?.reinterpret<$cast>()"
+                    "$name?.pointer?.takeIf { $name.rawValue != 0L }?.$reinterpret<$cast>()"
                 }
             }
-            kmpType.endsWith("?") && returnsPointer(type) -> "$name?.handler?.pointer?.takeIf { $name.handler.rawValue != 0L }?.reinterpret()"
+            kmpType.endsWith("?") && returnsPointer(type) -> "$name?.handler?.pointer?.takeIf { $name.handler.rawValue != 0L }?.$reinterpret()"
             returnsStructByValue(type) -> "$name.toCValue()"
             else -> name
         }
@@ -490,21 +513,21 @@ class KotlinKmpNativeBuilder(
         return when {
             pointee is Type.Delegated && pointee.kind() == Type.Delegated.Kind.UNSIGNED -> {
                 when ((pointee.type() as? Type.Primitive)?.kind()) {
-                    Type.Primitive.Kind.Char -> "UByteVar"
-                    Type.Primitive.Kind.Short -> "UShortVar"
-                    Type.Primitive.Kind.Int -> "UIntVar"
-                    Type.Primitive.Kind.Long, Type.Primitive.Kind.LongLong -> "ULongVar"
+                    Type.Primitive.Kind.Char -> namePlan.runtime(KotlinKmpRuntimeSymbol.UBYTE_VAR)
+                    Type.Primitive.Kind.Short -> namePlan.runtime(KotlinKmpRuntimeSymbol.USHORT_VAR)
+                    Type.Primitive.Kind.Int -> namePlan.runtime(KotlinKmpRuntimeSymbol.UINT_VAR)
+                    Type.Primitive.Kind.Long, Type.Primitive.Kind.LongLong -> namePlan.runtime(KotlinKmpRuntimeSymbol.ULONG_VAR)
                     else -> null
                 }
             }
             pointee is Type.Primitive -> {
                 when (pointee.kind()) {
-                    Type.Primitive.Kind.Char -> "ByteVar"
-                    Type.Primitive.Kind.Short -> "ShortVar"
-                    Type.Primitive.Kind.Int -> "IntVar"
-                    Type.Primitive.Kind.Long, Type.Primitive.Kind.LongLong -> "LongVar"
-                    Type.Primitive.Kind.Float -> "FloatVar"
-                    Type.Primitive.Kind.Double -> "DoubleVar"
+                    Type.Primitive.Kind.Char -> namePlan.runtime(KotlinKmpRuntimeSymbol.BYTE_VAR)
+                    Type.Primitive.Kind.Short -> namePlan.runtime(KotlinKmpRuntimeSymbol.SHORT_VAR)
+                    Type.Primitive.Kind.Int -> namePlan.runtime(KotlinKmpRuntimeSymbol.INT_VAR)
+                    Type.Primitive.Kind.Long, Type.Primitive.Kind.LongLong -> namePlan.runtime(KotlinKmpRuntimeSymbol.LONG_VAR)
+                    Type.Primitive.Kind.Float -> namePlan.runtime(KotlinKmpRuntimeSymbol.FLOAT_VAR)
+                    Type.Primitive.Kind.Double -> namePlan.runtime(KotlinKmpRuntimeSymbol.DOUBLE_VAR)
                     else -> null
                 }
             }
@@ -522,68 +545,68 @@ class KotlinKmpNativeBuilder(
         builder.appendLine("actual fun setXcb(value: WGPUXcbDisplayHandle)")
         builder.appendLine("actual val wayland: WGPUWaylandDisplayHandle?")
         builder.appendLine("actual fun setWayland(value: WGPUWaylandDisplayHandle)")
-        builder.appendLine("actual val handler: NativeAddress")
+        builder.appendLine("actual val handler: $nativeAddress")
         builder.appendLine("actual companion object {")
         builder.indent()
-        builder.appendLine("actual operator fun invoke(address: NativeAddress): WGPUNativeDisplayHandle = ByReference(address)")
-        builder.appendLine("actual fun allocate(allocator: MemoryAllocator): WGPUNativeDisplayHandle =")
-        builder.appendLine("    ByReference(allocator.allocate(sizeOf<webgpu.native.WGPUNativeDisplayHandle>().toLong()))")
-        builder.appendLine("actual fun allocateArray(allocator: MemoryAllocator, size: UInt, provider: (UInt, WGPUNativeDisplayHandle) -> Unit): ArrayHolder<WGPUNativeDisplayHandle> {")
+        builder.appendLine("actual operator fun invoke(address: $nativeAddress): WGPUNativeDisplayHandle = ByReference(address)")
+        builder.appendLine("actual fun allocate(allocator: $memoryAllocator): WGPUNativeDisplayHandle =")
+        builder.appendLine("    ByReference(allocator.allocate($sizeOf<webgpu.native.WGPUNativeDisplayHandle>().toLong()))")
+        builder.appendLine("actual fun allocateArray(allocator: $memoryAllocator, size: UInt, provider: (UInt, WGPUNativeDisplayHandle) -> Unit): $arrayHolder<WGPUNativeDisplayHandle> {")
         builder.indent()
-        builder.appendLine("val byteSize = sizeOf<webgpu.native.WGPUNativeDisplayHandle>().toLong()")
+        builder.appendLine("val byteSize = $sizeOf<webgpu.native.WGPUNativeDisplayHandle>().toLong()")
         builder.appendLine("val segment = allocator.allocate(byteSize * size.toLong())")
         builder.appendLine("for (i in 0 until size.toInt()) {")
         builder.indent()
         builder.appendLine("val rawAddr = segment.rawValue + i.toLong() * byteSize")
-        builder.appendLine("provider(i.toUInt(), ByReference(NativeAddress(rawAddr)))")
+        builder.appendLine("provider(i.toUInt(), ByReference($nativeAddress(rawAddr)))")
         builder.unindent()
         builder.appendLine("}")
-        builder.appendLine("return ArrayHolder(segment)")
+        builder.appendLine("return $arrayHolder(segment)")
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
-        builder.appendLine("value class ByValue(val handle: CValue<webgpu.native.WGPUNativeDisplayHandle>) : WGPUNativeDisplayHandle {")
+        builder.appendLine("value class ByValue(val handle: $cValue<webgpu.native.WGPUNativeDisplayHandle>) : WGPUNativeDisplayHandle {")
         builder.indent()
-        builder.appendLine("override val handler: NativeAddress")
+        builder.appendLine("override val handler: $nativeAddress")
         builder.appendLine("    get() = error(\"should not be call on CValue\")")
-        emitNativeDisplayHandleNativeProperties("handle.useContents { this }", byValue = true)
+        emitNativeDisplayHandleNativeProperties("handle.$useContents { this }", byValue = true)
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
-        builder.appendLine("class ByReference(override val handler: NativeAddress) : WGPUNativeDisplayHandle {")
+        builder.appendLine("class ByReference(override val handler: $nativeAddress) : WGPUNativeDisplayHandle {")
         builder.indent()
         builder.appendLine("private val struct: webgpu.native.WGPUNativeDisplayHandle")
-        builder.appendLine("    get() = handler.pointer.reinterpret<webgpu.native.WGPUNativeDisplayHandle>().pointed")
+        builder.appendLine("    get() = handler.pointer.$reinterpret<webgpu.native.WGPUNativeDisplayHandle>().$pointed")
         emitNativeDisplayHandleNativeProperties("struct", byValue = false)
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine()
-        builder.appendLine("fun WGPUNativeDisplayHandle.toCValue(): CValue<webgpu.native.WGPUNativeDisplayHandle> = cValue {")
+        builder.appendLine("fun WGPUNativeDisplayHandle.toCValue(): $cValue<webgpu.native.WGPUNativeDisplayHandle> = ${namePlan.runtime(C_VALUE_FACTORY)} {")
         builder.indent()
         builder.appendLine("this.type = this@toCValue.type")
         builder.appendLine("this@toCValue.xlib?.let {")
         builder.indent()
-        builder.appendLine("val destBytes = this.data.xlib.ptr.reinterpret<ByteVar>()")
-        builder.appendLine("val srcBytes = it.handler.pointer.reinterpret<ByteVar>()")
-        builder.appendLine("for (i in 0 until sizeOf<webgpu.native.WGPUXlibDisplayHandle>()) destBytes[i] = srcBytes[i]")
+        builder.appendLine("val destBytes = this.data.xlib.$ptr.$reinterpret<$byteVar>()")
+        builder.appendLine("val srcBytes = it.handler.pointer.$reinterpret<$byteVar>()")
+        builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.WGPUXlibDisplayHandle>()) destBytes[i] = srcBytes[i]")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine("this@toCValue.xcb?.let {")
         builder.indent()
-        builder.appendLine("val destBytes = this.data.xcb.ptr.reinterpret<ByteVar>()")
-        builder.appendLine("val srcBytes = it.handler.pointer.reinterpret<ByteVar>()")
-        builder.appendLine("for (i in 0 until sizeOf<webgpu.native.WGPUXcbDisplayHandle>()) destBytes[i] = srcBytes[i]")
+        builder.appendLine("val destBytes = this.data.xcb.$ptr.$reinterpret<$byteVar>()")
+        builder.appendLine("val srcBytes = it.handler.pointer.$reinterpret<$byteVar>()")
+        builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.WGPUXcbDisplayHandle>()) destBytes[i] = srcBytes[i]")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine("this@toCValue.wayland?.let {")
         builder.indent()
-        builder.appendLine("val destBytes = this.data.wayland.ptr.reinterpret<ByteVar>()")
-        builder.appendLine("val srcBytes = it.handler.pointer.reinterpret<ByteVar>()")
-        builder.appendLine("for (i in 0 until sizeOf<webgpu.native.WGPUWaylandDisplayHandle>()) destBytes[i] = srcBytes[i]")
+        builder.appendLine("val destBytes = this.data.wayland.$ptr.$reinterpret<$byteVar>()")
+        builder.appendLine("val srcBytes = it.handler.pointer.$reinterpret<$byteVar>()")
+        builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.WGPUWaylandDisplayHandle>()) destBytes[i] = srcBytes[i]")
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
@@ -606,7 +629,7 @@ class KotlinKmpNativeBuilder(
             val setter = field.replaceFirstChar { it.titlecase() }
             builder.appendLine("override val $field: $type?")
             builder.indent()
-            builder.appendLine("get() = if (type == WGPUNativeDisplayHandleType_$setter) $type.ByReference(NativeAddress($receiver.data.$field.ptr)) else null")
+            builder.appendLine("get() = if (type == WGPUNativeDisplayHandleType_$setter) $type.ByReference($nativeAddress($receiver.data.$field.$ptr)) else null")
             builder.unindent()
             builder.appendLine("override fun set$setter(value: $type) {")
             builder.indent()
@@ -614,9 +637,9 @@ class KotlinKmpNativeBuilder(
                 builder.appendLine("error(\"Setters not supported on ByValue\")")
             } else {
                 builder.appendLine("$receiver.type = WGPUNativeDisplayHandleType_$setter")
-                builder.appendLine("val destBytes = $receiver.data.$field.ptr.reinterpret<ByteVar>()")
-                builder.appendLine("val srcBytes = value.handler.pointer.reinterpret<ByteVar>()")
-                builder.appendLine("for (i in 0 until sizeOf<webgpu.native.$type>()) destBytes[i] = srcBytes[i]")
+                builder.appendLine("val destBytes = $receiver.data.$field.$ptr.$reinterpret<$byteVar>()")
+                builder.appendLine("val srcBytes = value.handler.pointer.$reinterpret<$byteVar>()")
+                builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.$type>()) destBytes[i] = srcBytes[i]")
             }
             builder.unindent()
             builder.appendLine("}")
