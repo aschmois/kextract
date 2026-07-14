@@ -238,7 +238,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         );
     """.trimIndent()
 
-    val callbackRuntimeTypeNames = listOf(
+    val generatedCallbackExternalIdentifiers = listOf(
         "Callback",
         "CallbackType",
         "CallbackPolicy",
@@ -253,6 +253,18 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         "CString",
         "ArrayHolder",
         "CStructure",
+        "FunctionDescriptor",
+        "MethodHandle",
+        "MethodHandles",
+        "Linker",
+        "Arena",
+        "MemorySegment",
+        "ValueLayout",
+        "JvmStatic",
+        "CValue",
+        "COpaquePointer",
+        "COpaquePointerVar",
+        "staticCFunction",
     )
 
     "callback names are valid and collision-free in every generated target" {
@@ -313,9 +325,9 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         compileGeneratedJvmFixture(common, jvm)
     }
 
-    "callback names allocate away from imported KFFI runtime types" {
+    "callback names allocate away from every external identifier rendered by callback emitters" {
         val generated = generateKmp(
-            callbackRuntimeTypeNames.joinToString("\n") { name ->
+            generatedCallbackExternalIdentifiers.joinToString("\n") { name ->
                 "typedef void (*$name)(void);"
             },
         )
@@ -324,7 +336,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         val native = generated.getValue("nativeMain")
         val android = generated.getValue("androidMain")
 
-        callbackRuntimeTypeNames.forEach { rawName ->
+        generatedCallbackExternalIdentifiers.forEach { rawName ->
             val allocatedName = "${rawName}_2"
             common shouldContain "fun interface $allocatedName : Callback"
             common shouldContain "canonicalId = \"typedef:$rawName\""
@@ -335,6 +347,23 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         common shouldNotContain "fun interface Callback : Callback"
 
         compileGeneratedJvmFixture(common, jvm)
+    }
+
+    "Native callback names preserve the external COpaquePointerVar reinterpret type" {
+        val generated = generateKmp(
+            """
+                typedef struct ExternalImpl * External;
+                typedef void (*COpaquePointerVar)(External const * value);
+            """.trimIndent(),
+        )
+        val common = generated.getValue("commonMain")
+        val native = generated.getValue("nativeMain")
+
+        common shouldContain "fun interface COpaquePointerVar_2 : Callback"
+        common shouldContain "canonicalId = \"typedef:COpaquePointerVar\""
+        native shouldContain "private val COpaquePointerVar_2Trampoline = staticCFunction"
+        native shouldContain "value?.reinterpret<COpaquePointerVar>()?.pointed?.value"
+        native shouldNotContain "reinterpret<COpaquePointerVar_2>()"
     }
 
     "configured direct callback helpers are transactional on every platform" {

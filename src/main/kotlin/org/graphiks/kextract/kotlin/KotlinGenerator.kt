@@ -16,7 +16,7 @@ import org.graphiks.kextract.kotlin.objc.ObjCSubclassingTemplate
 import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 import org.graphiks.kextract.pipeline.Options
 
-internal val CALLBACK_RUNTIME_RESERVED_TYPE_NAMES = setOf(
+internal val GENERATED_CALLBACK_RESERVED_IDENTIFIERS = setOf(
     "Callback",
     "CallbackType",
     "CallbackPolicy",
@@ -31,6 +31,18 @@ internal val CALLBACK_RUNTIME_RESERVED_TYPE_NAMES = setOf(
     "CString",
     "ArrayHolder",
     "CStructure",
+    "FunctionDescriptor",
+    "MethodHandle",
+    "MethodHandles",
+    "Linker",
+    "Arena",
+    "MemorySegment",
+    "ValueLayout",
+    "JvmStatic",
+    "CValue",
+    "COpaquePointer",
+    "COpaquePointerVar",
+    "staticCFunction",
 )
 
 /**
@@ -68,7 +80,7 @@ class KotlinGenerator {
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
-            val callbackNames = KotlinIdentifierAllocator(CALLBACK_RUNTIME_RESERVED_TYPE_NAMES)
+            val callbackNames = KotlinIdentifierAllocator(GENERATED_CALLBACK_RESERVED_IDENTIFIERS)
             val callbackModels = callbackBindings.callbacks.map { callback ->
                 KotlinCallbackModel.from(callback, callbackNames)
             }
