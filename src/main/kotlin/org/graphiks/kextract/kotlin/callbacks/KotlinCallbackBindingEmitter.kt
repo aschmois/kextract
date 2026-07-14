@@ -12,7 +12,7 @@ class KotlinCallbackBindingEmitter(
 ) {
     fun emitCommon(
         builder: SourceBuilder,
-        directBindings: List<ValidatedDirectFunctionBinding>,
+        directBindings: List<KotlinDirectFunctionBindingModel>,
         callbackInfoBindings: List<ValidatedCallbackInfoBinding>,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
@@ -22,14 +22,15 @@ class KotlinCallbackBindingEmitter(
 
     fun emitJvm(
         builder: SourceBuilder,
-        bindings: List<ValidatedDirectFunctionBinding>,
+        bindings: List<KotlinDirectFunctionBindingModel>,
         toRawArgument: (String, Type) -> String,
     ) {
-        bindings.forEach { binding ->
+        bindings.forEach { model ->
+            val binding = model.binding
             val name = binding.function.name()
             val parameters = applicationParameters(binding)
             builder.appendLine("@Suppress(\"UNUSED_VARIABLE\")")
-            emitPreflightHeader(builder, binding, parameters, actual = true)
+            emitPreflightHeader(builder, binding, model.preflightName, parameters, actual = true)
             builder.indent()
             parameters.forEach { parameter ->
                 builder.appendLine(
@@ -57,12 +58,13 @@ class KotlinCallbackBindingEmitter(
 
     fun emitNative(
         builder: SourceBuilder,
-        bindings: List<ValidatedDirectFunctionBinding>,
+        bindings: List<KotlinDirectFunctionBindingModel>,
         toNativeArgument: (String, Type) -> String,
     ) {
-        bindings.forEach { binding ->
+        bindings.forEach { model ->
+            val binding = model.binding
             val parameters = applicationParameters(binding)
-            emitPreflightHeader(builder, binding, parameters, actual = true)
+            emitPreflightHeader(builder, binding, model.preflightName, parameters, actual = true)
             builder.indent()
             parameters.forEach { parameter ->
                 builder.appendLine(
@@ -86,10 +88,11 @@ class KotlinCallbackBindingEmitter(
         }
     }
 
-    fun emitAndroid(builder: SourceBuilder, bindings: List<ValidatedDirectFunctionBinding>) {
-        bindings.forEach { binding ->
+    fun emitAndroid(builder: SourceBuilder, bindings: List<KotlinDirectFunctionBindingModel>) {
+        bindings.forEach { model ->
+            val binding = model.binding
             val parameters = applicationParameters(binding)
-            emitPreflightHeader(builder, binding, parameters, actual = true, returnType = "Nothing")
+            emitPreflightHeader(builder, binding, model.preflightName, parameters, actual = true)
             builder.indent()
             builder.appendLine("throw UnsupportedOperationException(")
             builder.indent()
@@ -104,20 +107,28 @@ class KotlinCallbackBindingEmitter(
 
     private fun emitDirectCommon(
         builder: SourceBuilder,
-        binding: ValidatedDirectFunctionBinding,
+        model: KotlinDirectFunctionBindingModel,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
-        emitPreflightHeader(builder, binding, applicationParameters(binding), actual = false)
+        val binding = model.binding
+        emitPreflightHeader(
+            builder,
+            binding,
+            model.preflightName,
+            applicationParameters(binding),
+            actual = false,
+        )
         builder.appendLine()
-        emitDirectRegistrationOverload(builder, binding, callbackModelsByCanonicalId)
+        emitDirectRegistrationOverload(builder, binding, model.preflightName, callbackModelsByCanonicalId)
         if (binding.routingUserdataParameter == null) {
-            emitDirectRearmOverload(builder, binding, callbackModelsByCanonicalId)
+            emitDirectRearmOverload(builder, binding, model.preflightName, callbackModelsByCanonicalId)
         }
     }
 
     private fun emitDirectRegistrationOverload(
         builder: SourceBuilder,
         binding: ValidatedDirectFunctionBinding,
+        preflightName: String,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
         val parameters = applicationParameters(binding)
@@ -132,7 +143,7 @@ class KotlinCallbackBindingEmitter(
         builder.unindent()
         builder.appendLine("): CallbackRegistration<$callbackType> {")
         builder.indent()
-        builder.appendLine("val preparedCall = ${preflightCall(binding, parameters)}")
+        builder.appendLine("val preparedCall = ${preflightCall(preflightName, parameters)}")
         builder.appendLine("val prepared = $callbackType.prepare(")
         builder.indent()
         builder.appendLine("policy = policy,")
@@ -153,6 +164,7 @@ class KotlinCallbackBindingEmitter(
     private fun emitDirectRearmOverload(
         builder: SourceBuilder,
         binding: ValidatedDirectFunctionBinding,
+        preflightName: String,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
     ) {
         val parameters = applicationParameters(binding)
@@ -167,7 +179,7 @@ class KotlinCallbackBindingEmitter(
         builder.unindent()
         builder.appendLine("): CallbackRegistration<$callbackType> {")
         builder.indent()
-        builder.appendLine("val preparedCall = ${preflightCall(binding, parameters)}")
+        builder.appendLine("val preparedCall = ${preflightCall(preflightName, parameters)}")
         builder.appendLine("val registration = $callbackType.rearmAfterNativeQuiescence(")
         builder.indent()
         builder.appendLine("policy = policy,")
@@ -263,6 +275,7 @@ class KotlinCallbackBindingEmitter(
     private fun emitPreflightHeader(
         builder: SourceBuilder,
         binding: ValidatedDirectFunctionBinding,
+        preflightName: String,
         parameters: List<RenderedParameter>,
         actual: Boolean,
         returnType: String = preparedCallType(binding),
@@ -270,10 +283,10 @@ class KotlinCallbackBindingEmitter(
         val modifier = if (actual) "actual" else "expect"
         if (parameters.isEmpty()) {
             val suffix = if (actual) " {" else ""
-            builder.appendLine("internal $modifier fun ${preflightName(binding)}(): $returnType$suffix")
+            builder.appendLine("internal $modifier fun $preflightName(): $returnType$suffix")
             return
         }
-        builder.appendLine("internal $modifier fun ${preflightName(binding)}(")
+        builder.appendLine("internal $modifier fun $preflightName(")
         builder.indent()
         parameters.forEach { parameter ->
             builder.appendLine("${parameter.name}: ${mapType(parameter.variable.type())},")
@@ -284,9 +297,9 @@ class KotlinCallbackBindingEmitter(
     }
 
     private fun preflightCall(
-        binding: ValidatedDirectFunctionBinding,
+        preflightName: String,
         applicationParameters: List<RenderedParameter>,
-    ): String = "${preflightName(binding)}(${applicationParameters.joinToString(", ", transform = RenderedParameter::name)})"
+    ): String = "$preflightName(${applicationParameters.joinToString(", ", transform = RenderedParameter::name)})"
 
     private fun preparedCallInvocation(
         binding: ValidatedDirectFunctionBinding,
@@ -350,9 +363,6 @@ class KotlinCallbackBindingEmitter(
         } else {
             "(NativeAddress?, NativeAddress?) -> Unit"
         }
-
-    private fun preflightName(binding: ValidatedDirectFunctionBinding): String =
-        "${binding.function.name()}CallbackBindingPreflight"
 
     private data class RenderedParameter(
         val variable: Declaration.Variable,

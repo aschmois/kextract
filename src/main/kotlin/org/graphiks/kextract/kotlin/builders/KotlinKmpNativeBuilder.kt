@@ -5,8 +5,8 @@ package org.graphiks.kextract.kotlin.builders
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
-import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
+import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackNativeEmitter
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
@@ -17,7 +17,7 @@ class KotlinKmpNativeBuilder(
     private val targetPackage: String,
     private val className: String,
     private val callbackModels: List<KotlinCallbackModel>,
-    private val callbackBindings: ValidatedCallbackBindings,
+    private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -360,7 +360,7 @@ class KotlinKmpNativeBuilder(
                 KotlinCallbackNativeEmitter(typeMapper::mapFunctionType).emit(builder, callbackModels)
                 KotlinCallbackBindingEmitter(typeMapper::mapFunctionType).emitNative(
                     builder,
-                    callbackBindings.directFunctionBindings,
+                    directBindingModels,
                     ::toNativeArgument,
                 )
             }

@@ -149,7 +149,9 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
                 expect value class CString(val handler: NativeAddress)
                 @JvmInline
                 value class ArrayHolder<T>(val handler: NativeAddress)
-                expect class MemoryAllocator()
+                expect class MemoryAllocator() {
+                    fun allocate(size: Long): NativeAddress
+                }
                 interface CStructure {
                     val handler: NativeAddress
                 }
@@ -165,7 +167,9 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
                 actual typealias NativeAddress = JvmNativeAddress
                 @JvmInline
                 actual value class CString actual constructor(actual val handler: NativeAddress)
-                actual class MemoryAllocator actual constructor()
+                actual class MemoryAllocator actual constructor() {
+                    actual fun allocate(size: Long): NativeAddress = JvmNativeAddress(MemorySegment.NULL)
+                }
                 fun findOrThrow(name: String): MemorySegment = MemorySegment.NULL
                 """.trimIndent(),
             )
@@ -325,6 +329,71 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
             android shouldContain "actual fun $allocatedName.Companion.register("
         }
         common shouldNotContain "fun interface Callback : Callback"
+
+        compileGeneratedJvmFixture(common, jvm)
+    }
+
+    "callback classifiers allocate away from emitted C tag declarations" {
+        val generated = generateKmp(
+            """
+                struct Foo { int value; };
+                typedef void (*Foo)(void);
+            """.trimIndent(),
+        )
+        val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
+        val native = generated.getValue("nativeMain")
+        val android = generated.getValue("androidMain")
+
+        common shouldContain "expect interface Foo {"
+        common shouldContain "fun interface Foo_2 : Callback"
+        common shouldContain "internal val Foo_2Type: CallbackType<Foo_2>"
+        common shouldContain "canonicalId = \"typedef:Foo\""
+        jvm shouldContain "private object Foo_2Trampoline"
+        native shouldContain "private val Foo_2Trampoline = staticCFunction"
+        android shouldContain "actual fun Foo_2.Companion.register("
+
+        compileGeneratedJvmFixture(common, jvm)
+    }
+
+    "direct preflight names allocate away from emitted raw declarations on every target" {
+        val config = CallbackBindingsConfig().also { bindings ->
+            bindings.directFunctionBindings = listOf(
+                DirectFunctionBinding().also { binding ->
+                    binding.function = "function:sample_set_callback"
+                    binding.callbackParameter = "callback"
+                    binding.callbackType = "typedef:SampleCallback"
+                },
+            )
+        }
+        val generated = generateKmp(
+            """
+                typedef void (*SampleCallback)(void);
+                void sample_set_callback(SampleCallback callback);
+                void sample_set_callbackCallbackBindingPreflight(void);
+            """.trimIndent(),
+            config,
+        )
+        val common = generated.getValue("commonMain")
+        val jvm = generated.getValue("jvmMain")
+        val native = generated.getValue("nativeMain")
+        val android = generated.getValue("androidMain")
+        val allocatedPreflight = "sample_set_callbackCallbackBindingPreflight_2"
+
+        common shouldContain "expect fun sample_set_callbackCallbackBindingPreflight(): Unit"
+        common shouldContain "internal expect fun $allocatedPreflight(): (NativeAddress?) -> Unit"
+        common shouldContain "val preparedCall = $allocatedPreflight()"
+        common shouldContain "fun interface SampleCallback : Callback"
+        common shouldContain "internal val SampleCallbackType: CallbackType<SampleCallback>"
+        common shouldContain "canonicalId = \"typedef:SampleCallback\""
+        jvm shouldContain "private object SampleCallbackTrampoline"
+        jvm shouldContain "internal actual fun $allocatedPreflight(): (NativeAddress?) -> Unit"
+        jvm shouldContain "findOrThrow(\"sample_set_callback\")"
+        jvm shouldContain "findOrThrow(\"sample_set_callbackCallbackBindingPreflight\")"
+        native shouldContain "private val SampleCallbackTrampoline = staticCFunction"
+        native shouldContain "internal actual fun $allocatedPreflight(): (NativeAddress?) -> Unit"
+        native shouldContain "webgpu.native.sample_set_callback("
+        android shouldContain "internal actual fun $allocatedPreflight(): (NativeAddress?) -> Unit"
 
         compileGeneratedJvmFixture(common, jvm)
     }
@@ -523,9 +592,10 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         android shouldContain """
             internal actual fun sample_set_callbackCallbackBindingPreflight(
                 payload: SamplePayload,
-            ): Nothing {
+            ): (NativeAddress?, NativeAddress?) -> Unit {
         """.trimIndent()
         android shouldContain "throw UnsupportedOperationException("
+        android shouldNotContain "val prepared = SampleCallback.prepare("
         android shouldNotContain "CallbackRuntime.activateForNativeCall"
     }
 

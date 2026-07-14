@@ -10,6 +10,7 @@ import org.graphiks.kextract.kotlin.builders.KotlinKmpJvmBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinKmpNativeBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinToplevelBuilder
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
+import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.objc.ObjCRuntimeTemplate
 import org.graphiks.kextract.kotlin.objc.ObjCSubclassingTemplate
@@ -83,17 +84,28 @@ class KotlinGenerator {
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
-            val callbackNames = KotlinIdentifierAllocator(GENERATED_CALLBACK_RESERVED_IDENTIFIERS)
+            val externalNames = KotlinKmpExternalNameCollector.collect(scoped, callbackBindings)
+            val callbackNames = KotlinIdentifierAllocator(GENERATED_CALLBACK_RESERVED_IDENTIFIERS + externalNames)
             val callbackModels = callbackBindings.callbacks.map { callback ->
                 KotlinCallbackModel.from(callback, callbackNames)
             }
             val callbackModelsByCanonicalId = callbackModels.associateBy(KotlinCallbackModel::canonicalId)
+            val directBindingModels = callbackBindings.directFunctionBindings.map { binding ->
+                KotlinDirectFunctionBindingModel(
+                    binding = binding,
+                    preflightName = callbackNames.allocate(
+                        "${binding.function.name()}CallbackBindingPreflight",
+                        "callbackBindingPreflight",
+                    ),
+                )
+            }
             return generateKmp(
                 scoped,
                 targetPackage,
                 className,
                 callbackModels,
                 callbackModelsByCanonicalId,
+                directBindingModels,
                 callbackBindings,
             )
         }
@@ -117,6 +129,7 @@ class KotlinGenerator {
         className: String,
         callbackModels: List<KotlinCallbackModel>,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
+        directBindingModels: List<KotlinDirectFunctionBindingModel>,
         callbackBindings: ValidatedCallbackBindings,
     ): List<KotlinSourceFile> = buildList {
         KotlinKmpCommonBuilder(
@@ -124,11 +137,12 @@ class KotlinGenerator {
             className,
             callbackModels,
             callbackModelsByCanonicalId,
+            directBindingModels,
             callbackBindings,
         ).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpJvmBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpNativeBuilder(targetPackage, className, callbackModels, callbackBindings).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpJvmBuilder(targetPackage, className, callbackModels, directBindingModels).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, directBindingModels).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpNativeBuilder(targetPackage, className, callbackModels, directBindingModels).also { scoped.accept(it); addAll(it.getFiles()) }
     }
 
     private fun sanitizeClassName(name: String): String =
