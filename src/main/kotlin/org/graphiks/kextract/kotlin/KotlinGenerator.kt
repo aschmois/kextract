@@ -8,6 +8,7 @@ import org.graphiks.kextract.kotlin.builders.KotlinKmpAndroidBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinKmpCommonBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinKmpJvmBuilder
 import org.graphiks.kextract.kotlin.builders.KotlinKmpNativeBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinJvmRecordLayoutPlan
 import org.graphiks.kextract.kotlin.builders.KotlinToplevelBuilder
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
@@ -85,6 +86,7 @@ class KotlinGenerator {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
             val namePlan = KotlinKmpNamePlan.create(scoped, callbackBindings)
+            val jvmRecordLayouts = KotlinJvmRecordLayoutPlan.create(scoped, namePlan)
             val callbackNames = KotlinIdentifierAllocator(namePlan.topLevelNames + namePlan.renderedRuntimeNames)
             val callbackModels = callbackBindings.callbacks.map { callback ->
                 KotlinCallbackModel.from(callback, callbackNames)
@@ -108,6 +110,7 @@ class KotlinGenerator {
                 directBindingModels,
                 callbackBindings,
                 namePlan,
+                jvmRecordLayouts,
             )
         }
 
@@ -133,6 +136,7 @@ class KotlinGenerator {
         directBindingModels: List<KotlinDirectFunctionBindingModel>,
         callbackBindings: ValidatedCallbackBindings,
         namePlan: KotlinKmpNamePlan,
+        jvmRecordLayouts: KotlinJvmRecordLayoutPlan,
     ): List<KotlinSourceFile> = buildList {
         KotlinKmpCommonBuilder(
             targetPackage,
@@ -143,7 +147,7 @@ class KotlinGenerator {
             callbackBindings,
             namePlan,
         ).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpJvmBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpJvmBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan, jvmRecordLayouts).also { scoped.accept(it); addAll(it.getFiles()) }
         KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
         KotlinKmpNativeBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
     }

@@ -12,6 +12,19 @@ object LayoutUtils {
 
     fun layoutString(type: Type): String = fieldLayoutString(type, -1, -1)
 
+    fun layoutString(type: Type, byteAlignment: Long): String {
+        require(byteAlignment > 0L && byteAlignment.countOneBits() == 1) {
+            "Invalid byte alignment: $byteAlignment"
+        }
+        val layout = if (type is Type.Array) {
+            "MemoryLayout.sequenceLayout(${type.elementCount() ?: 0L}, " +
+                "${layoutString(type.elementType(), byteAlignment)})"
+        } else {
+            layoutString(type)
+        }
+        return "$layout.withByteAlignment($byteAlignment)"
+    }
+
     fun functionDescriptorString(functionType: Type.Function, variadicCount: Int = 0): String {
         val type = functionType.methodType()
         val noArgs = type.parameterCount() == 0 && variadicCount == 0

@@ -42,6 +42,7 @@ internal class KotlinKmpJvmBuilder(
     private val callbackModels: List<KotlinCallbackModel>,
     private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
     private val namePlan: KotlinKmpNamePlan,
+    private val recordLayouts: KotlinJvmRecordLayoutPlan,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -117,7 +118,7 @@ internal class KotlinKmpJvmBuilder(
                 builder.indent()
 
                 // Define layout
-                emitGroupLayout(decl, fields)
+                emitGroupLayout(decl)
                 builder.appendLine()
 
                 // VarHandles for value fields
@@ -165,16 +166,12 @@ internal class KotlinKmpJvmBuilder(
 
                     if (isArray) {
                         // Array field using asSlice
-                        builder.appendLine("override var $fieldName: $fieldType?")
+                        builder.appendLine("override var $fieldName: $fieldType")
                         builder.indent()
-                        builder.appendLine("get() = handler.handler.asSlice(Companion.layout.byteOffset($groupElement(\"$cFieldName\")), Companion.layout.select($groupElement(\"$cFieldName\")).byteSize()).let(::$nativeAddress).let(::$arrayHolder)")
+                        builder.appendLine("get() = handler.handler.asSlice(Companion.layout.byteOffset($groupElement(\"$cFieldName\")), Companion.layout.select($groupElement(\"$cFieldName\")).byteSize()).let(::$nativeAddress)")
                         builder.appendLine("set(value) {")
                         builder.indent()
-                        builder.appendLine("if (value != null) {")
-                        builder.indent()
-                        builder.appendLine("$memorySegment.copy(value.handler.handler, 0L, handler.handler, Companion.layout.byteOffset($groupElement(\"$cFieldName\")), Companion.layout.select($groupElement(\"$cFieldName\")).byteSize())")
-                        builder.unindent()
-                        builder.appendLine("}")
+                        builder.appendLine("$memorySegment.copy(value.handler, 0L, handler.handler, Companion.layout.byteOffset($groupElement(\"$cFieldName\")), Companion.layout.select($groupElement(\"$cFieldName\")).byteSize())")
                         builder.unindent()
                         builder.appendLine("}")
                         builder.unindent()
@@ -438,65 +435,8 @@ internal class KotlinKmpJvmBuilder(
 
     private fun emitGroupLayout(
         decl: Declaration.Scoped,
-        fields: List<Declaration.Variable>,
     ) {
-        when (decl.kind()) {
-            Declaration.Scoped.Kind.STRUCT -> emitStructLayout(decl, fields)
-            Declaration.Scoped.Kind.UNION -> emitUnionLayout(decl, fields)
-            else -> error("Expected struct or union, found ${decl.kind()}")
-        }
-    }
-
-    private fun emitStructLayout(
-        decl: Declaration.Scoped,
-        fields: List<Declaration.Variable>,
-    ) {
-        builder.appendLine("val layout: $groupLayout = $memoryLayout.structLayout(")
-        builder.indent()
-        var currentOffsetBits = 0L
-        fields.forEachIndexed { i, field ->
-            val offsetBits = org.graphiks.kextract.DeclarationImpl.ClangOffsetOf.get(field)
-            if (offsetBits != null && offsetBits > currentOffsetBits) {
-                val paddingBytes = (offsetBits - currentOffsetBits) / 8
-                if (paddingBytes > 0) {
-                    builder.appendLine("$memoryLayout.paddingLayout($paddingBytes),")
-                }
-            }
-            val layout = LayoutUtils.layoutString(field.type())
-            val sizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(field) ?: 0L
-            currentOffsetBits = (offsetBits ?: currentOffsetBits) + sizeBits
-
-            val hasNext = i < fields.count() - 1
-            val structSizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(decl) ?: 0L
-            val needsEndPadding = !hasNext && structSizeBits > currentOffsetBits
-            val comma = if (hasNext || needsEndPadding) "," else ""
-            builder.appendLine("${planJvmRuntimeNames(layout)}.withName(\"${field.name()}\")${comma}")
-        }
-        val structSizeBits = org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(decl) ?: 0L
-        if (structSizeBits > currentOffsetBits) {
-            val paddingBytes = (structSizeBits - currentOffsetBits) / 8
-            if (paddingBytes > 0) {
-                builder.appendLine("$memoryLayout.paddingLayout($paddingBytes)")
-            }
-        }
-        builder.unindent()
-        builder.appendLine(").withName(\"${decl.name()}\")")
-    }
-
-    private fun emitUnionLayout(
-        decl: Declaration.Scoped,
-        fields: List<Declaration.Variable>,
-    ) {
-        builder.appendLine("val layout: $groupLayout = $memoryLayout.unionLayout(")
-        builder.indent()
-        fields.forEachIndexed { index, field ->
-            val comma = if (index < fields.lastIndex) "," else ""
-            builder.appendLine(
-                "${planJvmRuntimeNames(LayoutUtils.layoutString(field.type()))}.withName(\"${field.name()}\")$comma",
-            )
-        }
-        builder.unindent()
-        builder.appendLine(").withName(\"${decl.name()}\")")
+        recordLayouts[decl].render(builder)
     }
 
     private fun emitFunction(decl: Declaration.Function) {
