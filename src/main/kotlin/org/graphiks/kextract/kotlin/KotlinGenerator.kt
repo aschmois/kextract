@@ -107,6 +107,7 @@ class KotlinGenerator {
                 scoped,
                 targetPackage,
                 className,
+                androidLibraryName(libraries, className),
                 callbackModels,
                 callbackModelsByCanonicalId,
                 directBindingModels,
@@ -134,6 +135,7 @@ class KotlinGenerator {
         scoped: Declaration.Scoped,
         targetPackage: String,
         className: String,
+        androidLibraryName: String,
         callbackModels: List<KotlinCallbackModel>,
         callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
         directBindingModels: List<KotlinDirectFunctionBindingModel>,
@@ -161,7 +163,15 @@ class KotlinGenerator {
             jvmRecordLayouts,
             abiIndex,
         ).also { scoped.accept(it); addAll(it.getFiles()) }
-        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpAndroidBuilder(
+            targetPackage,
+            className,
+            androidLibraryName,
+            callbackModels,
+            directBindingModels,
+            namePlan,
+            abiIndex,
+        ).also { scoped.accept(it); addAll(it.getFiles()) }
         KotlinKmpNativeBuilder(
             targetPackage,
             className,
@@ -177,4 +187,13 @@ class KotlinGenerator {
             .substringAfterLast('\\')
             .replace(Regex("[^a-zA-Z0-9_]"), "_")
             .replace(Regex("^\\d+"), "_")
+
+    private fun androidLibraryName(libraries: List<Options.Library>, className: String): String =
+        when (libraries.size) {
+            0 -> className.removeSuffix("_h")
+            1 -> libraries.single().libSpec
+            else -> error(
+                "Android/JNA KMP generation requires zero or one library; found ${libraries.size}",
+            )
+        }
 }
