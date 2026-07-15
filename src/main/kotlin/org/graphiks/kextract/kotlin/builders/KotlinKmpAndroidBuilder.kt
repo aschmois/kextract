@@ -10,6 +10,7 @@ import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARRAY_HOLDER
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_CALLBACK
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_LIBRARY
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_NATIVE
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_POINTER
@@ -68,7 +69,7 @@ internal class KotlinKmpAndroidBuilder(
 
         KotlinKmpRuntimeSymbol.entries
             .filter { KotlinKmpSourceSet.ANDROID in it.sourceSets }
-            .filterNot { it in setOf(JNA_LIBRARY, JNA_POINTER, JNA_STRUCTURE, JNA_UNION, JVM_FIELD) }
+            .filterNot { it in setOf(JNA_CALLBACK, JNA_LIBRARY, JNA_POINTER, JNA_STRUCTURE, JNA_UNION, JVM_FIELD) }
             .forEach { builder.appendLine(namePlan.importLine(it)) }
         builder.appendLine()
 
@@ -445,7 +446,11 @@ internal class KotlinKmpAndroidBuilder(
                 jnaBuilder.unindent()
                 jnaBuilder.appendLine("}")
                 jnaBuilder.appendLine()
-                KotlinCallbackAndroidEmitter(namePlan).emit(builder, callbackModels)
+                KotlinCallbackAndroidEmitter(
+                    typeMapper::mapFunctionType,
+                    ::mapJnaType,
+                    namePlan,
+                ).emit(builder, callbackModels)
                 KotlinCallbackBindingEmitter(typeMapper::mapFunctionType, namePlan).emitAndroid(
                     builder,
                     directBindingModels,

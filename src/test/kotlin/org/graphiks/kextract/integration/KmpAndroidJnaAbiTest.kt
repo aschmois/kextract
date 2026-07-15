@@ -322,6 +322,36 @@ private fun compileGeneratedAndroid(sources: AndroidSources, probe: String? = nu
             )
             @CallbackRuntimeApi
             class PreparedCallbackRegistration<C : Callback>
+            @OptIn(CallbackRuntimeApi::class)
+            object CallbackRuntime {
+                fun <C : Callback> register(
+                    type: CallbackType<C>,
+                    trampoline: NativeAddress,
+                    policy: CallbackPolicy,
+                    onError: CallbackExceptionHandler,
+                    callback: C,
+                ): CallbackRegistration<C> = object : CallbackRegistration<C> {}
+                fun <C : Callback> prepare(
+                    type: CallbackType<C>,
+                    trampoline: NativeAddress,
+                    policy: CallbackPolicy,
+                    onError: CallbackExceptionHandler,
+                    callback: C,
+                ): PreparedCallbackRegistration<C> = PreparedCallbackRegistration()
+                fun <C : Callback> rearmAfterNativeQuiescence(
+                    type: CallbackType<C>,
+                    trampoline: NativeAddress,
+                    policy: CallbackPolicy,
+                    onError: CallbackExceptionHandler,
+                    callback: C,
+                ): CallbackRegistration<C> = object : CallbackRegistration<C> {}
+                fun <C : Callback> dispatchSafely(
+                    type: CallbackType<C>,
+                    userdata: NativeAddress?,
+                    dispatch: (C) -> Unit,
+                ) = Unit
+                fun reportUnroutedFailure(failure: Throwable) = Unit
+            }
             expect class CallbackHolder<T> {
                 val handler: NativeAddress
             }

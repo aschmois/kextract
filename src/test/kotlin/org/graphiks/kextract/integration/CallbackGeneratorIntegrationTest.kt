@@ -438,7 +438,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         """.trimIndent()
     }
 
-    "Android callback named UnsupportedOperationException preserves the external exception classifier" {
+    "Android callback named UnsupportedOperationException remains collision safe" {
         val generated = generateKmp("typedef void (*UnsupportedOperationException)(void);")
         val common = generated.getValue("commonMain")
         val android = generated.getValue("androidMain")
@@ -446,8 +446,8 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         common shouldContain "fun interface UnsupportedOperationException_2 : Callback"
         common shouldContain "canonicalId = \"typedef:UnsupportedOperationException\""
         android shouldContain "actual fun UnsupportedOperationException_2.Companion.register("
-        android shouldContain "throw UnsupportedOperationException("
-        android shouldNotContain "throw UnsupportedOperationException_2("
+        android shouldContain "CallbackRuntime.register("
+        android shouldNotContain "actual fun UnsupportedOperationException.Companion.register("
     }
 
     "outer opaque handle pointers in callbacks preserve raw address semantics" {
@@ -936,22 +936,23 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         native shouldNotContain "staticCFunction<Unit> {  ->"
     }
 
-    "Android callback registration fails before allocating unsupported resources" {
+    "Android callback registration uses a strongly held JNA trampoline" {
         val android = generateKmp(genericCallbacks).getValue("androidMain")
-        val unsupportedMessage =
-            "Android/JNA callback registration is not supported; use raw bindings or an Android Native target"
 
         listOf("SampleCallback", "NoUserdataCallback").forEach { callbackType ->
             android shouldContain "actual fun ${callbackType}.Companion.register("
             android shouldContain "internal actual fun ${callbackType}.Companion.prepare("
+            android shouldContain "private fun interface ${callbackType}Jna : com.sun.jna.Callback"
+            android shouldContain "private val callback: ${callbackType}Jna = ${callbackType}Jna"
         }
         android shouldContain "actual fun NoUserdataCallback.Companion.rearmAfterNativeQuiescence("
-        android shouldContain "throw UnsupportedOperationException("
-        android.split(unsupportedMessage).size shouldBe 6
-        android shouldNotContain "CallbackRuntime.register("
-        android shouldNotContain "CallbackRuntime.prepare("
-        android shouldNotContain "Arena."
-        android shouldNotContain "com.sun.jna.Callback"
+        android shouldContain "CallbackReference.getFunctionPointer(callback)"
+        android shouldContain "CallbackRuntime.register("
+        android shouldContain "CallbackRuntime.prepare("
+        android shouldContain "CallbackRuntime.rearmAfterNativeQuiescence("
+        android shouldContain "CallbackRuntime.dispatchSafely("
+        android shouldContain "CallbackRuntime.reportUnroutedFailure(failure)"
+        android shouldNotContain "Android/JNA callback registration is not supported"
     }
 
     "ordinary generic functions remain generated in every KMP target" {
