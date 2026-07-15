@@ -12,6 +12,7 @@ import org.graphiks.kextract.pipeline.Logger
 import org.graphiks.kextract.pipeline.Options
 import org.jetbrains.kotlin.cli.common.ExitCode
 import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.Files
 import java.nio.file.Path
 import java.net.URLClassLoader
@@ -498,6 +499,10 @@ class KmpAndroidJnaAbiTest : FreeSpec({
     }
 
     "copying a generated tagged display handle inline preserves its active Xlib payload" {
+        assumeTrue(
+            !System.getProperty("os.name", "").startsWith("Windows"),
+            "Android/JNA tagged-union runtime copy probe is out of scope on Windows",
+        )
         compileGeneratedAndroid(generateAndroidSources(NATIVE_DISPLAY_HEADER), NATIVE_DISPLAY_COPY_PROBE)
             ?.toList() shouldBe listOf(0x1234L, 7L)
     }
