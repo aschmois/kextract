@@ -196,11 +196,8 @@ tasks.withType<Test>().configureEach {
         completionMarker.get().asFile.delete()
     }
     systemProperty("kextract.testCompletionMarker", completionMarker.get().asFile.absolutePath)
-    // -Xrs disables the JVM signal handlers that fight with libclang's own
-    //   crash-recovery signal handlers on Linux. Without it the test JVM exits
-    //   with SIGSEGV in libc syscall during shutdown, even when all tests pass.
     // --enable-native-access is required for Panama FFI in JDK 22+.
-    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xrs")
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
     systemProperty("java.library.path", "$llvm_home/$os_lib_dir")
     // Help the OS dynamic linker resolve transitive libclang dependencies
     // (libclang.so → libLLVM.so.22) when dlopen opens libclang. java.library.path
