@@ -24,7 +24,8 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
         header: String,
         callbackBindings: CallbackBindingsConfig? = null,
     ): Map<String, String> {
-        val input = Files.createTempFile("kextract-callback-generator", ".h")
+        val workspace = Files.createTempDirectory("kextract-callback-generator")
+        val input = workspace.resolve("wgpu.h")
         val output = Files.createTempDirectory("kextract-callback-generator-out")
         return try {
             input.toFile().writeText(header)
@@ -47,7 +48,7 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
                 }
             }
         } finally {
-            input.toFile().delete()
+            workspace.toFile().deleteRecursively()
             output.toFile().deleteRecursively()
         }
     }
@@ -594,9 +595,40 @@ class CallbackGeneratorIntegrationTest : FreeSpec({
                 payload: SamplePayload,
             ): (NativeAddress?, NativeAddress?) -> Unit {
         """.trimIndent()
-        android shouldContain "throw UnsupportedOperationException("
+        android shouldContain "val preparedPayload = sample.bindings.android.SamplePayload.ByValue(payload.handler).apply { read() }"
+        android shouldContain "return { callback, userdata ->"
+        android shouldContain "sample.bindings.android.wgpu_hLibraryInstance.sample_set_callback("
+        android shouldContain "preparedPayload,"
+        android shouldContain "callback,"
+        android shouldContain "userdata,"
+        android shouldNotContain "Android/JNA safe callback bindings are not supported"
         android shouldNotContain "val prepared = SampleCallback.prepare("
         android shouldNotContain "CallbackRuntime.activateForNativeCall"
+    }
+
+    "Android direct callback preflight invokes the raw JNA function" {
+        val config = CallbackBindingsConfig().also { bindings ->
+            bindings.directFunctionBindings = listOf(
+                DirectFunctionBinding().also { binding ->
+                    binding.function = "function:sample_request"
+                    binding.callbackParameter = "callback"
+                    binding.callbackType = "typedef:SampleCallback"
+                    binding.routingUserdataParameter = "userdata"
+                },
+            )
+        }
+        val android = generateKmp(
+            """
+                typedef void (*SampleCallback)(unsigned int value, void * userdata);
+                void sample_request(int input, SampleCallback callback, void * userdata);
+            """.trimIndent(),
+            config,
+        ).getValue("androidMain")
+
+        android shouldContain "actual fun sample_requestCallbackBindingPreflight("
+        android shouldContain "sample.bindings.android.wgpu_hLibraryInstance.sample_request("
+        android shouldContain "return { callback, userdata ->"
+        android shouldNotContain "Android/JNA safe callback bindings are not supported"
     }
 
     "configured callback-info factory enforces the mode allowlist before allocation" {

@@ -154,8 +154,8 @@ private val ABI_HEADER =
         WGPUStringView label;
     } WGPUQueueDescriptor;
 
-    typedef void (*WGPUDeviceLostCallback)(void);
-    typedef void (*WGPUUncapturedErrorCallback)(void);
+    typedef void (*WGPUDeviceLostCallback)(void* userdata);
+    typedef void (*WGPUUncapturedErrorCallback)(void* userdata);
 
     typedef struct WGPUDeviceLostCallbackInfo {
         WGPUChainedStruct* nextInChain;

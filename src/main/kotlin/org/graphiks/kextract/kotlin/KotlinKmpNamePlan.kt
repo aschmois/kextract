@@ -87,7 +87,6 @@ internal enum class KotlinKmpRuntimeSymbol(
     USE_CONTENTS("kotlinx.cinterop.useContents", native()),
 
     JNA_POINTER("com.sun.jna.Pointer", android()),
-    JNA_CALLBACK("com.sun.jna.Callback", android(), preferredName = "JnaCallback"),
     JNA_CALLBACK_REFERENCE("com.sun.jna.CallbackReference", android()),
     JNA_LIBRARY("com.sun.jna.Library", android()),
     JNA_NATIVE("com.sun.jna.Native", android()),

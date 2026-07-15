@@ -294,7 +294,11 @@ class KmpNamePlanIntegrationTest : FreeSpec({
             val sourceSet = listOf(SourceSet.JVM, SourceSet.NATIVE, SourceSet.COMMON, SourceSet.ANDROID)
                 .firstOrNull { it.name in sourceSetNames }
                 ?: return@mapNotNull null
-            RuntimeImportCase(qualifiedName.invoke(symbol) as String, sourceSet)
+            RuntimeImportCase(
+                qualifiedName = qualifiedName.invoke(symbol) as String,
+                preferredName = preferred,
+                sourceSet = sourceSet,
+            )
         }
         val header =
             cases.joinToString("\n") { case ->
@@ -323,10 +327,9 @@ class KmpNamePlanIntegrationTest : FreeSpec({
 
 private data class RuntimeImportCase(
     val qualifiedName: String,
+    val preferredName: String,
     val sourceSet: SourceSet,
-) {
-    val preferredName: String = qualifiedName.substringAfterLast('.')
-}
+)
 
 private enum class SourceSet {
     COMMON,
