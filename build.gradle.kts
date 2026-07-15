@@ -157,7 +157,7 @@ dependencies {
     "kmainImplementation"("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.0")
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.14.4")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.14.4")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation("org.junit.platform:junit-platform-launcher")
     testImplementation("org.jetbrains.kotlin:kotlin-test:2.3.21")
     val kotestVersion = "6.1.11"
     testImplementation("io.kotest:kotest-runner-junit5:$kotestVersion")
@@ -170,8 +170,14 @@ dependencies {
 // ── Compiler configuration ────────────────────────────────────────────────────
 
 tasks.withType<Test>().configureEach {
+    val completionMarker = layout.buildDirectory.file("test-plan-completion/$name.properties")
+
     dependsOn("downloadLLVM")
     useJUnitPlatform()
+    doFirst {
+        completionMarker.get().asFile.delete()
+    }
+    systemProperty("kextract.testCompletionMarker", completionMarker.get().asFile.absolutePath)
     // -Xrs disables the JVM signal handlers that fight with libclang's own
     //   crash-recovery signal handlers on Linux. Without it the test JVM exits
     //   with SIGSEGV in libc syscall during shutdown, even when all tests pass.

@@ -81,26 +81,50 @@ jobs:
         env:
           JAVA_HOME: ${{ steps.setup.outputs.toolchain-path }}
         run: |
+          rm -rf build/test-results/test
+          rm -f build/test-plan-completion/test.properties
           set +e
           ./gradlew \
             -Pjdk_home="${{ steps.setup.outputs.toolchain-path }}" \
             -Pllvm_home= \
             test
           GRADLE_EXIT=$?
-          if [ "$GRADLE_EXIT" -ne 0 ]; then
-            # On Linux, libclang's atexit handler races with JDK 25's shutdown
-            # sequence and segfaults the test JVM after every test has already
-            # passed (exit 134 / SIGABRT). If we can find test XML reports AND
-            # none of them reports any failures or errors, treat the build as
-            # successful — every test passed; only the JVM teardown didn't.
-            if [ -d build/test-results/test ] && \
-               ls build/test-results/test/*.xml >/dev/null 2>&1 && \
-               ! grep -l 'failures="[1-9]\|errors="[1-9]' build/test-results/test/*.xml >/dev/null 2>&1; then
-              echo "::warning::Gradle exited $GRADLE_EXIT but every test XML shows 0 failures/errors — accepting as success (likely libclang-on-Linux shutdown SIGSEGV)."
-              exit 0
-            fi
-            exit $GRADLE_EXIT
+          if [ "$GRADLE_EXIT" -eq 0 ]; then
+            exit 0
           fi
+          if [ "$RUNNER_OS" != "Linux" ] || { [ "$GRADLE_EXIT" -ne 134 ] && [ "$GRADLE_EXIT" -ne 139 ]; }; then
+            exit "$GRADLE_EXIT"
+          fi
+          MARKER=build/test-plan-completion/test.properties
+          if [ ! -f "$MARKER" ]; then
+            exit "$GRADLE_EXIT"
+          fi
+          ruby <<'RUBY'
+          require "rexml/document"
+
+          directory = "build/test-results/test"
+          marker = File.read("build/test-plan-completion/test.properties")
+          marker_match = marker.match(/^tests=(\d+)$/)
+          abort "Invalid kextract completion marker" unless marker_match
+          expected_tests = Integer(marker_match[1])
+          reports = Dir[File.join(directory, "TEST-*.xml")]
+          abort "No kextract XML test reports found" if reports.empty?
+
+          actual_tests = reports.sum do |path|
+            suite = REXML::Document.new(File.read(path)).root
+            abort "Invalid test report: #{path}" unless suite&.name == "testsuite"
+            failures = Integer(suite.attributes["failures"])
+            errors = Integer(suite.attributes["errors"])
+            abort "Failed kextract test report: #{path}" unless failures.zero? && errors.zero?
+            Integer(suite.attributes["tests"])
+          end
+          abort "Incomplete kextract reports: expected #{expected_tests} tests, found #{actual_tests}" unless actual_tests == expected_tests
+          RUBY
+          XML_EXIT=$?
+          if [ "$XML_EXIT" -ne 0 ]; then
+            exit "$GRADLE_EXIT"
+          fi
+          echo "::warning::Gradle exited $GRADLE_EXIT after the complete clean test plan — accepting the known libclang/JDK 25 shutdown SIGSEGV."
 
       - name: 'Examples smoke test'
         if: matrix.run-examples
