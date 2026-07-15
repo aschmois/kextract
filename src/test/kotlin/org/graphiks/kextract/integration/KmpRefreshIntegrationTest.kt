@@ -274,7 +274,7 @@ class KmpRefreshIntegrationTest : FreeSpec({
         val generated = generateKmp(
             """
             /** Describes queue completion states. */
-            typedef enum WGPUQueueStatus {
+            typedef enum WGPUQueueStatus : unsigned int {
                 WGPUQueueStatus_Success = 0
             } WGPUQueueStatus;
             """.trimIndent(),

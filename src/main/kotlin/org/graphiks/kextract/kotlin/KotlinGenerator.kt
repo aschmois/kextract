@@ -174,6 +174,7 @@ class KotlinGenerator {
 
     private fun sanitizeClassName(name: String): String =
         name.substringAfterLast('/')
+            .substringAfterLast('\\')
             .replace(Regex("[^a-zA-Z0-9_]"), "_")
             .replace(Regex("^\\d+"), "_")
 }

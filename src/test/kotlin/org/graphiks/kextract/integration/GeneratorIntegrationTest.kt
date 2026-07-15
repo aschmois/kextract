@@ -73,6 +73,33 @@ class GeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    "KMP header names" - {
+        "strip Windows directory components before naming generated files" {
+            val tmp = Files.createTempFile("kextract_test_", ".h")
+            try {
+                tmp.toFile().writeText("int add(int a, int b);")
+                val parsed = KextractTool.parse(listOf(tmp.toString()))
+                val mangled = NameMangler(tmp.fileName.toString()).scan(parsed)
+                val files = KotlinGenerator().generate(
+                    scoped = mangled,
+                    headerName = "C:\\fixtures\\wgpu.h",
+                    targetPackage = "test",
+                    multiplatform = true,
+                )
+
+                files.map { it.className }.toSet() shouldBe setOf(
+                    "wgpu_hCommon",
+                    "wgpu_hJvm",
+                    "wgpu_hAndroid",
+                    "wgpu_h",
+                    "wgpu_hNative",
+                )
+            } finally {
+                Files.deleteIfExists(tmp)
+            }
+        }
+    }
+
     "KMP bitflag generation" - {
         "emits static const values for WGPUFlags aliases" {
             val src = generateCommon("""
