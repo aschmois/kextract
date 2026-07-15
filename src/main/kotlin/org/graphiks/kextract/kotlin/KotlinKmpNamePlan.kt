@@ -108,6 +108,7 @@ internal class KotlinKmpNamePlan private constructor(
     private val declarationNames: IdentityHashMap<Declaration, String>,
     private val parameterNames: IdentityHashMap<Declaration.Variable, String>,
     private val memberNames: IdentityHashMap<Declaration.Variable, String>,
+    private val opaqueHandleAliases: IdentityHashMap<Declaration.Scoped, Declaration.Typedef>,
     private val jnaHelperNames: IdentityHashMap<Declaration.Scoped, KotlinKmpJnaHelperNames>,
     private val jnaHelperNamesByRecordName: Map<String, KotlinKmpJnaHelperNames>,
 ) {
@@ -129,6 +130,12 @@ internal class KotlinKmpNamePlan private constructor(
     fun member(field: Declaration.Variable): String = memberNames.getValue(field)
 
     fun rawIdentifier(declaration: Declaration): String = KotlinNameMangler.escape(declaration.name())
+
+    fun publicRecordClassifier(record: Declaration.Scoped): String =
+        opaqueHandleAliases[record]?.let { alias -> declaration(alias) } ?: declaration(record)
+
+    fun nativeCinteropClassifier(declaration: Declaration.Scoped): String =
+        "webgpu.native.${rawIdentifier(declaration)}"
 
     fun jnaByReference(record: Declaration.Scoped): String = jnaHelperNames.getValue(record).byReference
 
@@ -202,6 +209,17 @@ internal class KotlinKmpNamePlan private constructor(
                     pointee.tree().name().isNotEmpty() &&
                     pointee.tree().name().endsWith("Impl")
             }
+
+            val opaqueHandleAliases = IdentityHashMap<Declaration.Scoped, Declaration.Typedef>()
+            rootMembers
+                .filterIsInstance<Declaration.Typedef>()
+                .filterNot(Skip::isPresent)
+                .filter(::isOpaqueHandleTypedef)
+                .forEach { typedef ->
+                    val pointer = typedef.type() as Type.Delegated
+                    val pointee = pointer.type() as Type.Declared
+                    opaqueHandleAliases.putIfAbsent(pointee.tree(), typedef)
+                }
 
             rootMembers.forEach { declaration ->
                 if (Skip.isPresent(declaration)) return@forEach
@@ -321,6 +339,7 @@ internal class KotlinKmpNamePlan private constructor(
                 declarationNames = declarationNames,
                 parameterNames = parameterNames,
                 memberNames = memberNames,
+                opaqueHandleAliases = opaqueHandleAliases,
                 jnaHelperNames = jnaHelperNames,
                 jnaHelperNamesByRecordName = jnaHelperNamesByRecordName,
             )

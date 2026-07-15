@@ -52,10 +52,7 @@ internal class KotlinKmpJvmBuilder(
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
     private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
-    private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val typeMapper = KmpTypeMapper(
-        opaqueHandleAliases,
-        generatedStructNames,
         namePlan,
         abiIndex = abiIndex,
     )
@@ -439,7 +436,6 @@ internal class KotlinKmpJvmBuilder(
             if (pointee is Type.Declared && pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT) {
                 val pointeeName = pointee.tree().name()
                 if (pointeeName.isNotEmpty() && pointeeName.endsWith("Impl")) {
-                    opaqueHandleAliases[pointeeName] = name
                     if (!generatedNames.add(name)) return
                     builder.appendLine("@kotlin.jvm.JvmInline")
                     builder.appendLine("actual value class $name actual constructor(actual val handler: $nativeAddress)")

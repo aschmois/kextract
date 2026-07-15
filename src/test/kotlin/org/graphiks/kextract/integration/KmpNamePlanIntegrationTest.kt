@@ -138,6 +138,61 @@ class KmpNamePlanIntegrationTest : FreeSpec({
         generated.android shouldContain "handle.`when`"
     }
 
+    "opaque handles use their planned public names in fields and functions" {
+        val generated = generateKmpSources(
+            """
+            typedef struct classImpl *class;
+            typedef struct Holder { class value; } Holder;
+            void use(class value);
+            """.trimIndent(),
+        )
+
+        generated.common shouldContain "expect value class class_(val handler: NativeAddress)"
+        generated.common shouldContain "var value: class_?"
+        generated.common shouldContain "expect fun use(value: class_?): Unit"
+        generated.common shouldNotContain "var value: NativeAddress?"
+        generated.common shouldNotContain "expect fun use(value: NativeAddress?"
+
+        compileAndInvokeGeneratedKmpJvm(
+            generated = generated,
+            probePackage = "sample.probe",
+            probeSource =
+                """
+                package sample.probe
+
+                import sample.bindings.Holder
+                import sample.bindings.class_
+
+                fun verifyOpaqueHandleNames(): Array<Class<*>> = arrayOf(
+                    Holder::class.java,
+                    class_::class.java,
+                )
+                """.trimIndent(),
+            facadeClassName = "ProbeKt",
+            methodName = "verifyOpaqueHandleNames",
+        )
+    }
+
+    "Native cinterop record classifiers keep escaped raw C names" {
+        val generated = generateKmpSources(
+            """
+            typedef struct class { int when; } class;
+            typedef class ClassAlias;
+            typedef struct Holder { ClassAlias nested; } Holder;
+            typedef void (*TakeClass)(class value);
+            """.trimIndent(),
+        )
+
+        generated.common shouldContain "expect interface class_"
+        generated.native shouldContain "sizeOf<webgpu.native.`class`>()"
+        generated.native shouldContain "CValue<webgpu.native.`class`>"
+        generated.native shouldContain "reinterpret<webgpu.native.`class`>()"
+        generated.native shouldContain "val size_nested = sizeOf<webgpu.native.`class`>().toLong()"
+        generated.native shouldContain
+            "private val TakeClassTrampoline = staticCFunction<CValue<webgpu.native.`class`>, Unit>"
+        generated.native shouldNotContain "webgpu.native.class_"
+    }
+
     "runtime classifiers are aliased whenever a C classifier shadows them" {
         val runtimeSymbolClass = Class.forName("org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol")
         val preferredName = runtimeSymbolClass.getMethod("getPreferredName")

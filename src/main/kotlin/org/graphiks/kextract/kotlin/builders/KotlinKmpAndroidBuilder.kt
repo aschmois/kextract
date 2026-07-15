@@ -37,11 +37,9 @@ internal class KotlinKmpAndroidBuilder(
     private val jnaBuilder = SourceBuilder()
     private val files = mutableListOf<KotlinSourceFile>()
     private val generatedNames = mutableSetOf<String>()
-    private val generatedStructNames = mutableSetOf<String>()
     private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
-    private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val androidPackage = if (targetPackage.isEmpty()) "android" else "$targetPackage.android"
-    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames, namePlan, arraysAsHolders = false)
+    private val typeMapper = KmpTypeMapper(namePlan, arraysAsHolders = false)
     private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
     private val cString = namePlan.runtime(C_STRING)
     private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
@@ -79,7 +77,6 @@ internal class KotlinKmpAndroidBuilder(
                 if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
-                generatedStructNames.add(structName)
                 if (structName == "WGPUNativeDisplayHandle") {
                     emitNativeDisplayHandle(decl)
                     return
@@ -481,7 +478,6 @@ internal class KotlinKmpAndroidBuilder(
             if (pointee is Type.Declared && pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT) {
                 val pointeeName = pointee.tree().name()
                 if (pointeeName.isNotEmpty() && pointeeName.endsWith("Impl")) {
-                    opaqueHandleAliases[pointeeName] = name
                     if (!generatedNames.add(name)) return
                     builder.appendLine("@kotlin.jvm.JvmInline")
                     builder.appendLine("actual value class $name actual constructor(actual val handler: $nativeAddress)")

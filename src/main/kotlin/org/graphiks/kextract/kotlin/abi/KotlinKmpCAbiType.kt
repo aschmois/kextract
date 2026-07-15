@@ -17,7 +17,6 @@ internal enum class KotlinKmpAbiContext {
 internal sealed interface KotlinKmpCAbiType {
     val jvmLayout: String
     val jvmCarrier: String
-    val nativeCarrier: String
 
     data class Scalar(
         val kind: Kind,
@@ -45,7 +44,7 @@ internal sealed interface KotlinKmpCAbiType {
         val kotlinType: String
             get() = if (unsigned) kind.unsignedKotlinType else kind.signedKotlinType
 
-        override val nativeCarrier: String
+        val nativeCarrier: String
             get() = kotlinType
 
         fun fromJvmCarrier(expression: String): String = when {
@@ -132,8 +131,6 @@ internal sealed interface KotlinKmpCAbiType {
         override val jvmLayout: String
             get() = "${JavaName.getFullNameOrThrow(declaration)}.layout"
         override val jvmCarrier: String = "MemorySegment"
-        override val nativeCarrier: String
-            get() = "CValue<webgpu.native.${declaration.name()}>"
     }
 
     data class Address(
@@ -142,7 +139,6 @@ internal sealed interface KotlinKmpCAbiType {
     ) : KotlinKmpCAbiType {
         override val jvmLayout: String = "ValueLayout.ADDRESS"
         override val jvmCarrier: String = "MemorySegment"
-        override val nativeCarrier: String = "COpaquePointer?"
     }
 
     companion object {

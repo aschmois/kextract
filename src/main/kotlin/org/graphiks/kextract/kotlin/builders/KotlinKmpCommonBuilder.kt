@@ -37,11 +37,7 @@ internal class KotlinKmpCommonBuilder(
     private val builder = SourceBuilder()
     private val files = mutableListOf<KotlinSourceFile>()
     private val generatedNames = mutableSetOf<String>()
-    private val generatedStructNames = mutableSetOf<String>()
-    private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val typeMapper = KmpTypeMapper(
-        opaqueHandleAliases,
-        generatedStructNames,
         namePlan,
         abiIndex = abiIndex,
     )
@@ -72,7 +68,6 @@ internal class KotlinKmpCommonBuilder(
                 if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
-                generatedStructNames.add(structName)
                 if (structName == "WGPUNativeDisplayHandle") {
                     emitNativeDisplayHandle(decl)
                     return
@@ -317,7 +312,6 @@ internal class KotlinKmpCommonBuilder(
             if (pointee is Type.Declared && pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT) {
                 val pointeeName = pointee.tree().name()
                 if (pointeeName.isNotEmpty() && pointeeName.endsWith("Impl")) {
-                    opaqueHandleAliases[pointeeName] = name
                     if (!generatedNames.add(name)) return
                     emitKDoc(decl)
                     builder.appendLine("expect value class $name(val handler: $nativeAddress)")

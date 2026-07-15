@@ -45,7 +45,7 @@ internal class KotlinCallbackNativeEmitter(
 
     private fun emitTrampoline(builder: SourceBuilder, callback: KotlinCallbackModel) {
         val rawParameters = callback.rawParameters()
-        val functionTypes = rawParameters.map { planNativeCarrier(it.cAbiType.nativeCarrier) } + "Unit"
+        val functionTypes = rawParameters.map { planNativeCarrier(it.cAbiType) } + "Unit"
         val parameterNames = rawParameters.joinToString(", ") { it.name }
         val lambdaStart = if (parameterNames.isEmpty()) "{" else "{ $parameterNames ->"
 
@@ -176,9 +176,10 @@ internal class KotlinCallbackNativeEmitter(
     private fun KotlinCallbackModel.rawParameters(): List<KotlinCallbackParameter> =
         (parameters + listOfNotNull(routingUserdataParameter)).sortedBy(KotlinCallbackParameter::index)
 
-    private fun planNativeCarrier(carrier: String): String = when {
-        carrier == "COpaquePointer?" -> "${namePlan.runtime(C_OPAQUE_POINTER)}?"
-        carrier.startsWith("CValue<") -> carrier.replaceFirst("CValue", namePlan.runtime(C_VALUE))
-        else -> carrier
+    private fun planNativeCarrier(cAbiType: KotlinKmpCAbiType): String = when (cAbiType) {
+        is KotlinKmpCAbiType.Scalar -> cAbiType.nativeCarrier
+        is KotlinKmpCAbiType.Address -> "${namePlan.runtime(C_OPAQUE_POINTER)}?"
+        is KotlinKmpCAbiType.StructValue ->
+            "${namePlan.runtime(C_VALUE)}<${namePlan.nativeCinteropClassifier(cAbiType.declaration)}>"
     }
 }

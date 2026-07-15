@@ -45,10 +45,7 @@ internal class KotlinKmpNativeBuilder(
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
     private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
-    private val opaqueHandleAliases = mutableMapOf<String, String>()
     private val typeMapper = KmpTypeMapper(
-        opaqueHandleAliases,
-        generatedStructNames,
         namePlan,
         abiIndex = abiIndex,
     )
@@ -85,6 +82,7 @@ internal class KotlinKmpNativeBuilder(
             Declaration.Scoped.Kind.STRUCT,
             Declaration.Scoped.Kind.UNION -> {
                 val structName = namePlan.declaration(decl)
+                val nativeStructClassifier = namePlan.nativeCinteropClassifier(decl)
                 if (structName.isEmpty() || structName.contains("unnamed")) return
                 if (structName.endsWith("Impl") && decl.members().isEmpty()) return
                 if (!generatedNames.add(structName)) return
@@ -123,7 +121,7 @@ internal class KotlinKmpNativeBuilder(
                     builder.appendLine("    ByReference(allocator.allocate(8L))")
                 } else {
                     builder.appendLine("actual fun allocate(allocator: $memoryAllocator): $structName =")
-                    builder.appendLine("    ByReference(allocator.allocate($sizeOf<webgpu.native.$structName>().toLong()))")
+                    builder.appendLine("    ByReference(allocator.allocate($sizeOf<$nativeStructClassifier>().toLong()))")
                 }
                 builder.appendLine()
                 builder.appendLine("actual fun allocateArray(allocator: $memoryAllocator, size: UInt, provider: (UInt, $structName) -> Unit): $arrayHolder<$structName> {")
@@ -131,7 +129,7 @@ internal class KotlinKmpNativeBuilder(
                 if (fields.isEmpty()) {
                     builder.appendLine("val byteSize = 8L")
                 } else {
-                    builder.appendLine("val byteSize = $sizeOf<webgpu.native.$structName>().toLong()")
+                    builder.appendLine("val byteSize = $sizeOf<$nativeStructClassifier>().toLong()")
                 }
                 builder.appendLine("val segment = allocator.allocate(byteSize * size.toLong())")
                 builder.appendLine("for (i in 0 until size.toInt()) {")
@@ -148,7 +146,7 @@ internal class KotlinKmpNativeBuilder(
 
                 if (fields.isNotEmpty()) {
                     builder.appendLine()
-                    builder.appendLine("    value class ByValue(val handle: $cValue<webgpu.native.$structName>) : $structName {")
+                    builder.appendLine("    value class ByValue(val handle: $cValue<$nativeStructClassifier>) : $structName {")
                     builder.indent()
                     builder.appendLine("override val handler: $nativeAddress")
                     builder.appendLine("    get() = error(\"should not be call on CValue\")")
@@ -247,8 +245,8 @@ internal class KotlinKmpNativeBuilder(
                     builder.appendLine("private val struct: $cOpaquePointer")
                     builder.appendLine("    get() = handler.pointer")
                 } else {
-                    builder.appendLine("private val struct: webgpu.native.$structName")
-                    builder.appendLine("    get() = handler.pointer.$reinterpret<webgpu.native.$structName>().$pointed")
+                    builder.appendLine("private val struct: $nativeStructClassifier")
+                    builder.appendLine("    get() = handler.pointer.$reinterpret<$nativeStructClassifier>().$pointed")
                 }
                 builder.appendLine()
                 fields.forEach { field ->
@@ -304,12 +302,15 @@ internal class KotlinKmpNativeBuilder(
                                     builder.appendLine("get() = struct.$fieldName?.let(::$nativeAddress)?.let { $nonOpt.ByReference(it) }")
                                     builder.appendLine("set(value) { struct.$fieldName = value?.handler?.pointer?.takeIf { value.handler.rawValue != 0L }?.$reinterpret() }")
                                 } else {
+                                    val nativeFieldClassifier = namePlan.nativeCinteropClassifier(
+                                        requireNotNull(typeMapper.declaredRecord(field.type())),
+                                    )
                                     builder.appendLine("get() = $fieldType.ByReference($nativeAddress(struct.$fieldName.$ptr))")
                                     builder.appendLine("set(value) {")
                                     builder.indent()
                                     builder.appendLine("val destBytes = struct.$fieldName.$ptr.$reinterpret<$byteVar>()")
                                     builder.appendLine("val srcBytes = value.handler.pointer.$reinterpret<$byteVar>()")
-                                    builder.appendLine("val byteSize = $sizeOf<webgpu.native.$fieldType>().toLong()")
+                                    builder.appendLine("val byteSize = $sizeOf<$nativeFieldClassifier>().toLong()")
                                     builder.appendLine("for (i in 0L until byteSize) {")
                                     builder.indent()
                                     builder.appendLine("destBytes[i.toInt()] = srcBytes[i.toInt()]")
@@ -356,7 +357,7 @@ internal class KotlinKmpNativeBuilder(
 
                 // Generate toCValue extension function for structure by-value passing
                 if (fields.isNotEmpty()) {
-                    builder.appendLine("fun $structName.toCValue(): $cValue<webgpu.native.$structName> = ${namePlan.runtime(C_VALUE_FACTORY)} {")
+                    builder.appendLine("fun $structName.toCValue(): $cValue<$nativeStructClassifier> = ${namePlan.runtime(C_VALUE_FACTORY)} {")
                     builder.indent()
                     fields.forEach { field ->
                         val fieldName = namePlan.rawIdentifier(field)
@@ -369,9 +370,12 @@ internal class KotlinKmpNativeBuilder(
                                     scalar.optionsRawToKotlinScalar("this@toCValue.$propertyName.rawValue"),
                             )
                         } else if (typeMapper.isInlineStructOrUnion(field.type())) {
+                            val nativeFieldClassifier = namePlan.nativeCinteropClassifier(
+                                requireNotNull(typeMapper.declaredRecord(field.type())),
+                            )
                             builder.appendLine("val dest_$propertyName = this.$fieldName.$ptr.$reinterpret<$byteVar>()")
                             builder.appendLine("val src_$propertyName = this@toCValue.$propertyName.handler.pointer.$reinterpret<$byteVar>()")
-                            builder.appendLine("val size_$propertyName = $sizeOf<webgpu.native.$fieldType>().toLong()")
+                            builder.appendLine("val size_$propertyName = $sizeOf<$nativeFieldClassifier>().toLong()")
                             builder.appendLine("for (i in 0L until size_$propertyName) {")
                             builder.indent()
                             builder.appendLine("dest_$propertyName[i.toInt()] = src_$propertyName[i.toInt()]")
@@ -463,7 +467,6 @@ internal class KotlinKmpNativeBuilder(
             if (pointee is Type.Declared && pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT) {
                 val pointeeName = pointee.tree().name()
                 if (pointeeName.isNotEmpty() && pointeeName.endsWith("Impl")) {
-                    opaqueHandleAliases[pointeeName] = name
                     if (!generatedNames.add(name)) return
                     builder.appendLine("actual value class $name actual constructor(actual val handler: $nativeAddress)")
                     builder.appendLine()
