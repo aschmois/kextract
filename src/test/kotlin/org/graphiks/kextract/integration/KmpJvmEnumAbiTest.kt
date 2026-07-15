@@ -47,6 +47,15 @@ class KmpJvmEnumAbiTest : FreeSpec({
         Unsigned64 roundTripWide(Unsigned64 value);
         """.trimIndent()
 
+    val optionsHeader =
+        """
+        typedef enum NarrowOptions : unsigned int {
+            NarrowOptions_Max = 4294967295U
+        } NarrowOptions;
+        typedef struct R { NarrowOptions value; } R;
+        NarrowOptions roundTrip(NarrowOptions value);
+        """.trimIndent()
+
     "generated JVM enum functions and fields use their Clang carriers" {
         val generated = generateKmpSources(enumHeader)
         val source = generated.jvm
@@ -153,6 +162,88 @@ class KmpJvmEnumAbiTest : FreeSpec({
             ULong.MAX_VALUE.toLong(),
         )
         result.last().toULong() shouldBe ULong.MAX_VALUE
+    }
+
+    "options-style enum source adapts rawValue through its indexed scalar" {
+        val generated = generateKmpSources(optionsHeader)
+
+        generated.common shouldContain "value class NarrowOptions(val rawValue: Long)"
+        generated.common shouldContain
+            "val NarrowOptions_Max = NarrowOptions(4294967295L)"
+        generated.jvm shouldContain
+            "roundTrip_HANDLE.invokeExact(value.rawValue.toInt()) as Int"
+        generated.jvm shouldContain
+            "NarrowOptions((roundTrip_HANDLE.invokeExact(value.rawValue.toInt()) as Int).toUInt().toLong())"
+        generated.jvm shouldContain
+            "get() = NarrowOptions((value_VH.get(handler.handler, 0L) as Int).toUInt().toLong())"
+        generated.jvm shouldContain
+            "set(value) = value_VH.set(handler.handler, 0L, value.rawValue.toInt())"
+        generated.native shouldContain
+            "webgpu.native.roundTrip(value.rawValue.toUInt())"
+        generated.native shouldContain
+            "return NarrowOptions(webgpu.native.roundTrip(value.rawValue.toUInt()).toLong())"
+        generated.native shouldContain "get() = NarrowOptions(struct.value.toLong())"
+        generated.native shouldContain
+            "get() = handle.useContents { NarrowOptions(this.value.toLong()) }"
+        generated.native shouldContain "set(value) { struct.value = value.rawValue.toUInt() }"
+        generated.native shouldContain
+            "this.value = this@toCValue.value.rawValue.toUInt()"
+    }
+
+    "options-style enum max constant function and field round trip on the JVM" {
+        val generated = generateKmpSources(optionsHeader)
+
+        val result = compileAndInvokeGeneratedKmpJvm(
+            generated = generated,
+            probePackage = "sample.probe",
+            probeSource =
+                """
+                package sample.probe
+
+                import io.ygdrasil.kffi.MemoryAllocator
+                import io.ygdrasil.kffi.TestNativeSymbols
+                import java.lang.foreign.Arena
+                import java.lang.foreign.FunctionDescriptor
+                import java.lang.foreign.Linker
+                import java.lang.foreign.ValueLayout
+                import java.lang.invoke.MethodHandles
+                import java.lang.invoke.MethodType
+                import sample.bindings.NarrowOptions
+                import sample.bindings.R
+                import sample.bindings.roundTrip
+
+                object NarrowOptionsTarget {
+                    @JvmStatic
+                    fun roundTrip(value: Int): Int = value
+                }
+
+                fun runOptionsProbe(): LongArray = Arena.ofConfined().use { arena ->
+                    val methodHandle = MethodHandles.lookup().findStatic(
+                        NarrowOptionsTarget::class.java,
+                        "roundTrip",
+                        MethodType.methodType(java.lang.Integer.TYPE, java.lang.Integer.TYPE),
+                    )
+                    val descriptor = FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_INT)
+                    TestNativeSymbols.register(
+                        "roundTrip",
+                        Linker.nativeLinker().upcallStub(methodHandle, descriptor, arena),
+                    )
+
+                    val record = R.allocate(MemoryAllocator())
+                    val maximum = NarrowOptions.NarrowOptions_Max
+                    record.value = maximum
+                    longArrayOf(
+                        maximum.rawValue,
+                        record.value.rawValue,
+                        roundTrip(maximum).rawValue,
+                    )
+                }
+                """.trimIndent(),
+            facadeClassName = "ProbeKt",
+            methodName = "runOptionsProbe",
+        ) as LongArray
+
+        result.toList() shouldBe listOf(4294967295L, 4294967295L, 4294967295L)
     }
 
     "target-variable enum long fails before any source is emitted" {

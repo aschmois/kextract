@@ -60,6 +60,41 @@ class KotlinCallbackCAbiTypeTest {
         )
     }
 
+    @Test
+    fun `options conversions cover signed unsigned narrow and 64-bit scalars`() {
+        val cases = listOf(
+            OptionsCase(
+                Type.qualified(Type.Delegated.Kind.SIGNED, Type.primitive(Type.Primitive.Kind.Char)),
+                "raw.toByte()", "(carrier).toLong()", "raw.toByte()", "value.toLong()", "-1L",
+            ),
+            OptionsCase(
+                Type.qualified(Type.Delegated.Kind.UNSIGNED, Type.primitive(Type.Primitive.Kind.Short)),
+                "raw.toShort()", "(carrier).toUShort().toLong()", "raw.toUShort()", "value.toLong()", "65535L",
+            ),
+            OptionsCase(
+                Type.qualified(Type.Delegated.Kind.UNSIGNED, Type.primitive(Type.Primitive.Kind.Int)),
+                "raw.toInt()", "(carrier).toUInt().toLong()", "raw.toUInt()", "value.toLong()", "4294967295L",
+            ),
+            OptionsCase(
+                Type.primitive(Type.Primitive.Kind.LongLong),
+                "raw", "carrier", "raw", "value", "-1L",
+            ),
+            OptionsCase(
+                Type.qualified(Type.Delegated.Kind.UNSIGNED, Type.primitive(Type.Primitive.Kind.LongLong)),
+                "raw", "carrier", "raw.toULong()", "value.toLong()", "-1L",
+            ),
+        )
+
+        cases.forEach { case ->
+            val scalar = abiType(case.type)
+            assertEquals(case.rawToJvm, invokeScalar(scalar, "optionsRawToJvmCarrier", "raw"))
+            assertEquals(case.jvmToRaw, invokeScalar(scalar, "jvmCarrierToOptionsRaw", "carrier"))
+            assertEquals(case.rawToKotlin, invokeScalar(scalar, "optionsRawToKotlinScalar", "raw"))
+            assertEquals(case.kotlinToRaw, invokeScalar(scalar, "kotlinScalarToOptionsRaw", "value"))
+            assertEquals(case.literal, invokeScalar(scalar, "enumConstantOptionsRawLiteral", -1L))
+        }
+    }
+
     private fun assertUnsupportedVariableWidthScalar(type: Type, expectedMessage: String) {
         val failure = assertFailsWith<InvocationTargetException> { abiType(type) }.targetException
 
@@ -74,6 +109,21 @@ class KotlinCallbackCAbiTypeTest {
     )
 
     private data class ScalarShape(val kind: String, val unsigned: Boolean)
+
+    private fun invokeScalar(value: Any, name: String, argument: Any): String =
+        value.javaClass.getMethod(
+            name,
+            if (argument is Long) java.lang.Long.TYPE else argument.javaClass,
+        ).invoke(value, argument) as String
+
+    private data class OptionsCase(
+        val type: Type,
+        val rawToJvm: String,
+        val jvmToRaw: String,
+        val rawToKotlin: String,
+        val kotlinToRaw: String,
+        val literal: String,
+    )
 
     companion object {
         private val abiTypeClass =

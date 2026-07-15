@@ -92,6 +92,11 @@ internal class KmpTypeMapper(
         else -> error("Expected enum type, found $type")
     }
 
+    fun isOptionsEnumType(type: Type): Boolean =
+        isEnumType(type) && namePlan.declaration(enumDeclaration(type)).let { name ->
+            name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
+        }
+
     fun isInlineStructOrUnion(type: Type): Boolean {
         val fieldType = mapType(type)
         return canonicalKmpType(type) == "Other" &&

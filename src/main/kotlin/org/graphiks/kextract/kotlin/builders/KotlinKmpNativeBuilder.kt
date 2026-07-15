@@ -189,7 +189,14 @@ internal class KotlinKmpNativeBuilder(
                                 builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
                             }
                             else -> {
-                                if (typeMapper.isInlineStructOrUnion(field.type())) {
+                                if (typeMapper.isOptionsEnumType(field.type())) {
+                                    val scalar = abiIndex.enum(typeMapper.enumDeclaration(field.type()))
+                                    builder.appendLine(
+                                        "get() = handle.$useContents { $fieldType(" +
+                                            "${scalar.kotlinScalarToOptionsRaw("this.$fieldName")}) }",
+                                    )
+                                    builder.appendLine("set(value) { error(\"Setters not supported on ByValue\") }")
+                                } else if (typeMapper.isInlineStructOrUnion(field.type())) {
                                     val isOpt = fieldType == cString || fieldType.startsWith(arrayHolder) || fieldType.endsWith("?")
                                     if (isOpt) {
                                         val nonOpt = fieldType.removeSuffix("?")
@@ -280,7 +287,17 @@ internal class KotlinKmpNativeBuilder(
                             builder.appendLine("set(value) { struct.$fieldName = value }")
                         }
                         else -> {
-                            if (typeMapper.isInlineStructOrUnion(field.type())) {
+                            if (typeMapper.isOptionsEnumType(field.type())) {
+                                val scalar = abiIndex.enum(typeMapper.enumDeclaration(field.type()))
+                                builder.appendLine(
+                                    "get() = $fieldType(" +
+                                        "${scalar.kotlinScalarToOptionsRaw("struct.$fieldName")})",
+                                )
+                                builder.appendLine(
+                                    "set(value) { struct.$fieldName = " +
+                                        "${scalar.optionsRawToKotlinScalar("value.rawValue")} }",
+                                )
+                            } else if (typeMapper.isInlineStructOrUnion(field.type())) {
                                 val isOpt = fieldType == cString || fieldType.startsWith(arrayHolder) || fieldType.endsWith("?")
                                 if (isOpt) {
                                     val nonOpt = fieldType.removeSuffix("?")
@@ -345,7 +362,13 @@ internal class KotlinKmpNativeBuilder(
                         val fieldName = field.name()
                         val propertyName = namePlan.member(field)
                         val fieldType = typeMapper.mapType(field.type())
-                        if (typeMapper.isInlineStructOrUnion(field.type())) {
+                        if (typeMapper.isOptionsEnumType(field.type())) {
+                            val scalar = abiIndex.enum(typeMapper.enumDeclaration(field.type()))
+                            builder.appendLine(
+                                "this.$fieldName = " +
+                                    scalar.optionsRawToKotlinScalar("this@toCValue.$propertyName.rawValue"),
+                            )
+                        } else if (typeMapper.isInlineStructOrUnion(field.type())) {
                             builder.appendLine("val dest_$fieldName = this.$fieldName.$ptr.$reinterpret<$byteVar>()")
                             builder.appendLine("val src_$fieldName = this@toCValue.$propertyName.handler.pointer.$reinterpret<$byteVar>()")
                             builder.appendLine("val size_$fieldName = $sizeOf<webgpu.native.$fieldType>().toLong()")
@@ -462,6 +485,12 @@ internal class KotlinKmpNativeBuilder(
             return
         }
         when {
+            typeMapper.isOptionsEnumType(type) -> {
+                val scalar = abiIndex.enum(typeMapper.enumDeclaration(type))
+                builder.appendLine(
+                    "return $returnType(${scalar.kotlinScalarToOptionsRaw(call)})",
+                )
+            }
             returnsStructByValue(type) -> builder.appendLine("return $returnType.ByValue($call)")
             returnType == "$nativeAddress?" -> builder.appendLine("return $call?.let(::$nativeAddress)")
             returnType == "$cString?" -> builder.appendLine("return $call?.let(::$nativeAddress)?.let(::$cString)")
@@ -476,6 +505,9 @@ internal class KotlinKmpNativeBuilder(
     private fun toNativeArgument(name: String, type: Type): String {
         val kmpType = typeMapper.mapFunctionType(type)
         return when {
+            typeMapper.isOptionsEnumType(type) ->
+                abiIndex.enum(typeMapper.enumDeclaration(type))
+                    .optionsRawToKotlinScalar("$name.rawValue")
             kmpType == "$cString?" -> "$name?.handler?.pointer?.takeIf { $name.handler.rawValue != 0L }?.$reinterpret()"
             typeMapper.callbackFunction(type) != null ->
                 "$name?.pointer?.takeIf { $name.rawValue != 0L }?.$reinterpret()"

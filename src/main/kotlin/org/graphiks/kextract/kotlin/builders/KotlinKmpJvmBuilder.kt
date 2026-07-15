@@ -199,6 +199,10 @@ internal class KotlinKmpJvmBuilder(
                         builder.appendLine("override var $fieldName: $propType")
                         builder.indent()
                         val canonical = typeMapper.canonicalKmpType(field.type())
+                        val optionsScalar = field.type()
+                            .takeIf(typeMapper::isOptionsEnumType)
+                            ?.let(typeMapper::enumDeclaration)
+                            ?.let(abiIndex::enum)
                         when {
                             fieldType == cString -> {
                                 builder.appendLine("get() = (${fieldName}_VH.get(handler.handler, 0L) as? $memorySegment)?.let(::$nativeAddress)?.let(::$cString)")
@@ -211,6 +215,17 @@ internal class KotlinKmpJvmBuilder(
                             fieldType == "$nativeAddress?" -> {
                                 builder.appendLine("get() = (${fieldName}_VH.get(handler.handler, 0L) as? $memorySegment)?.takeIf { it != $memorySegment.NULL }?.let(::$nativeAddress)")
                                 builder.appendLine("set(value) = ${fieldName}_VH.set(handler.handler, 0L, value?.handler ?: $memorySegment.NULL)")
+                            }
+                            optionsScalar != null -> {
+                                val rawExpression =
+                                    "${fieldName}_VH.get(handler.handler, 0L) as ${optionsScalar.jvmCarrier}"
+                                builder.appendLine(
+                                    "get() = $fieldType(${optionsScalar.jvmCarrierToOptionsRaw(rawExpression)})",
+                                )
+                                builder.appendLine(
+                                    "set(value) = ${fieldName}_VH.set(handler.handler, 0L, " +
+                                        "${optionsScalar.optionsRawToJvmCarrier("value.rawValue")})",
+                                )
                             }
                             canonical == "Boolean" -> {
                                 builder.appendLine("get() = ${fieldName}_VH.get(handler.handler, 0L) as Boolean")
@@ -486,7 +501,13 @@ internal class KotlinKmpJvmBuilder(
             typeMapper.isEnumType(type) -> {
                 val scalar = abiIndex.enum(typeMapper.enumDeclaration(type))
                 val rawExpression = "$invoke as ${scalar.jvmCarrier}"
-                builder.appendLine("return ${scalar.fromJvmCarrier(rawExpression)}")
+                if (typeMapper.isOptionsEnumType(type)) {
+                    builder.appendLine(
+                        "return $returnType(${scalar.jvmCarrierToOptionsRaw(rawExpression)})",
+                    )
+                } else {
+                    builder.appendLine("return ${scalar.fromJvmCarrier(rawExpression)}")
+                }
             }
             returnType == "$nativeAddress?" -> {
                 builder.appendLine("return ($invoke as $memorySegment).takeIf { it != $memorySegment.NULL }?.let(::$nativeAddress)")
@@ -536,6 +557,9 @@ internal class KotlinKmpJvmBuilder(
             rawType == memorySegment && kmpType.startsWith(arrayHolder) -> "$name?.handler?.handler ?: $memorySegment.NULL"
             rawType == memorySegment && kmpType.endsWith("?") -> "$name?.handler?.handler ?: $memorySegment.NULL"
             rawType == memorySegment -> "$name.handler.handler"
+            typeMapper.isOptionsEnumType(type) ->
+                abiIndex.enum(typeMapper.enumDeclaration(type))
+                    .optionsRawToJvmCarrier("$name.rawValue")
             typeMapper.isEnumType(type) ->
                 abiIndex.enum(typeMapper.enumDeclaration(type)).toJvmCarrier(name)
             rawType == "Int" && kmpType == "UInt" -> "$name.toInt()"

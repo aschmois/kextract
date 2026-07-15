@@ -66,6 +66,39 @@ internal sealed interface KotlinKmpCAbiType {
             else -> expression
         }
 
+        fun optionsRawToJvmCarrier(expression: String): String = when (kind) {
+            Kind.I8 -> "$expression.toByte()"
+            Kind.I16 -> "$expression.toShort()"
+            Kind.I32 -> "$expression.toInt()"
+            Kind.I64 -> expression
+            else -> expression
+        }
+
+        fun jvmCarrierToOptionsRaw(expression: String): String = when {
+            kind == Kind.I64 -> expression
+            unsigned && kind == Kind.I8 -> "($expression).toUByte().toLong()"
+            unsigned && kind == Kind.I16 -> "($expression).toUShort().toLong()"
+            unsigned && kind == Kind.I32 -> "($expression).toUInt().toLong()"
+            else -> "($expression).toLong()"
+        }
+
+        fun optionsRawToKotlinScalar(expression: String): String = when {
+            unsigned && kind == Kind.I8 -> "$expression.toUByte()"
+            unsigned && kind == Kind.I16 -> "$expression.toUShort()"
+            unsigned && kind == Kind.I32 -> "$expression.toUInt()"
+            unsigned && kind == Kind.I64 -> "$expression.toULong()"
+            kind == Kind.I8 -> "$expression.toByte()"
+            kind == Kind.I16 -> "$expression.toShort()"
+            kind == Kind.I32 -> "$expression.toInt()"
+            kind == Kind.I64 -> expression
+            else -> expression
+        }
+
+        fun kotlinScalarToOptionsRaw(expression: String): String = when {
+            kind == Kind.I64 && !unsigned -> expression
+            else -> "$expression.toLong()"
+        }
+
         /** Renders Clang's sign-extended enum value at the declared carrier width. */
         fun enumConstantLiteral(value: Long): String = when {
             !unsigned && kind == Kind.I64 -> when (value) {
@@ -78,6 +111,18 @@ internal sealed interface KotlinKmpCAbiType {
             kind == Kind.I32 -> "${java.lang.Integer.toUnsignedString(value.toInt())}u"
             kind == Kind.I64 -> "${java.lang.Long.toUnsignedString(value)}uL"
             else -> value.toString()
+        }
+
+        fun enumConstantOptionsRawLiteral(value: Long): String {
+            val rawValue = when {
+                !unsigned -> value
+                kind == Kind.I8 -> value and 0xffL
+                kind == Kind.I16 -> value and 0xffffL
+                kind == Kind.I32 -> java.lang.Integer.toUnsignedLong(value.toInt())
+                kind == Kind.I64 -> value
+                else -> value
+            }
+            return if (rawValue == Long.MIN_VALUE) "Long.MIN_VALUE" else "${rawValue}L"
         }
     }
 

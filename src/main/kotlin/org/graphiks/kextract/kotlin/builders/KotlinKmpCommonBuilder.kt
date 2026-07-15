@@ -16,6 +16,7 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_ALLOCATOR
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
 import org.graphiks.kextract.kotlin.KotlinKmpSourceSet
 import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
+import org.graphiks.kextract.kotlin.abi.KotlinKmpCAbiType
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCommonEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
@@ -119,7 +120,7 @@ internal class KotlinKmpCommonBuilder(
                     val constants = decl.members().filterIsInstance<Declaration.Constant>().filterNot(Skip::isPresent)
                     emitKDoc(decl)
                     if (isOptionsStyle(name)) {
-                        emitValueClass(name, constants)
+                        emitValueClass(name, constants, abiIndex.enum(decl))
                     } else {
                         emitEnumClass(decl, constants)
                     }
@@ -168,7 +169,11 @@ internal class KotlinKmpCommonBuilder(
         builder.appendLine()
     }
 
-    private fun emitValueClass(name: String, constants: List<Declaration.Constant>) {
+    private fun emitValueClass(
+        name: String,
+        constants: List<Declaration.Constant>,
+        scalar: KotlinKmpCAbiType.Scalar,
+    ) {
         builder.appendLine("@kotlin.jvm.JvmInline")
         builder.appendLine("value class ${name}(val rawValue: Long) {")
         builder.indent()
@@ -178,7 +183,10 @@ internal class KotlinKmpCommonBuilder(
             builder.indent()
             for (c in constants) {
                 emitKDoc(c)
-                builder.appendLine("val ${c.name()} = ${name}(${c.value().toLongValue().toKotlinLongLiteral()})")
+                builder.appendLine(
+                    "val ${c.name()} = ${name}(" +
+                        "${scalar.enumConstantOptionsRawLiteral(c.value().toLongValue())})",
+                )
             }
             builder.unindent()
             builder.appendLine("}")
