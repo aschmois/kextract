@@ -15,7 +15,7 @@ object KotlinNameMangler {
         // Soft keywords
         "file", "field", "property", "receiver", "param", "setparam", "delegate",
         // Hard keywords
-        "package", "import", "class", "interface", "object", "data", "sealed",
+        "package", "import", "class", "interface", "object", "sealed",
         "fun", "val", "var", "typealias", "constructor", "by", "get", "set", "where",
         "if", "else", "when", "try", "catch", "finally", "for", "while", "do", "continue",
         "break", "return", "throw", "is", "in", "as", "this", "super", "null", "true", "false",

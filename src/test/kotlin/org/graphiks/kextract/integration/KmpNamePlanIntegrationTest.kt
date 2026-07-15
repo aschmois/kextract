@@ -16,8 +16,12 @@ class KmpNamePlanIntegrationTest : FreeSpec({
             typedef struct CollisionRecord {
                 int handler;
                 int layout;
+                int data;
+                int Companion;
                 NativeAddress address;
             } CollisionRecord;
+
+            int data(int data);
             """.trimIndent()
 
         val first = generateKmpSources(header)
@@ -27,9 +31,18 @@ class KmpNamePlanIntegrationTest : FreeSpec({
         first.common shouldContain "import io.ygdrasil.kffi.NativeAddress as KffiNativeAddress"
         first.common shouldContain "expect interface NativeAddress"
         first.common shouldContain "var handler_2: Int"
-        first.common shouldContain "var layout_2: Int"
+        first.common shouldContain "var layout: Int"
+        first.common shouldContain "var data: Int"
+        first.common shouldContain "var Companion_2: Int"
+        first.common shouldContain "expect fun data(data: Int): Int"
+        first.common shouldNotContain "var layout_2: Int"
+        first.common shouldNotContain "var data_: Int"
         first.common shouldContain "val handler: KffiNativeAddress"
         first.jvm shouldContain "actual var handler_2: Int"
+        first.jvm shouldContain "actual var layout: Int"
+        first.jvm shouldContain "actual var data: Int"
+        first.jvm shouldContain "actual var Companion_2: Int"
+        first.jvm shouldContain "actual fun data(data: Int): Int"
         first.native shouldContain "actual var handler_2: Int"
 
         compileAndInvokeGeneratedKmpJvm(

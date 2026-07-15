@@ -154,7 +154,6 @@ internal class KotlinKmpNamePlan private constructor(
             "Companion",
             "ByReference",
             "ByValue",
-            "layout",
             "allocate",
             "allocateArray",
             "invoke",
