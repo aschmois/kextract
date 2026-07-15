@@ -148,7 +148,7 @@ internal class KotlinKmpAndroidBuilder(
                 builder.appendLine("class ByReference(val handle: $rawJnaByReference = $rawJnaByReference(com.sun.jna.Pointer.NULL)) : $structName {")
                 builder.indent()
                 fields.forEach { field ->
-                    val fieldName = field.name()
+                    val fieldName = namePlan.rawIdentifier(field)
                     val propertyName = namePlan.member(field)
                     val fieldType = typeMapper.mapType(field.type())
                     if (fieldType == cString) {
@@ -167,7 +167,7 @@ internal class KotlinKmpAndroidBuilder(
                         builder.unindent()
                     } else if (inlineJnaType != null) {
                         builder.indent()
-                        emitInlineRecordAccessors(fieldName, fieldType)
+                        emitInlineRecordAccessors(field, fieldType)
                         builder.unindent()
                     } else if (isStructType(field.type())) {
                         builder.indent()
@@ -277,7 +277,7 @@ internal class KotlinKmpAndroidBuilder(
                 builder.appendLine("class ByValue(val handle: $rawJnaByValue = $rawJnaByValue(com.sun.jna.Pointer.NULL)) : $structName {")
                 builder.indent()
                 fields.forEach { field ->
-                    val fieldName = field.name()
+                    val fieldName = namePlan.rawIdentifier(field)
                     val propertyName = namePlan.member(field)
                     val fieldType = typeMapper.mapType(field.type())
                     if (fieldType == cString) {
@@ -296,7 +296,7 @@ internal class KotlinKmpAndroidBuilder(
                         builder.unindent()
                     } else if (inlineJnaType != null) {
                         builder.indent()
-                        emitInlineRecordAccessors(fieldName, fieldType)
+                        emitInlineRecordAccessors(field, fieldType)
                         builder.unindent()
                     } else if (isStructType(field.type())) {
                         builder.indent()
@@ -411,7 +411,7 @@ internal class KotlinKmpAndroidBuilder(
                 jnaBuilder.appendLine("open class $structName(pointer: $jnaPointer? = null) : $jnaBase(pointer) {")
                 jnaBuilder.indent()
                 fields.forEach { field ->
-                    val fieldName = field.name()
+                    val fieldName = namePlan.rawIdentifier(field)
                     val fieldType = mapJnaType(field.type())
                     jnaBuilder.appendLine("@$jvmField var $fieldName: ${fieldType} = ${getDefaultJnaValue(field.type())}")
                 }
@@ -459,8 +459,8 @@ internal class KotlinKmpAndroidBuilder(
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
-        val params = decl.parameters().mapIndexed { index, param ->
-            val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
+        val params = decl.parameters().map { param ->
+            val name = namePlan.parameter(param)
             "$name: ${typeMapper.mapFunctionType(param.type())}"
         }.joinToString(", ")
         builder.appendLine("actual fun ${namePlan.declaration(decl)}($params): $returnType =")
@@ -642,29 +642,32 @@ internal class KotlinKmpAndroidBuilder(
         "$androidPackage.${namePlan.declaration(record)}.${namePlan.jnaByReference(record)}"
     }
 
-    private fun emitInlineRecordAccessors(fieldName: String, fieldType: String) {
+    private fun emitInlineRecordAccessors(field: Declaration.Variable, fieldType: String) {
+        val cFieldName = field.name()
+        val fieldName = namePlan.rawIdentifier(field)
         builder.appendLine("get() {")
         builder.indent()
-        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.appendLine("handle.readField(\"$cFieldName\")")
         builder.appendLine("return $fieldType.ByValue(handle.$fieldName)")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine("set(value) {")
         builder.indent()
         builder.appendLine("val bytes = value.handler.getByteArray(0, handle.$fieldName.size())")
-        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.appendLine("handle.readField(\"$cFieldName\")")
         builder.appendLine("handle.$fieldName.pointer.write(0, bytes, 0, bytes.size)")
-        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.appendLine("handle.readField(\"$cFieldName\")")
         builder.unindent()
         builder.appendLine("}")
     }
 
     private fun emitUnionFieldAccessors(field: Declaration.Variable) {
-        val fieldName = field.name()
+        val cFieldName = field.name()
+        val fieldName = namePlan.rawIdentifier(field)
         val fieldType = typeMapper.mapType(field.type())
         val inlineJnaType = inlineRecordJnaType(field.type())
         if (inlineJnaType != null) {
-            emitInlineRecordAccessors(fieldName, fieldType)
+            emitInlineRecordAccessors(field, fieldType)
             return
         }
 
@@ -707,14 +710,14 @@ internal class KotlinKmpAndroidBuilder(
 
         builder.appendLine("get() {")
         builder.indent()
-        builder.appendLine("handle.readField(\"$fieldName\")")
+        builder.appendLine("handle.readField(\"$cFieldName\")")
         builder.appendLine("return $getter")
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine("set(value) {")
         builder.indent()
         builder.appendLine(assignment)
-        builder.appendLine("handle.writeField(\"$fieldName\")")
+        builder.appendLine("handle.writeField(\"$cFieldName\")")
         builder.unindent()
         builder.appendLine("}")
     }

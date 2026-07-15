@@ -86,7 +86,7 @@ internal class KotlinCallbackBindingEmitter(
             }
             builder.appendLine("return { ${preparedCallLambdaParameters(binding)} ->")
             builder.indent()
-            builder.appendLine("webgpu.native.${binding.function.name()}(")
+            builder.appendLine("webgpu.native.${namePlan.rawIdentifier(binding.function)}(")
             builder.indent()
             preparedPlatformArguments(binding, parameters, toNativeArgument).forEach { argument ->
                 builder.appendLine("$argument,")
@@ -227,7 +227,7 @@ internal class KotlinCallbackBindingEmitter(
         val applicationUserdataParameters = binding.applicationUserdataFields.mapIndexed { index, field ->
             RenderedCallbackInfoParameter(
                 variable = field,
-                name = parameterNames.allocate(field.name(), "arg$index"),
+                name = parameterNames.allocate(namePlan.member(field), "arg$index"),
             )
         }
         builder.appendLine("/**")
@@ -348,7 +348,7 @@ internal class KotlinCallbackBindingEmitter(
             if (parameter === binding.callbackParameter || parameter === binding.routingUserdataParameter) {
                 null
             } else {
-                val name = names.allocate(parameter.name(), "arg$index")
+                val name = names.allocate(namePlan.parameter(parameter), "arg$index")
                 RenderedParameter(
                     variable = parameter,
                     name = name,

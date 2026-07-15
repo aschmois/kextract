@@ -90,6 +90,54 @@ class KmpNamePlanIntegrationTest : FreeSpec({
             "sample.bindings.android.JnaHelperCollision.ByValue_2()"
     }
 
+    "KMP declarations and parameters are Kotlin-safe before emission" {
+        val generated = generateKmpSources(
+            """
+            typedef struct class {
+                int when;
+                int when_;
+            } class;
+
+            typedef enum sealed {
+                when = 1,
+                when_ = 2
+            } sealed;
+
+            int fun(class class, int when, int when_);
+            int fun_(int value);
+            """.trimIndent(),
+        )
+
+        compileAndInvokeGeneratedKmpJvm(
+            generated = generated,
+            probePackage = "sample.probe",
+            probeSource =
+                """
+                package sample.probe
+
+                import sample.bindings.class_
+
+                fun verifyKeywordNames(): Class<*> = class_::class.java
+                """.trimIndent(),
+            facadeClassName = "ProbeKt",
+            methodName = "verifyKeywordNames",
+        )
+
+        generated.common shouldContain "expect interface class_"
+        generated.common shouldContain "var when_: Int"
+        generated.common shouldContain "var when__2: Int"
+        generated.common shouldContain "typealias sealed_"
+        generated.common shouldContain "const val when_"
+        generated.common shouldContain "const val when__2"
+        generated.common shouldContain "expect fun fun_(class_: class_, when_: Int, when__2: Int): Int"
+        generated.common shouldContain "expect fun fun__2(value: Int): Int"
+        generated.jvm shouldContain "actual fun fun_(class_: class_, when_: Int, when__2: Int): Int"
+        generated.native shouldContain "webgpu.native.`fun`("
+        generated.native shouldContain "this.`when`"
+        generated.android shouldContain "@JvmField var `when`: Int = 0"
+        generated.android shouldContain "handle.`when`"
+    }
+
     "runtime classifiers are aliased whenever a C classifier shadows them" {
         val runtimeSymbolClass = Class.forName("org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol")
         val preferredName = runtimeSymbolClass.getMethod("getPreferredName")

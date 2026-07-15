@@ -465,12 +465,12 @@ internal class KotlinKmpJvmBuilder(
         val name = namePlan.declaration(decl)
         val cName = decl.name()
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
-        val params = decl.parameters().mapIndexed { index, param ->
-            val paramName = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
+        val params = decl.parameters().map { param ->
+            val paramName = namePlan.parameter(param)
             "$paramName: ${typeMapper.mapFunctionType(param.type())}"
         }
-        val rawArgs = decl.parameters().mapIndexed { index, param ->
-            val paramName = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
+        val rawArgs = decl.parameters().map { param ->
+            val paramName = namePlan.parameter(param)
             toRawJvmArgument(paramName, param.type())
         }
         val invokeArgs = if (returnsStructByValue(decl.type().returnType())) {

@@ -162,7 +162,7 @@ internal class KotlinKmpCommonBuilder(
         for (c in constants) {
             emitKDoc(c)
             builder.appendLine(
-                "const val ${c.name()} : ${name} = " +
+                "const val ${namePlan.declaration(c)} : ${name} = " +
                     scalar.enumConstantLiteral(c.value().toLongValue()),
             )
         }
@@ -184,7 +184,7 @@ internal class KotlinKmpCommonBuilder(
             for (c in constants) {
                 emitKDoc(c)
                 builder.appendLine(
-                    "val ${c.name()} = ${name}(" +
+                    "val ${namePlan.declaration(c)} = ${name}(" +
                         "${scalar.enumConstantOptionsRawLiteral(c.value().toLongValue())})",
                 )
             }
@@ -216,16 +216,17 @@ internal class KotlinKmpCommonBuilder(
             }
 
         flagTypedefs.forEach { typedef ->
-            val flagName = typedef.name()
+            val cFlagName = typedef.name()
+            val flagName = namePlan.declaration(typedef)
             if (!generatedNames.add(flagName)) return@forEach
 
             emitKDoc(typedef)
             builder.appendLine("typealias $flagName = ULong")
             constants
-                .filter { it.name().startsWith("${flagName}_") }
+                .filter { it.name().startsWith("${cFlagName}_") }
                 .forEach { constant ->
                     emitKDoc(constant)
-                    builder.appendLine("const val ${constant.name()} : $flagName = ${constant.value().toLongValue().toKotlinULongLiteral()}")
+                    builder.appendLine("const val ${namePlan.declaration(constant)} : $flagName = ${constant.value().toLongValue().toKotlinULongLiteral()}")
                 }
             builder.appendLine()
         }
@@ -297,9 +298,8 @@ internal class KotlinKmpCommonBuilder(
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
-        val params = decl.parameters().mapIndexed { index, param ->
-            val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
-            "$name: ${typeMapper.mapFunctionType(param.type())}"
+        val params = decl.parameters().map { param ->
+            "${namePlan.parameter(param)}: ${typeMapper.mapFunctionType(param.type())}"
         }.joinToString(", ")
         emitKDoc(decl)
         builder.appendLine("expect fun ${namePlan.declaration(decl)}($params): $returnType")

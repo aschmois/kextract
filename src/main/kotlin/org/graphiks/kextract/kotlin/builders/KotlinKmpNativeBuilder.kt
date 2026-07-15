@@ -154,7 +154,7 @@ internal class KotlinKmpNativeBuilder(
                     builder.appendLine("    get() = error(\"should not be call on CValue\")")
                     builder.appendLine()
                     fields.forEach { field ->
-                        val fieldName = field.name()
+                        val fieldName = namePlan.rawIdentifier(field)
                         val propertyName = namePlan.member(field)
                         val fieldType = typeMapper.mapType(field.type())
                         if (fieldType == cString) {
@@ -252,7 +252,7 @@ internal class KotlinKmpNativeBuilder(
                 }
                 builder.appendLine()
                 fields.forEach { field ->
-                    val fieldName = field.name()
+                    val fieldName = namePlan.rawIdentifier(field)
                     val propertyName = namePlan.member(field)
                     val fieldType = typeMapper.mapType(field.type())
                     if (fieldType == cString) {
@@ -359,7 +359,7 @@ internal class KotlinKmpNativeBuilder(
                     builder.appendLine("fun $structName.toCValue(): $cValue<webgpu.native.$structName> = ${namePlan.runtime(C_VALUE_FACTORY)} {")
                     builder.indent()
                     fields.forEach { field ->
-                        val fieldName = field.name()
+                        val fieldName = namePlan.rawIdentifier(field)
                         val propertyName = namePlan.member(field)
                         val fieldType = typeMapper.mapType(field.type())
                         if (typeMapper.isOptionsEnumType(field.type())) {
@@ -369,12 +369,12 @@ internal class KotlinKmpNativeBuilder(
                                     scalar.optionsRawToKotlinScalar("this@toCValue.$propertyName.rawValue"),
                             )
                         } else if (typeMapper.isInlineStructOrUnion(field.type())) {
-                            builder.appendLine("val dest_$fieldName = this.$fieldName.$ptr.$reinterpret<$byteVar>()")
-                            builder.appendLine("val src_$fieldName = this@toCValue.$propertyName.handler.pointer.$reinterpret<$byteVar>()")
-                            builder.appendLine("val size_$fieldName = $sizeOf<webgpu.native.$fieldType>().toLong()")
-                            builder.appendLine("for (i in 0L until size_$fieldName) {")
+                            builder.appendLine("val dest_$propertyName = this.$fieldName.$ptr.$reinterpret<$byteVar>()")
+                            builder.appendLine("val src_$propertyName = this@toCValue.$propertyName.handler.pointer.$reinterpret<$byteVar>()")
+                            builder.appendLine("val size_$propertyName = $sizeOf<webgpu.native.$fieldType>().toLong()")
+                            builder.appendLine("for (i in 0L until size_$propertyName) {")
                             builder.indent()
-                            builder.appendLine("dest_$fieldName[i.toInt()] = src_$fieldName[i.toInt()]")
+                            builder.appendLine("dest_$propertyName[i.toInt()] = src_$propertyName[i.toInt()]")
                             builder.unindent()
                             builder.appendLine("}")
                         } else {
@@ -435,15 +435,15 @@ internal class KotlinKmpNativeBuilder(
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
-        val params = decl.parameters().mapIndexed { index, param ->
-            val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
+        val params = decl.parameters().map { param ->
+            val name = namePlan.parameter(param)
             "$name: ${typeMapper.mapFunctionType(param.type())}"
         }.joinToString(", ")
-        val args = decl.parameters().mapIndexed { index, param ->
-            val name = param.name().takeIf { it.isNotEmpty() } ?: "arg$index"
+        val args = decl.parameters().map { param ->
+            val name = namePlan.parameter(param)
             toNativeArgument(name, param.type())
         }.joinToString(", ")
-        val call = "webgpu.native.${decl.name()}($args)"
+        val call = "webgpu.native.${namePlan.rawIdentifier(decl)}($args)"
         builder.appendLine("actual fun ${namePlan.declaration(decl)}($params): $returnType {")
         builder.indent()
         emitFunctionReturn(decl.type().returnType(), returnType, call)

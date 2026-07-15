@@ -63,4 +63,6 @@ object KotlinNameMangler {
     }
 
     fun mangle(decl: Declaration): String = mangle(decl.name())
+
+    fun escape(name: String): String = if (mangle(name) == name) name else "`$name`"
 }

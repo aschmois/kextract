@@ -5,6 +5,7 @@ import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
+import org.graphiks.kextract.kotlin.utils.KotlinNameMangler
 import java.util.IdentityHashMap
 
 internal enum class KotlinKmpSourceSet {
@@ -105,6 +106,7 @@ internal class KotlinKmpNamePlan private constructor(
     val renderedRuntimeNames: Set<String>,
     private val runtimeNames: Map<KotlinKmpRuntimeSymbol, String>,
     private val declarationNames: IdentityHashMap<Declaration, String>,
+    private val parameterNames: IdentityHashMap<Declaration.Variable, String>,
     private val memberNames: IdentityHashMap<Declaration.Variable, String>,
     private val jnaHelperNames: IdentityHashMap<Declaration.Scoped, KotlinKmpJnaHelperNames>,
     private val jnaHelperNamesByRecordName: Map<String, KotlinKmpJnaHelperNames>,
@@ -122,7 +124,11 @@ internal class KotlinKmpNamePlan private constructor(
 
     fun declaration(declaration: Declaration): String = declarationNames.getValue(declaration)
 
+    fun parameter(parameter: Declaration.Variable): String = parameterNames.getValue(parameter)
+
     fun member(field: Declaration.Variable): String = memberNames.getValue(field)
+
+    fun rawIdentifier(declaration: Declaration): String = KotlinNameMangler.escape(declaration.name())
 
     fun jnaByReference(record: Declaration.Scoped): String = jnaHelperNames.getValue(record).byReference
 
@@ -158,8 +164,85 @@ internal class KotlinKmpNamePlan private constructor(
                 }
             }
             val declarationNames = IdentityHashMap<Declaration, String>()
+            val parameterNames = IdentityHashMap<Declaration.Variable, String>()
             val memberNames = IdentityHashMap<Declaration.Variable, String>()
             val jnaHelperNames = IdentityHashMap<Declaration.Scoped, KotlinKmpJnaHelperNames>()
+            val collectedDeclarations = IdentityHashMap<Declaration, Unit>()
+            val plannedTopLevelNames = linkedSetOf<String>()
+            val topLevelAllocator = KotlinIdentifierAllocator()
+
+            fun allocateTopLevel(declaration: Declaration) {
+                if (declarationNames.containsKey(declaration)) return
+                val name = topLevelAllocator.allocate(declaration.name(), "declaration")
+                declarationNames[declaration] = name
+                plannedTopLevelNames += name
+            }
+
+            val rootMembers = scoped.members()
+            val rootConstants = rootMembers.filterIsInstance<Declaration.Constant>().filterNot(Skip::isPresent)
+            val flagTypedefs = rootMembers
+                .filterIsInstance<Declaration.Typedef>()
+                .filterNot(Skip::isPresent)
+                .filter { typedef ->
+                    typedef.name() != "WGPUFlags" &&
+                        rootConstants.any { it.name().startsWith("${typedef.name()}_") }
+                }
+            val flagConstants = flagTypedefs.flatMap { typedef ->
+                rootConstants.filter { it.name().startsWith("${typedef.name()}_") }
+            }.toSet()
+            val callbackTypedefs = callbackBindings.callbacks.map { it.typedef }
+
+            fun isOpaqueHandleTypedef(declaration: Declaration.Typedef): Boolean {
+                if (callbackTypedefs.any { it === declaration }) return false
+                val inner = declaration.type()
+                if (inner !is Type.Delegated || inner.kind() != Type.Delegated.Kind.POINTER) return false
+                val pointee = inner.type()
+                return pointee is Type.Declared &&
+                    pointee.tree().kind() == Declaration.Scoped.Kind.STRUCT &&
+                    pointee.tree().name().isNotEmpty() &&
+                    pointee.tree().name().endsWith("Impl")
+            }
+
+            rootMembers.forEach { declaration ->
+                if (Skip.isPresent(declaration)) return@forEach
+                when (declaration) {
+                    is Declaration.Function -> allocateTopLevel(declaration)
+                    is Declaration.Typedef -> {
+                        if (declaration in flagTypedefs || isOpaqueHandleTypedef(declaration)) {
+                            allocateTopLevel(declaration)
+                        }
+                    }
+                    is Declaration.Constant -> if (declaration in flagConstants) allocateTopLevel(declaration)
+                    is Declaration.Scoped -> when (declaration.kind()) {
+                        Declaration.Scoped.Kind.STRUCT,
+                        Declaration.Scoped.Kind.UNION,
+                        -> {
+                            val name = declaration.name()
+                            if (
+                                name.isNotEmpty() &&
+                                !name.contains("unnamed") &&
+                                !(name.endsWith("Impl") && declaration.members().isEmpty())
+                            ) {
+                                allocateTopLevel(declaration)
+                            }
+                        }
+                        Declaration.Scoped.Kind.ENUM -> {
+                            val name = declaration.name()
+                            if (name.isNotEmpty() && !name.contains("unnamed")) {
+                                allocateTopLevel(declaration)
+                                if (!isOptionsStyle(name)) {
+                                    declaration.members()
+                                        .filterIsInstance<Declaration.Constant>()
+                                        .filterNot(Skip::isPresent)
+                                        .forEach(::allocateTopLevel)
+                                }
+                            }
+                        }
+                        else -> Unit
+                    }
+                    else -> Unit
+                }
+            }
 
             val collector = object {
                 fun collectType(type: Type) {
@@ -175,12 +258,18 @@ internal class KotlinKmpNamePlan private constructor(
                 }
 
                 fun collect(declaration: Declaration) {
-                    if (declarationNames.containsKey(declaration)) return
-                    declarationNames[declaration] = declaration.name()
+                    if (collectedDeclarations.put(declaration, Unit) != null) return
+                    if (!declarationNames.containsKey(declaration)) {
+                        declarationNames[declaration] = KotlinNameMangler.mangle(declaration.name())
+                    }
                     when (declaration) {
                         is Declaration.Function -> {
                             collectType(declaration.type())
-                            declaration.parameters().forEach(::collect)
+                            val parameters = KotlinIdentifierAllocator()
+                            declaration.parameters().forEachIndexed { index, parameter ->
+                                parameterNames[parameter] = parameters.allocate(parameter.name(), "arg$index")
+                                collect(parameter)
+                            }
                         }
                         is Declaration.Typedef -> collectType(declaration.type())
                         is Declaration.Variable -> collectType(declaration.type())
@@ -202,6 +291,19 @@ internal class KotlinKmpNamePlan private constructor(
                                     byValue = jnaHelperAllocator.allocate("ByValue", "JnaByValue"),
                                 )
                             }
+                            if (
+                                !Skip.isPresent(declaration) &&
+                                declaration.kind() == Declaration.Scoped.Kind.ENUM &&
+                                isOptionsStyle(declaration.name())
+                            ) {
+                                val constants = KotlinIdentifierAllocator(OPTIONS_ENUM_RESERVED_MEMBERS)
+                                declaration.members()
+                                    .filterIsInstance<Declaration.Constant>()
+                                    .filterNot(Skip::isPresent)
+                                    .forEach { constant ->
+                                        declarationNames[constant] = constants.allocate(constant.name(), "constant")
+                                    }
+                            }
                             declaration.members().forEach(::collect)
                         }
                     }
@@ -213,14 +315,26 @@ internal class KotlinKmpNamePlan private constructor(
             }
 
             return KotlinKmpNamePlan(
-                topLevelNames = cTopLevelNames,
+                topLevelNames = plannedTopLevelNames,
                 renderedRuntimeNames = runtimeNames.values.toSet(),
                 runtimeNames = runtimeNames,
                 declarationNames = declarationNames,
+                parameterNames = parameterNames,
                 memberNames = memberNames,
                 jnaHelperNames = jnaHelperNames,
                 jnaHelperNamesByRecordName = jnaHelperNamesByRecordName,
             )
         }
+
+        private val OPTIONS_ENUM_RESERVED_MEMBERS = setOf(
+            "rawValue",
+            "Companion",
+            "plus",
+            "contains",
+            "o",
+        )
+
+        private fun isOptionsStyle(name: String): Boolean =
+            name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
     }
 }
