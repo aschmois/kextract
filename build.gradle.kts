@@ -174,6 +174,21 @@ tasks.withType<Test>().configureEach {
 
     dependsOn("downloadLLVM")
     useJUnitPlatform()
+    if (Os.isName("linux")) {
+        val testJdkHome = javaLauncher.get().metadata.installationPath.asFile
+        val libjsig = testJdkHome.resolve("lib/libjsig.so")
+        if (!libjsig.isFile) {
+            throw GradleException(
+                "Cannot configure Linux test signal chaining: expected the test toolchain's " +
+                    "libjsig.so at $libjsig",
+            )
+        }
+        val inheritedPreload = System.getenv("LD_PRELOAD")?.takeIf(String::isNotBlank)
+        environment(
+            "LD_PRELOAD",
+            listOfNotNull(libjsig.absolutePath, inheritedPreload).joinToString(File.pathSeparator),
+        )
+    }
     if (!Os.isFamily(Os.FAMILY_WINDOWS)) {
         environment("LIBCLANG_DISABLE_CRASH_RECOVERY", "1")
     }
