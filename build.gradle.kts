@@ -174,6 +174,9 @@ tasks.withType<Test>().configureEach {
 
     dependsOn("downloadLLVM")
     useJUnitPlatform()
+    if (!Os.isFamily(Os.FAMILY_WINDOWS)) {
+        environment("LIBCLANG_DISABLE_CRASH_RECOVERY", "1")
+    }
     doFirst {
         completionMarker.get().asFile.delete()
     }
