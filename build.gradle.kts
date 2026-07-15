@@ -171,6 +171,9 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     val completionMarker = layout.buildDirectory.file("test-plan-completion/$name.properties")
+    val llvmLibraryDirectory = "$llvm_home/$os_lib_dir"
+    val inheritedLibraryPath = System.getenv("LD_LIBRARY_PATH")?.takeIf(String::isNotBlank)
+    val librarySearchPaths = mutableListOf<String>()
 
     dependsOn("downloadLLVM")
     useJUnitPlatform()
@@ -183,12 +186,18 @@ tasks.withType<Test>().configureEach {
                     "libjsig.so at $libjsig",
             )
         }
+        librarySearchPaths += libjsig.parentFile.absolutePath
         val inheritedPreload = System.getenv("LD_PRELOAD")?.takeIf(String::isNotBlank)
+        // glibc cannot escape spaces in LD_PRELOAD entries, so resolve the basename
+        // through LD_LIBRARY_PATH instead of embedding the test JDK's absolute path.
         environment(
             "LD_PRELOAD",
-            listOfNotNull(libjsig.absolutePath, inheritedPreload).joinToString(File.pathSeparator),
+            listOfNotNull(libjsig.name, inheritedPreload).joinToString(File.pathSeparator),
         )
     }
+    librarySearchPaths += llvmLibraryDirectory
+    inheritedLibraryPath?.let(librarySearchPaths::add)
+    environment("LD_LIBRARY_PATH", librarySearchPaths.joinToString(File.pathSeparator))
     if (!Os.isFamily(Os.FAMILY_WINDOWS)) {
         environment("LIBCLANG_DISABLE_CRASH_RECOVERY", "1")
     }
@@ -198,12 +207,11 @@ tasks.withType<Test>().configureEach {
     systemProperty("kextract.testCompletionMarker", completionMarker.get().asFile.absolutePath)
     // --enable-native-access is required for Panama FFI in JDK 22+.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    systemProperty("java.library.path", "$llvm_home/$os_lib_dir")
+    systemProperty("java.library.path", llvmLibraryDirectory)
     // Help the OS dynamic linker resolve transitive libclang dependencies
     // (libclang.so → libLLVM.so.22) when dlopen opens libclang. java.library.path
     // only feeds System.loadLibrary(); the inner dlopen() chain uses LD_LIBRARY_PATH
     // / DYLD_LIBRARY_PATH / PATH instead.
-    environment("LD_LIBRARY_PATH",   "$llvm_home/$os_lib_dir")
     environment("DYLD_LIBRARY_PATH", "$llvm_home/$os_lib_dir")
     environment("PATH",              "$llvm_home/$os_lib_dir${File.pathSeparator}${System.getenv("PATH") ?: ""}")
 }

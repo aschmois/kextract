@@ -6,7 +6,6 @@ import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
 import java.io.File
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class LibClangProcessEnvironmentTest {
     @Test
@@ -17,19 +16,29 @@ class LibClangProcessEnvironmentTest {
 
     @Test
     @EnabledOnOs(OS.LINUX)
-    fun `test worker preloads the JDK signal chaining library before startup`() {
-        val expectedLibjsig = File(System.getProperty("java.home"), "lib/libjsig.so")
+    fun `test worker resolves the signal chaining library without an absolute preload path`() {
+        val expectedLibraryDirectory = File(System.getProperty("java.home"), "lib")
             .absoluteFile
             .normalize()
         val preloadEntries = System.getenv("LD_PRELOAD")
             .orEmpty()
             .split(File.pathSeparatorChar)
             .filter(String::isNotBlank)
+        val libraryPathEntries = System.getenv("LD_LIBRARY_PATH")
+            .orEmpty()
+            .split(File.pathSeparatorChar)
+            .filter(String::isNotBlank)
             .map { File(it).absoluteFile.normalize() }
 
-        assertTrue(
-            expectedLibjsig in preloadEntries,
-            "Expected LD_PRELOAD to contain $expectedLibjsig, but was $preloadEntries",
+        assertEquals(
+            "libjsig.so",
+            preloadEntries.firstOrNull(),
+            "Expected LD_PRELOAD to resolve libjsig by basename before inherited entries",
+        )
+        assertEquals(
+            expectedLibraryDirectory,
+            libraryPathEntries.firstOrNull(),
+            "Expected LD_LIBRARY_PATH to search the test JDK before inherited entries",
         )
     }
 }
