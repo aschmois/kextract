@@ -9,6 +9,7 @@ import org.jetbrains.kotlin.cli.common.ExitCode
 import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
 import java.net.URLClassLoader
 import java.nio.file.Files
+import java.nio.file.Path
 
 internal data class GeneratedKmpSources(
     val common: String,
@@ -23,6 +24,19 @@ internal fun generateKmpSources(
     callbackBindings: CallbackBindingsConfig? = null,
 ): GeneratedKmpSources {
     val input = Files.createTempFile("kextract-kmp-source", ".h")
+    return try {
+        generateKmpSourcesFromHeaderPath(header, input, packageName, callbackBindings)
+    } finally {
+        input.toFile().delete()
+    }
+}
+
+internal fun generateKmpSourcesFromHeaderPath(
+    header: String,
+    input: Path,
+    packageName: String = "sample.bindings",
+    callbackBindings: CallbackBindingsConfig? = null,
+): GeneratedKmpSources {
     val output = Files.createTempDirectory("kextract-kmp-source-out")
     return try {
         input.toFile().writeText(header)
@@ -51,7 +65,6 @@ internal fun generateKmpSources(
             android = readSourceSet("androidMain"),
         )
     } finally {
-        input.toFile().delete()
         output.toFile().deleteRecursively()
     }
 }

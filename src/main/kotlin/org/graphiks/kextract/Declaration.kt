@@ -466,6 +466,12 @@ internal abstract class DeclarationImpl(
         }
     }
 
+    /** Marker for a struct or union whose own Clang declaration has no source-level name. */
+    object ClangUnnamedRecord : Declaration.Attribute {
+        fun with(scoped: Declaration.Scoped) = scoped.addAttribute(this)
+        fun isPresent(scoped: Declaration.Scoped): Boolean = scoped.hasAttribute<ClangUnnamedRecord>()
+    }
+
     data class EnumConstant(val enumName: String) : Declaration.Attribute {
         companion object {
             fun with(constant: Declaration.Constant, enumName: String) = constant.addAttribute(EnumConstant(enumName))

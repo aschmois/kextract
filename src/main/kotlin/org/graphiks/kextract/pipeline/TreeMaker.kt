@@ -20,6 +20,7 @@ import org.graphiks.kextract.clang.SourceLocation
 import org.graphiks.kextract.clang.TypeKind
 import org.graphiks.kextract.DeclarationImpl.AnonymousStruct
 import org.graphiks.kextract.DeclarationImpl.ClangAlignOf
+import org.graphiks.kextract.DeclarationImpl.ClangUnnamedRecord
 import org.graphiks.kextract.DeclarationImpl.ClangOffsetOf
 import org.graphiks.kextract.DeclarationImpl.ClangSizeOf
 import org.graphiks.kextract.DeclarationImpl.NestedDeclarations
@@ -228,6 +229,9 @@ internal class TreeMaker {
         }
         ClangSizeOf.with(structOrUnionDecl, recordCursor.type().size() * 8L)
         ClangAlignOf.with(structOrUnionDecl, recordCursor.type().align() * 8L)
+        if (recordCursor.isAnonymous()) {
+            ClangUnnamedRecord.with(structOrUnionDecl)
+        }
         if (recordCursor.isAnonymousStruct()) {
             AnonymousStruct.with(structOrUnionDecl, offsetOfAnonymousRecordNew(parent, recordCursor, recordCursor))
         }

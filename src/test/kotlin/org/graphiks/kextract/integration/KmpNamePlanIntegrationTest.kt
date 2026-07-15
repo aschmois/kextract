@@ -4,8 +4,53 @@ import io.kotest.core.spec.style.FreeSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
+import java.nio.file.Files
 
 class KmpNamePlanIntegrationTest : FreeSpec({
+    "anonymous record layout names are independent of the absolute header path" {
+        val header =
+            """
+            typedef struct Outer {
+                int tag;
+                union {
+                    struct {
+                        int x;
+                        short y;
+                    } pair;
+                    long long wide;
+                } data;
+                int tail;
+            } Outer;
+            """.trimIndent()
+        val firstRoot = Files.createTempDirectory("kextract-anonymous-layout-first")
+        val secondRoot = Files.createTempDirectory("kextract-anonymous-layout-second")
+
+        try {
+            val firstHeader = firstRoot.resolve("anonymous-layout.h")
+            val secondHeader = secondRoot.resolve("anonymous-layout.h")
+            val first = generateKmpSourcesFromHeaderPath(header, firstHeader)
+            val second = generateKmpSourcesFromHeaderPath(header, secondHeader)
+            val forbiddenPaths = listOf(firstRoot, secondRoot).flatMap { root ->
+                val absolutePath = root.toAbsolutePath().toString()
+                listOf(absolutePath, absolutePath.replace(Regex("[^a-zA-Z0-9_]"), "_"))
+            }
+
+            first shouldBe second
+            listOf(first.common, first.jvm, first.native, first.android).forEach { source ->
+                forbiddenPaths.forEach { path -> source shouldNotContain path }
+            }
+            first.jvm shouldContain ".withName(\"Outer\")"
+            first.jvm shouldContain ".withName(\"data\")"
+            first.jvm shouldContain ".withName(\"pair\")"
+            first.jvm shouldNotContain "union (unnamed at"
+            first.jvm shouldNotContain "struct (unnamed at"
+            first.android shouldNotContain "unnamed_at"
+        } finally {
+            firstRoot.toFile().deleteRecursively()
+            secondRoot.toFile().deleteRecursively()
+        }
+    }
+
     "KMP names are deterministic and avoid runtime and synthetic-member collisions" {
         val header =
             """

@@ -1,6 +1,7 @@
 package org.graphiks.kextract.kotlin.builders
 
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.DeclarationImpl.ClangUnnamedRecord
 
 internal data class KotlinJvmRecordMemberLayout(
     val field: Declaration.Variable,
@@ -30,15 +31,18 @@ internal data class KotlinJvmRecordLayout(
         }
         builder.unindent()
         builder.appendLine(
-            ").withByteAlignment($alignmentBytes).withName(\"${declaration.name()}\")",
+            ").withByteAlignment($alignmentBytes)${recordNameSuffix()}",
         )
     }
 
     internal fun renderExpression(): String {
         val memoryLayout = "java.lang.foreign.MemoryLayout"
         return "$memoryLayout.${factory()}(${layoutElements(memoryLayout).joinToString(", ")})" +
-            ".withByteAlignment($alignmentBytes).withName(\"${declaration.name()}\")"
+            ".withByteAlignment($alignmentBytes)${recordNameSuffix()}"
     }
+
+    private fun recordNameSuffix(): String =
+        if (ClangUnnamedRecord.isPresent(declaration)) "" else ".withName(\"${declaration.name()}\")"
 
     private fun factory(): String = when (declaration.kind()) {
         Declaration.Scoped.Kind.STRUCT -> "structLayout"

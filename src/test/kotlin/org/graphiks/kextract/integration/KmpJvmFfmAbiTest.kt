@@ -113,4 +113,49 @@ class KmpJvmFfmAbiTest : FreeSpec({
         generated.jvm shouldContain "MemoryLayout.unionLayout("
         generated.jvm shouldContain "java.lang.foreign.MemoryLayout.paddingLayout(4)"
     }
+
+    "unnamed nested record layouts preserve named group paths and Clang offsets" {
+        val anonymousPair = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withByteAlignment(4).withName("x"),
+            ValueLayout.JAVA_SHORT.withByteAlignment(2).withName("y"),
+            MemoryLayout.paddingLayout(2),
+        ).withByteAlignment(4)
+        val anonymousData = MemoryLayout.unionLayout(
+            anonymousPair.withName("pair"),
+            ValueLayout.JAVA_LONG.withByteAlignment(8).withName("wide"),
+        ).withByteAlignment(8)
+        val outer = MemoryLayout.structLayout(
+            ValueLayout.JAVA_INT.withByteAlignment(4).withName("tag"),
+            MemoryLayout.paddingLayout(4),
+            anonymousData.withName("data"),
+            ValueLayout.JAVA_INT.withByteAlignment(4).withName("tail"),
+            MemoryLayout.paddingLayout(4),
+        ).withByteAlignment(8).withName("Outer")
+
+        listOf(
+            outer.byteSize(),
+            outer.byteAlignment(),
+            outer.byteOffset(groupElement("tag")),
+            outer.byteOffset(groupElement("data")),
+            outer.byteOffset(groupElement("data"), groupElement("pair")),
+            outer.byteOffset(
+                groupElement("data"),
+                groupElement("pair"),
+                groupElement("x"),
+            ),
+            outer.byteOffset(
+                groupElement("data"),
+                groupElement("pair"),
+                groupElement("y"),
+            ),
+            outer.byteOffset(groupElement("data"), groupElement("wide")),
+            outer.byteOffset(groupElement("tail")),
+        ) shouldBe listOf(24L, 8L, 0L, 8L, 8L, 8L, 12L, 8L, 16L)
+
+        anonymousPair.name().isEmpty shouldBe true
+        anonymousData.name().isEmpty shouldBe true
+        outer.name().orElseThrow() shouldBe "Outer"
+        outer.select(groupElement("data")).name().orElseThrow() shouldBe "data"
+        outer.select(groupElement("data"), groupElement("pair")).name().orElseThrow() shouldBe "pair"
+    }
 })

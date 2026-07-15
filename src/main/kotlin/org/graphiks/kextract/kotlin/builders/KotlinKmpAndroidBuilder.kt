@@ -3,6 +3,7 @@
 package org.graphiks.kextract.kotlin.builders
 
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.DeclarationImpl.ClangUnnamedRecord
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
@@ -600,7 +601,8 @@ internal class KotlinKmpAndroidBuilder(
         type is Type.Declared -> {
             val tree = type.tree()
             (tree.kind() == Declaration.Scoped.Kind.STRUCT || tree.kind() == Declaration.Scoped.Kind.UNION) &&
-                    tree.members().filterIsInstance<Declaration.Variable>().isNotEmpty()
+                    tree.members().filterIsInstance<Declaration.Variable>().isNotEmpty() &&
+                    !ClangUnnamedRecord.isPresent(tree)
         }
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> {
             val inner = type.type()
