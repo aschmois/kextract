@@ -192,6 +192,17 @@ private val KFFI_JVM_STUB =
     import java.lang.foreign.Arena
     import java.lang.foreign.MemorySegment
 
+    object TestNativeSymbols {
+        private val symbols = mutableMapOf<String, MemorySegment>()
+
+        fun register(name: String, address: MemorySegment) {
+            symbols[name] = address
+        }
+
+        fun find(name: String): MemorySegment =
+            symbols[name] ?: error("Missing test symbol: ${'$'}name")
+    }
+
     class JvmNativeAddress(val handler: MemorySegment)
     actual typealias NativeAddress = JvmNativeAddress
     @JvmInline
@@ -201,6 +212,6 @@ private val KFFI_JVM_STUB =
     }
     fun findOrThrow(name: String): MemorySegment {
         CallbackRuntime.symbolResolutionCount += 1
-        return MemorySegment.NULL
+        return TestNativeSymbols.find(name)
     }
     """.trimIndent()

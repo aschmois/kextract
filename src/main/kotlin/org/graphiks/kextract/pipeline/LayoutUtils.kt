@@ -3,6 +3,7 @@ package org.graphiks.kextract.pipeline
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.DeclarationImpl.ClangEnumType
 import org.graphiks.kextract.DeclarationImpl.JavaName
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
 
 /**
  * Utility class for generating layout strings for code generation.
@@ -10,37 +11,72 @@ import org.graphiks.kextract.DeclarationImpl.JavaName
  */
 object LayoutUtils {
 
-    fun layoutString(type: Type): String = fieldLayoutString(type, -1, -1)
+    fun layoutString(type: Type): String = fieldLayoutString(type, -1, -1, abiIndex = null)
+
+    internal fun layoutString(type: Type, abiIndex: KotlinKmpAbiIndex): String =
+        fieldLayoutString(type, -1, -1, abiIndex)
 
     fun layoutString(type: Type, byteAlignment: Long): String {
+        return alignedLayoutString(type, byteAlignment, abiIndex = null)
+    }
+
+    internal fun layoutString(
+        type: Type,
+        byteAlignment: Long,
+        abiIndex: KotlinKmpAbiIndex,
+    ): String = alignedLayoutString(type, byteAlignment, abiIndex)
+
+    private fun alignedLayoutString(
+        type: Type,
+        byteAlignment: Long,
+        abiIndex: KotlinKmpAbiIndex?,
+    ): String {
         require(byteAlignment > 0L && byteAlignment.countOneBits() == 1) {
             "Invalid byte alignment: $byteAlignment"
         }
         if (type is Type.Delegated && type.kind() != Type.Delegated.Kind.POINTER) {
-            return layoutString(type.type(), byteAlignment)
+            return alignedLayoutString(type.type(), byteAlignment, abiIndex)
         }
         val layout = if (type is Type.Array) {
             "MemoryLayout.sequenceLayout(${type.elementCount() ?: 0L}, " +
-                "${layoutString(type.elementType(), byteAlignment)})"
+                "${alignedLayoutString(type.elementType(), byteAlignment, abiIndex)})"
         } else {
-            layoutString(type)
+            fieldLayoutString(type, -1, -1, abiIndex)
         }
         return "$layout.withByteAlignment($byteAlignment)"
     }
 
     fun functionDescriptorString(functionType: Type.Function, variadicCount: Int = 0): String {
+        return functionDescriptorString(functionType, variadicCount, abiIndex = null)
+    }
+
+    internal fun functionDescriptorString(
+        functionType: Type.Function,
+        abiIndex: KotlinKmpAbiIndex,
+        variadicCount: Int = 0,
+    ): String = functionDescriptorString(functionType, variadicCount, abiIndex)
+
+    private fun functionDescriptorString(
+        functionType: Type.Function,
+        variadicCount: Int,
+        abiIndex: KotlinKmpAbiIndex?,
+    ): String {
         val type = functionType.methodType()
         val noArgs = type.parameterCount() == 0 && variadicCount == 0
         return buildString {
             if (type.returnType() != Void.TYPE) {
                 append("FunctionDescriptor.of(")
-                append(layoutString(functionType.returnType()))
+                append(fieldLayoutString(functionType.returnType(), -1, -1, abiIndex))
                 if (!noArgs) append(", ")
             } else {
                 append("FunctionDescriptor.ofVoid(")
             }
             if (type.parameterCount() > 0) {
-                append(functionType.argumentTypes().joinToString(", ") { layoutString(it) })
+                append(
+                    functionType.argumentTypes().joinToString(", ") {
+                        fieldLayoutString(it, -1, -1, abiIndex)
+                    },
+                )
             }
             if (variadicCount > 0) {
                 if (type.parameterCount() > 0) append(", ")
@@ -50,7 +86,12 @@ object LayoutUtils {
         }
     }
 
-    private fun fieldLayoutString(type: Type, typeAlign: Long, expectedAlign: Long): String {
+    private fun fieldLayoutString(
+        type: Type,
+        typeAlign: Long,
+        expectedAlign: Long,
+        abiIndex: KotlinKmpAbiIndex?,
+    ): String {
         if (type.isErroneous()) {
             if (type is org.graphiks.kextract.TypeImpl.ErronrousTypeImpl) {
                 val name = type.erroneousName
@@ -66,18 +107,20 @@ object LayoutUtils {
         return when {
             type is Type.Primitive -> primitiveLayoutString(type, typeAlign, expectedAlign)
             type is Type.Declared && type.isEnum() -> {
-                val enumType = ClangEnumType.get(type.tree())
-                if (enumType != null) fieldLayoutString(enumType, typeAlign, expectedAlign)
-                else "ValueLayout.JAVA_INT"
+                abiIndex?.enum(type.tree())?.jvmLayout ?: run {
+                    val enumType = ClangEnumType.get(type.tree())
+                    if (enumType != null) fieldLayoutString(enumType, typeAlign, expectedAlign, abiIndex)
+                    else "ValueLayout.JAVA_INT"
+                }
             }
             type is Type.Declared && type.isStructOrUnion() -> {
                 val name = JavaName.getFullNameOrThrow(type.tree())
                 "${name}.layout"
             }
             type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> "ValueLayout.ADDRESS"
-            type is Type.Delegated -> fieldLayoutString(type.type(), typeAlign, expectedAlign)
+            type is Type.Delegated -> fieldLayoutString(type.type(), typeAlign, expectedAlign, abiIndex)
             type is Type.Function -> "ValueLayout.ADDRESS"
-            type is Type.Array -> "MemoryLayout.sequenceLayout(${type.elementCount() ?: 0L}, ${fieldLayoutString(type.elementType(), typeAlign, expectedAlign)})"
+            type is Type.Array -> "MemoryLayout.sequenceLayout(${type.elementCount() ?: 0L}, ${fieldLayoutString(type.elementType(), typeAlign, expectedAlign, abiIndex)})"
             else -> throw UnsupportedOperationException("Unexpected type: $type")
         }
     }

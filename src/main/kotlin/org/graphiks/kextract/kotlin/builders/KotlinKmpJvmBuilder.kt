@@ -26,6 +26,7 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARENA
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.VALUE_LAYOUT
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.VAR_HANDLE
 import org.graphiks.kextract.kotlin.KotlinKmpSourceSet
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackJvmEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
@@ -43,6 +44,7 @@ internal class KotlinKmpJvmBuilder(
     private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
     private val namePlan: KotlinKmpNamePlan,
     private val recordLayouts: KotlinJvmRecordLayoutPlan,
+    private val abiIndex: KotlinKmpAbiIndex,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -51,7 +53,12 @@ internal class KotlinKmpJvmBuilder(
     private val generatedStructNames = mutableSetOf<String>()
     private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
     private val opaqueHandleAliases = mutableMapOf<String, String>()
-    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames, namePlan)
+    private val typeMapper = KmpTypeMapper(
+        opaqueHandleAliases,
+        generatedStructNames,
+        namePlan,
+        abiIndex = abiIndex,
+    )
     private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
     private val cString = namePlan.runtime(C_STRING)
     private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
@@ -325,7 +332,7 @@ internal class KotlinKmpJvmBuilder(
                 val paddingBytes = (offsetBits - currentOffsetBits) / 8
                 if (paddingBytes > 0) builder.appendLine("$memoryLayout.paddingLayout($paddingBytes),")
             }
-            builder.appendLine("${planJvmRuntimeNames(LayoutUtils.layoutString(field.type()))}.withName(\"${field.name()}\"),")
+            builder.appendLine("${planJvmRuntimeNames(LayoutUtils.layoutString(field.type(), abiIndex))}.withName(\"${field.name()}\"),")
             currentOffsetBits = offsetBits + (org.graphiks.kextract.DeclarationImpl.ClangSizeOf.get(field) ?: 0L)
         }
         if (unionOffsetBits > currentOffsetBits) {
@@ -457,7 +464,7 @@ internal class KotlinKmpJvmBuilder(
             rawArgs
         }.joinToString(", ")
         val invoke = "${name}_HANDLE.invokeExact($invokeArgs)"
-        builder.appendLine("private val ${name}_DESC: ${namePlan.runtime(FUNCTION_DESCRIPTOR)} = ${planJvmRuntimeNames(LayoutUtils.functionDescriptorString(decl.type()))}")
+        builder.appendLine("private val ${name}_DESC: ${namePlan.runtime(FUNCTION_DESCRIPTOR)} = ${planJvmRuntimeNames(LayoutUtils.functionDescriptorString(decl.type(), abiIndex))}")
         builder.appendLine("private val ${name}_ADDR: $memorySegment by lazy { ${namePlan.runtime(FIND_OR_THROW)}(\"$cName\") }")
         builder.appendLine("private val ${name}_HANDLE: ${namePlan.runtime(METHOD_HANDLE)} by lazy { ${namePlan.runtime(LINKER)}.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC) }")
         builder.appendLine("actual fun $name(${params.joinToString(", ")}): $returnType {")
@@ -476,6 +483,11 @@ internal class KotlinKmpJvmBuilder(
         }
         val rawType = rawJvmType(type)
         when {
+            typeMapper.isEnumType(type) -> {
+                val scalar = abiIndex.enum(typeMapper.enumDeclaration(type))
+                val rawExpression = "$invoke as ${scalar.jvmCarrier}"
+                builder.appendLine("return ${scalar.fromJvmCarrier(rawExpression)}")
+            }
             returnType == "$nativeAddress?" -> {
                 builder.appendLine("return ($invoke as $memorySegment).takeIf { it != $memorySegment.NULL }?.let(::$nativeAddress)")
             }
@@ -491,9 +503,6 @@ internal class KotlinKmpJvmBuilder(
             }
             rawType == "Int" && returnType == "UInt" -> {
                 builder.appendLine("return ($invoke as Int).toUInt()")
-            }
-            rawType == "Int" && typeMapper.isEnumType(type) -> {
-                builder.appendLine("return ($invoke as Int).toUInt() as $returnType")
             }
             rawType == "Long" && returnType == "ULong" -> {
                 builder.appendLine("return ($invoke as Long).toULong()")
@@ -527,7 +536,9 @@ internal class KotlinKmpJvmBuilder(
             rawType == memorySegment && kmpType.startsWith(arrayHolder) -> "$name?.handler?.handler ?: $memorySegment.NULL"
             rawType == memorySegment && kmpType.endsWith("?") -> "$name?.handler?.handler ?: $memorySegment.NULL"
             rawType == memorySegment -> "$name.handler.handler"
-            rawType == "Int" && (kmpType == "UInt" || typeMapper.isEnumType(type)) -> "$name.toInt()"
+            typeMapper.isEnumType(type) ->
+                abiIndex.enum(typeMapper.enumDeclaration(type)).toJvmCarrier(name)
+            rawType == "Int" && kmpType == "UInt" -> "$name.toInt()"
             rawType == "Int" && kmpType == "Boolean" -> "if ($name) 1 else 0"
             rawType == "Long" && kmpType == "ULong" -> "$name.toLong()"
             rawType == "Short" && kmpType == "UShort" -> "$name.toShort()"
@@ -554,7 +565,7 @@ internal class KotlinKmpJvmBuilder(
         }
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> rawJvmType(type.type())
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> memorySegment
-        type is Type.Declared && type.isEnum() -> "Int"
+        typeMapper.isEnumType(type) -> abiIndex.enum(typeMapper.enumDeclaration(type)).jvmCarrier
         type is Type.Declared && type.isStructOrUnion() -> memorySegment
         type is Type.Array -> memorySegment
         type is Type.Function -> memorySegment

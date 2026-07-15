@@ -2,6 +2,7 @@ package org.graphiks.kextract.kotlin.callbacks
 
 import org.graphiks.kextract.Type
 import org.junit.jupiter.api.Test
+import java.lang.reflect.InvocationTargetException
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
@@ -39,29 +40,48 @@ class KotlinCallbackCAbiTypeTest {
     @Test
     fun `accepts stable 64-bit integer and double carriers`() {
         assertEquals(
-            KotlinCallbackCAbiType.Scalar(KotlinCallbackCAbiType.Scalar.Kind.I64, unsigned = false),
-            KotlinCallbackCAbiType.from(Type.primitive(Type.Primitive.Kind.LongLong)),
+            ScalarShape("I64", unsigned = false),
+            scalarShape(abiType(Type.primitive(Type.Primitive.Kind.LongLong))),
         )
         assertEquals(
-            KotlinCallbackCAbiType.Scalar(KotlinCallbackCAbiType.Scalar.Kind.I64, unsigned = true),
-            KotlinCallbackCAbiType.from(
-                Type.qualified(
-                    Type.Delegated.Kind.UNSIGNED,
-                    Type.primitive(Type.Primitive.Kind.LongLong),
+            ScalarShape("I64", unsigned = true),
+            scalarShape(
+                abiType(
+                    Type.qualified(
+                        Type.Delegated.Kind.UNSIGNED,
+                        Type.primitive(Type.Primitive.Kind.LongLong),
+                    ),
                 ),
             ),
         )
         assertEquals(
-            KotlinCallbackCAbiType.Scalar(KotlinCallbackCAbiType.Scalar.Kind.F64, unsigned = false),
-            KotlinCallbackCAbiType.from(Type.primitive(Type.Primitive.Kind.Double)),
+            ScalarShape("F64", unsigned = false),
+            scalarShape(abiType(Type.primitive(Type.Primitive.Kind.Double))),
         )
     }
 
     private fun assertUnsupportedVariableWidthScalar(type: Type, expectedMessage: String) {
-        val failure = assertFailsWith<UnsupportedOperationException> {
-            KotlinCallbackCAbiType.from(type)
-        }
+        val failure = assertFailsWith<InvocationTargetException> { abiType(type) }.targetException
 
         assertEquals(expectedMessage, failure.message)
+    }
+
+    private fun abiType(type: Type): Any = fromMethod.invoke(abiCompanion, type, callbackContext)
+
+    private fun scalarShape(value: Any): ScalarShape = ScalarShape(
+        kind = value.javaClass.getMethod("getKind").invoke(value).toString(),
+        unsigned = value.javaClass.getMethod("getUnsigned").invoke(value) as Boolean,
+    )
+
+    private data class ScalarShape(val kind: String, val unsigned: Boolean)
+
+    companion object {
+        private val abiTypeClass =
+            Class.forName("org.graphiks.kextract.kotlin.abi.KotlinKmpCAbiType")
+        private val abiContextClass =
+            Class.forName("org.graphiks.kextract.kotlin.abi.KotlinKmpAbiContext")
+        private val abiCompanion = abiTypeClass.getField("Companion").get(null)
+        private val callbackContext = abiContextClass.enumConstants.single { it.toString() == "CALLBACK" }
+        private val fromMethod = abiCompanion.javaClass.getMethod("from", Type::class.java, abiContextClass)
     }
 }

@@ -15,8 +15,8 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.CALLBACK_RUNTIME
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_ALLOCATOR
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
 import org.graphiks.kextract.kotlin.KotlinKmpSourceSet
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
-import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCAbiType
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackCommonEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
@@ -30,6 +30,7 @@ internal class KotlinKmpCommonBuilder(
     private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
     private val callbackBindings: ValidatedCallbackBindings,
     private val namePlan: KotlinKmpNamePlan,
+    private val abiIndex: KotlinKmpAbiIndex,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -37,7 +38,12 @@ internal class KotlinKmpCommonBuilder(
     private val generatedNames = mutableSetOf<String>()
     private val generatedStructNames = mutableSetOf<String>()
     private val opaqueHandleAliases = mutableMapOf<String, String>()
-    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames, namePlan)
+    private val typeMapper = KmpTypeMapper(
+        opaqueHandleAliases,
+        generatedStructNames,
+        namePlan,
+        abiIndex = abiIndex,
+    )
     private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
     private val cString = namePlan.runtime(C_STRING)
     private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
@@ -149,25 +155,17 @@ internal class KotlinKmpCommonBuilder(
 
     private fun emitEnumClass(decl: Declaration.Scoped, constants: List<Declaration.Constant>) {
         val name = namePlan.declaration(decl)
-        val scalar = KotlinCallbackCAbiType.from(Type.declared(decl)) as? KotlinCallbackCAbiType.Scalar
-            ?: error("Enum $name must have a scalar C ABI type")
-        val applicationType = scalar.nativeCarrier
+        val scalar = abiIndex.enum(decl)
+        val applicationType = scalar.kotlinType
         builder.appendLine("typealias ${name} = $applicationType")
         for (c in constants) {
             emitKDoc(c)
             builder.appendLine(
                 "const val ${c.name()} : ${name} = " +
-                    enumConstantLiteral(c.value().toLongValue(), applicationType),
+                    scalar.enumConstantLiteral(c.value().toLongValue()),
             )
         }
         builder.appendLine()
-    }
-
-    private fun enumConstantLiteral(value: Long, applicationType: String): String = when (applicationType) {
-        "ULong" -> value.toKotlinULongLiteral()
-        "UInt", "UShort", "UByte" -> "${java.lang.Long.toUnsignedString(value)}u"
-        "Long" -> value.toKotlinLongLiteral()
-        else -> value.toString()
     }
 
     private fun emitValueClass(name: String, constants: List<Declaration.Constant>) {

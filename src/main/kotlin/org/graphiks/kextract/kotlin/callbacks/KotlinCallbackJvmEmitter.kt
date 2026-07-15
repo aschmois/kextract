@@ -20,6 +20,7 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.OPT_IN
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.PREPARED_CALLBACK_REGISTRATION
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSAFE_CALLBACK_REARM_API
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.VALUE_LAYOUT
+import org.graphiks.kextract.kotlin.abi.KotlinKmpCAbiType
 import org.graphiks.kextract.kotlin.builders.SourceBuilder
 import org.graphiks.kextract.pipeline.isEnum
 
@@ -166,12 +167,12 @@ internal class KotlinCallbackJvmEmitter(
             mapped == "ULong" -> "$name.toULong()"
             mapped == "UShort" -> "$name.toUShort()"
             mapped == "UByte" -> "$name.toUByte()"
-            cAbiType is KotlinCallbackCAbiType.StructValue -> "$mapped(${namePlan.runtime(NATIVE_ADDRESS)}($name))"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(NATIVE_ADDRESS)}?" ->
+            cAbiType is KotlinKmpCAbiType.StructValue -> "$mapped(${namePlan.runtime(NATIVE_ADDRESS)}($name))"
+            cAbiType is KotlinKmpCAbiType.Address && mapped == "${namePlan.runtime(NATIVE_ADDRESS)}?" ->
                 "$name.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }?.let(::${namePlan.runtime(NATIVE_ADDRESS)})"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(C_STRING)}?" ->
+            cAbiType is KotlinKmpCAbiType.Address && mapped == "${namePlan.runtime(C_STRING)}?" ->
                 "$name.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let(::${namePlan.runtime(C_STRING)})"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped.endsWith("?") -> {
+            cAbiType is KotlinKmpCAbiType.Address && mapped.endsWith("?") -> {
                 val nonNullable = mapped.removeSuffix("?")
                 if (cAbiType.pointerDepth > 1) {
                         "$name.takeIf { it != ${namePlan.runtime(MEMORY_SEGMENT)}.NULL }" +
@@ -188,16 +189,16 @@ internal class KotlinCallbackJvmEmitter(
         }
     }
 
-    private fun optionsRawValue(name: String, cAbiType: KotlinCallbackCAbiType): String {
-        val scalar = cAbiType as? KotlinCallbackCAbiType.Scalar
+    private fun optionsRawValue(name: String, cAbiType: KotlinKmpCAbiType): String {
+        val scalar = cAbiType as? KotlinKmpCAbiType.Scalar
             ?: error("Options callback parameter must have a scalar C ABI type")
         if (scalar.jvmCarrier == "Long") return name
         if (!scalar.unsigned) return "$name.toLong()"
         return when (scalar.kind) {
-            KotlinCallbackCAbiType.Scalar.Kind.I8 -> "$name.toUByte().toLong()"
-            KotlinCallbackCAbiType.Scalar.Kind.I16 -> "$name.toUShort().toLong()"
-            KotlinCallbackCAbiType.Scalar.Kind.I32 -> "$name.toUInt().toLong()"
-            KotlinCallbackCAbiType.Scalar.Kind.CHAR16 -> "$name.code.toLong()"
+            KotlinKmpCAbiType.Scalar.Kind.I8 -> "$name.toUByte().toLong()"
+            KotlinKmpCAbiType.Scalar.Kind.I16 -> "$name.toUShort().toLong()"
+            KotlinKmpCAbiType.Scalar.Kind.I32 -> "$name.toUInt().toLong()"
+            KotlinKmpCAbiType.Scalar.Kind.CHAR16 -> "$name.code.toLong()"
             else -> "$name.toLong()"
         }
     }
@@ -205,9 +206,9 @@ internal class KotlinCallbackJvmEmitter(
     private fun enumApplicationValue(
         name: String,
         mapped: String,
-        cAbiType: KotlinCallbackCAbiType,
+        cAbiType: KotlinKmpCAbiType,
     ): String {
-        val scalar = cAbiType as? KotlinCallbackCAbiType.Scalar
+        val scalar = cAbiType as? KotlinKmpCAbiType.Scalar
             ?: error("Enum callback parameter must have a scalar C ABI type")
         return when (scalar.nativeCarrier) {
             "ULong" -> "$name.toULong() as $mapped"

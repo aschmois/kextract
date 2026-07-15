@@ -22,6 +22,7 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.REINTERPRET
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.SIZE_OF
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.USE_CONTENTS
 import org.graphiks.kextract.kotlin.KotlinKmpSourceSet
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
@@ -36,6 +37,7 @@ internal class KotlinKmpNativeBuilder(
     private val callbackModels: List<KotlinCallbackModel>,
     private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
     private val namePlan: KotlinKmpNamePlan,
+    private val abiIndex: KotlinKmpAbiIndex,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -44,7 +46,12 @@ internal class KotlinKmpNativeBuilder(
     private val generatedStructNames = mutableSetOf<String>()
     private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
     private val opaqueHandleAliases = mutableMapOf<String, String>()
-    private val typeMapper = KmpTypeMapper(opaqueHandleAliases, generatedStructNames, namePlan)
+    private val typeMapper = KmpTypeMapper(
+        opaqueHandleAliases,
+        generatedStructNames,
+        namePlan,
+        abiIndex = abiIndex,
+    )
     private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
     private val cString = namePlan.runtime(C_STRING)
     private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
@@ -138,7 +145,7 @@ internal class KotlinKmpNativeBuilder(
                 builder.appendLine("}")
                 builder.unindent()
                 builder.appendLine("}") // End companion
- 
+
                 if (fields.isNotEmpty()) {
                     builder.appendLine()
                     builder.appendLine("    value class ByValue(val handle: $cValue<webgpu.native.$structName>) : $structName {")
@@ -325,7 +332,7 @@ internal class KotlinKmpNativeBuilder(
                 }
                 builder.unindent()
                 builder.appendLine("}") // End ByReference
- 
+
                 builder.unindent()
                 builder.appendLine("}") // End actual interface
                 builder.appendLine()

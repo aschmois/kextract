@@ -9,6 +9,7 @@ import org.graphiks.kextract.Type
 import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_LAYOUT
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.VALUE_LAYOUT
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
 import org.graphiks.kextract.pipeline.LayoutUtils
 import java.util.IdentityHashMap
 
@@ -24,6 +25,7 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
         fun create(
             scoped: Declaration.Scoped,
             names: KotlinKmpNamePlan,
+            abiIndex: KotlinKmpAbiIndex,
         ): KotlinJvmRecordLayoutPlan {
             val layouts = IdentityHashMap<Declaration.Scoped, KotlinJvmRecordLayout>()
 
@@ -33,7 +35,12 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
                     !Skip.isPresent(declaration) &&
                     declaration.kind() in setOf(Declaration.Scoped.Kind.STRUCT, Declaration.Scoped.Kind.UNION)
                 ) {
-                    layouts[declaration] = createLayout(declaration, names, recordStack = mutableListOf())
+                    layouts[declaration] = createLayout(
+                        declaration,
+                        names,
+                        abiIndex,
+                        recordStack = mutableListOf(),
+                    )
                 }
                 declaration.members().forEach(::collect)
             }
@@ -45,6 +52,7 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
         private fun createLayout(
             declaration: Declaration.Scoped,
             names: KotlinKmpNamePlan,
+            abiIndex: KotlinKmpAbiIndex,
             alignmentCeiling: Long? = null,
             recordStack: MutableList<Declaration.Scoped>,
         ): KotlinJvmRecordLayout {
@@ -86,6 +94,7 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
                             sizeBytes,
                             alignmentBytes,
                             names,
+                            abiIndex,
                             recordStack,
                         )
                     }
@@ -108,6 +117,7 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
             recordSizeBytes: Long,
             recordAlignmentBytes: Long,
             names: KotlinKmpNamePlan,
+            abiIndex: KotlinKmpAbiIndex,
             recordStack: MutableList<Declaration.Scoped>,
         ): KotlinJvmRecordMemberLayout {
             val owner = "${declaration.name()}.${field.name()}"
@@ -151,7 +161,7 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
                 offsetBytes = offsetBytes,
                 sizeBytes = sizeBytes,
                 alignmentBytes = alignmentBytes,
-                layoutExpression = layoutString(field.type(), alignmentBytes, names, recordStack),
+                layoutExpression = layoutString(field.type(), alignmentBytes, names, abiIndex, recordStack),
             )
         }
 
@@ -159,14 +169,15 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
             type: Type,
             byteAlignment: Long,
             names: KotlinKmpNamePlan,
+            abiIndex: KotlinKmpAbiIndex,
             recordStack: MutableList<Declaration.Scoped>,
         ): String = when {
             type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER ->
-                planRuntimeNames(LayoutUtils.layoutString(type, byteAlignment), names)
-            type is Type.Delegated -> layoutString(type.type(), byteAlignment, names, recordStack)
+                planRuntimeNames(LayoutUtils.layoutString(type, byteAlignment, abiIndex), names)
+            type is Type.Delegated -> layoutString(type.type(), byteAlignment, names, abiIndex, recordStack)
             type is Type.Array ->
                 "${names.runtime(MEMORY_LAYOUT)}.sequenceLayout(${type.elementCount() ?: 0L}, " +
-                    "${layoutString(type.elementType(), byteAlignment, names, recordStack)})" +
+                    "${layoutString(type.elementType(), byteAlignment, names, abiIndex, recordStack)})" +
                     ".withByteAlignment($byteAlignment)"
             type is Type.Declared && type.tree().kind() in setOf(
                 Declaration.Scoped.Kind.STRUCT,
@@ -174,10 +185,11 @@ internal class KotlinJvmRecordLayoutPlan private constructor(
             ) -> createLayout(
                 declaration = type.tree(),
                 names = names,
+                abiIndex = abiIndex,
                 alignmentCeiling = byteAlignment,
                 recordStack = recordStack,
             ).renderExpression()
-            else -> planRuntimeNames(LayoutUtils.layoutString(type, byteAlignment), names)
+            else -> planRuntimeNames(LayoutUtils.layoutString(type, byteAlignment, abiIndex), names)
         }
 
         private fun validateMembers(

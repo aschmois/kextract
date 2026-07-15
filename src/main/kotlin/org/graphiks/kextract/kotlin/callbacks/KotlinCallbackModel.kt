@@ -4,16 +4,18 @@ import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.callbacks.AnalyzedCallback
 import org.graphiks.kextract.callbacks.CallbackParameter
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiContext
+import org.graphiks.kextract.kotlin.abi.KotlinKmpCAbiType
 import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 
-data class KotlinCallbackParameter(
+internal data class KotlinCallbackParameter(
     val index: Int,
     val name: String,
     val type: Type,
-    val cAbiType: KotlinCallbackCAbiType,
+    val cAbiType: KotlinKmpCAbiType,
 )
 
-data class KotlinCallbackModel(
+internal data class KotlinCallbackModel(
     val canonicalId: String,
     val typeName: String,
     val runtimeTypeName: String,
@@ -51,7 +53,7 @@ data class KotlinCallbackModel(
                     index = parameter.index,
                     name = parameterNames.allocate(parameter.name, "arg${parameter.index}"),
                     type = parameter.type,
-                    cAbiType = KotlinCallbackCAbiType.from(parameter.type),
+                    cAbiType = KotlinKmpCAbiType.from(parameter.type, KotlinKmpAbiContext.CALLBACK),
                 )
             val rawParameters = callback.parameters.map(::modelParameter)
             return KotlinCallbackModel(

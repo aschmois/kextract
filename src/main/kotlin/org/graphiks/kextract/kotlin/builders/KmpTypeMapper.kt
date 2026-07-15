@@ -6,6 +6,7 @@ import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARRAY_HOLDER
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
 import org.graphiks.kextract.pipeline.isEnum
 
 internal class KmpTypeMapper(
@@ -13,6 +14,7 @@ internal class KmpTypeMapper(
     private val generatedStructNames: Set<String>,
     private val namePlan: KotlinKmpNamePlan,
     private val arraysAsHolders: Boolean = true,
+    private val abiIndex: KotlinKmpAbiIndex? = null,
 ) {
     private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
     private val cString = namePlan.runtime(C_STRING)
@@ -69,7 +71,10 @@ internal class KmpTypeMapper(
         val canonical = canonicalType(type)
         return when {
             canonical is Type.Primitive -> mapPrimitive(canonical.kind())
-            isEnumType(canonical) -> "UInt"
+            isEnumType(canonical) -> abiIndex
+                ?.enum(enumDeclaration(canonical))
+                ?.kotlinType
+                ?: "UInt"
             canonical is Type.Delegated && canonical.kind() == Type.Delegated.Kind.UNSIGNED -> mapUnsigned(canonical.type())
             else -> "Other"
         }
@@ -79,6 +84,12 @@ internal class KmpTypeMapper(
         type.isEnum() -> true
         type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> isEnumType(type.type())
         else -> false
+    }
+
+    fun enumDeclaration(type: Type): Declaration.Scoped = when {
+        type is Type.Declared && type.isEnum() -> type.tree()
+        type is Type.Delegated && type.kind() == Type.Delegated.Kind.TYPEDEF -> enumDeclaration(type.type())
+        else -> error("Expected enum type, found $type")
     }
 
     fun isInlineStructOrUnion(type: Type): Boolean {

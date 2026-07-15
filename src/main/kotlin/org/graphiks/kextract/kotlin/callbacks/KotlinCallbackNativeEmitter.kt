@@ -18,6 +18,7 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.PREPARED_CALLBACK_REG
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.REINTERPRET
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.STATIC_C_FUNCTION
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSAFE_CALLBACK_REARM_API
+import org.graphiks.kextract.kotlin.abi.KotlinKmpCAbiType
 import org.graphiks.kextract.kotlin.builders.SourceBuilder
 import org.graphiks.kextract.pipeline.isEnum
 
@@ -129,12 +130,12 @@ internal class KotlinCallbackNativeEmitter(
         return when {
             isEnum(type) && isOptionsStyle(mapped) -> "$mapped($name.toLong())"
             isEnum(type) -> enumApplicationValue(name, mapped, cAbiType)
-            cAbiType is KotlinCallbackCAbiType.StructValue -> "$mapped.ByValue($name)"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(NATIVE_ADDRESS)}?" ->
+            cAbiType is KotlinKmpCAbiType.StructValue -> "$mapped.ByValue($name)"
+            cAbiType is KotlinKmpCAbiType.Address && mapped == "${namePlan.runtime(NATIVE_ADDRESS)}?" ->
                 "$name?.let(::${namePlan.runtime(NATIVE_ADDRESS)})"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped == "${namePlan.runtime(C_STRING)}?" ->
+            cAbiType is KotlinKmpCAbiType.Address && mapped == "${namePlan.runtime(C_STRING)}?" ->
                 "$name?.let(::${namePlan.runtime(NATIVE_ADDRESS)})?.let(::${namePlan.runtime(C_STRING)})"
-            cAbiType is KotlinCallbackCAbiType.Address && mapped.endsWith("?") -> {
+            cAbiType is KotlinKmpCAbiType.Address && mapped.endsWith("?") -> {
                 val nonNullable = mapped.removeSuffix("?")
                 if (cAbiType.pointerDepth > 1) {
                     "$name?.${namePlan.runtime(REINTERPRET)}<${namePlan.runtime(C_OPAQUE_POINTER_VAR)}>()?.${namePlan.runtime(POINTED)}?.value" +
@@ -150,9 +151,9 @@ internal class KotlinCallbackNativeEmitter(
     private fun enumApplicationValue(
         name: String,
         mapped: String,
-        cAbiType: KotlinCallbackCAbiType,
+        cAbiType: KotlinKmpCAbiType,
     ): String {
-        val scalar = cAbiType as? KotlinCallbackCAbiType.Scalar
+        val scalar = cAbiType as? KotlinKmpCAbiType.Scalar
             ?: error("Enum callback parameter must have a scalar C ABI type")
         return when (scalar.nativeCarrier) {
             "ULong" -> "$name.toULong() as $mapped"
