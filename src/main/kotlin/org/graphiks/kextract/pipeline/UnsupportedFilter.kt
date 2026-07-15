@@ -15,7 +15,10 @@ import org.graphiks.kextract.DeclarationImpl.AnonymousStruct
 import org.graphiks.kextract.DeclarationImpl.ClangSizeOf
 import org.graphiks.kextract.DeclarationImpl.Skip
 
-class UnsupportedFilter(private val logger: Logger) : Declaration.Visitor<Unit> {
+class UnsupportedFilter(
+    private val logger: Logger,
+    private val allowVariableWidthCallbackScalars: Boolean = false,
+) : Declaration.Visitor<Unit> {
 
     private var firstNamedParent: Declaration? = null
 
@@ -137,7 +140,7 @@ class UnsupportedFilter(private val logger: Logger) : Declaration.Visitor<Unit> 
     override fun visitObjCCategory(d: Declaration.ObjCCategory) = Unit
 
     private fun checkFunctionTypeSupported(decl: Declaration, func: Type.Function, nameOfSkipped: String): Boolean {
-        val unsupportedType = firstUnsupportedType(func, false)
+        val unsupportedType = firstUnsupportedType(func, false, allowVariableWidthCallbackScalars)
         if (unsupportedType != null) {
             warnSkip(decl.pos(), nameOfSkipped, unsupportedType(unsupportedType))
             return false
@@ -168,22 +171,27 @@ class UnsupportedFilter(private val logger: Logger) : Declaration.Visitor<Unit> 
             return prefix + decl.name()
         }
 
-        fun firstUnsupportedType(type: Type, allowVoid: Boolean): Type? = when (type) {
+        fun firstUnsupportedType(
+            type: Type,
+            allowVoid: Boolean,
+            allowVariableWidthCallbackScalars: Boolean = false,
+        ): Type? = when (type) {
             is Type.Primitive -> when (type.kind()) {
                 Type.Primitive.Kind.Char16,
                 Type.Primitive.Kind.Float128,
                 Type.Primitive.Kind.HalfFloat,
                 Type.Primitive.Kind.Int128,
                 Type.Primitive.Kind.WChar -> type
-                Type.Primitive.Kind.LongDouble -> if (TypeImpl.IS_WINDOWS) null else type
+                Type.Primitive.Kind.LongDouble ->
+                    if (allowVariableWidthCallbackScalars || TypeImpl.IS_WINDOWS) null else type
                 Type.Primitive.Kind.Void -> if (allowVoid) null else type
                 else -> null
             }
             is Type.Function -> {
                 for (arg in type.argumentTypes()) {
-                    firstUnsupportedType(arg, false)?.let { return it }
+                    firstUnsupportedType(arg, false, allowVariableWidthCallbackScalars)?.let { return it }
                 }
-                firstUnsupportedType(type.returnType(), true)
+                firstUnsupportedType(type.returnType(), true, allowVariableWidthCallbackScalars)
             }
             is Declared -> {
                 if (type.tree().kind() == Kind.STRUCT || type.tree().kind() == Kind.UNION) {
@@ -192,10 +200,10 @@ class UnsupportedFilter(private val logger: Logger) : Declaration.Visitor<Unit> 
             }
             is Type.Delegated -> {
                 if (type.kind() != Type.Delegated.Kind.POINTER)
-                    firstUnsupportedType(type.type(), allowVoid)
+                    firstUnsupportedType(type.type(), allowVoid, allowVariableWidthCallbackScalars)
                 else null
             }
-            is Type.Array -> firstUnsupportedType(type.elementType(), false)
+            is Type.Array -> firstUnsupportedType(type.elementType(), false, allowVariableWidthCallbackScalars)
             else -> if (type.isErroneous()) type else null
         }
 

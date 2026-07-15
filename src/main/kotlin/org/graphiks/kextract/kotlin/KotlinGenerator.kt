@@ -2,12 +2,54 @@
 package org.graphiks.kextract.kotlin
 
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.cli.DllMap
+import org.graphiks.kextract.kotlin.builders.KotlinKmpAndroidBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinKmpCommonBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinKmpJvmBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinKmpNativeBuilder
+import org.graphiks.kextract.kotlin.builders.KotlinJvmRecordLayoutPlan
 import org.graphiks.kextract.kotlin.builders.KotlinToplevelBuilder
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
+import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
+import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.objc.ObjCRuntimeTemplate
 import org.graphiks.kextract.kotlin.objc.ObjCSubclassingTemplate
+import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 import org.graphiks.kextract.pipeline.Options
+
+internal val GENERATED_CALLBACK_RESERVED_IDENTIFIERS = setOf(
+    "Callback",
+    "CallbackType",
+    "CallbackPolicy",
+    "CallbackRegistration",
+    "PreparedCallbackRegistration",
+    "CallbackExceptionHandler",
+    "CallbackRuntime",
+    "CallbackRuntimeApi",
+    "UnsafeCallbackRearmApi",
+    "NativeAddress",
+    "MemoryAllocator",
+    "CString",
+    "ArrayHolder",
+    "CStructure",
+    "FunctionDescriptor",
+    "MethodHandle",
+    "MethodHandles",
+    "Linker",
+    "Arena",
+    "MemorySegment",
+    "ValueLayout",
+    "JvmStatic",
+    "CValue",
+    "COpaquePointer",
+    "COpaquePointerVar",
+    "staticCFunction",
+    "OptIn",
+    "Suppress",
+    "UnsupportedOperationException",
+)
 
 /**
  * Main entry point for Kotlin code generation.
@@ -39,23 +81,100 @@ class KotlinGenerator {
         win32Mode: Boolean = false,
         dllMap: DllMap? = null,
         useInitMethod: Boolean = false,
+        multiplatform: Boolean = false,
+        callbackBindings: ValidatedCallbackBindings = ValidatedCallbackBindings.EMPTY,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
+        if (multiplatform) {
+            val namePlan = KotlinKmpNamePlan.create(scoped, callbackBindings)
+            val abiIndex = KotlinKmpAbiIndex.create(scoped)
+            val jvmRecordLayouts = KotlinJvmRecordLayoutPlan.create(scoped, namePlan, abiIndex)
+            val callbackNames = KotlinIdentifierAllocator(namePlan.topLevelNames + namePlan.renderedRuntimeNames)
+            val callbackModels = callbackBindings.callbacks.map { callback ->
+                KotlinCallbackModel.from(callback, callbackNames)
+            }
+            val callbackModelsByCanonicalId = callbackModels.associateBy(KotlinCallbackModel::canonicalId)
+            val directBindingModels = callbackBindings.directFunctionBindings.map { binding ->
+                KotlinDirectFunctionBindingModel(
+                    binding = binding,
+                    preflightName = callbackNames.allocate(
+                        "${binding.function.name()}CallbackBindingPreflight",
+                        "callbackBindingPreflight",
+                    ),
+                )
+            }
+            return generateKmp(
+                scoped,
+                targetPackage,
+                className,
+                callbackModels,
+                callbackModelsByCanonicalId,
+                directBindingModels,
+                callbackBindings,
+                namePlan,
+                jvmRecordLayouts,
+                abiIndex,
+            )
+        }
+
         val toplevel = KotlinToplevelBuilder(
             targetPackage, className, headerName, libraries, useSystemLoadLibrary, splitOutput, variadicArgs,
-            win32Mode, dllMap, useInitMethod
+            win32Mode, dllMap, useInitMethod,
         )
         scoped.accept(toplevel)
-        val files = toplevel.getFiles().toMutableList()
-        if (toplevel.needsObjCRuntime) {
-            files.add(ObjCRuntimeTemplate.generate(targetPackage))
-            files.add(ObjCSubclassingTemplate.generate(targetPackage))
+        return toplevel.getFiles().toMutableList().apply {
+            if (toplevel.needsObjCRuntime) {
+                add(ObjCRuntimeTemplate.generate(targetPackage))
+                add(ObjCSubclassingTemplate.generate(targetPackage))
+            }
         }
-        return files
+    }
+
+    private fun generateKmp(
+        scoped: Declaration.Scoped,
+        targetPackage: String,
+        className: String,
+        callbackModels: List<KotlinCallbackModel>,
+        callbackModelsByCanonicalId: Map<String, KotlinCallbackModel>,
+        directBindingModels: List<KotlinDirectFunctionBindingModel>,
+        callbackBindings: ValidatedCallbackBindings,
+        namePlan: KotlinKmpNamePlan,
+        jvmRecordLayouts: KotlinJvmRecordLayoutPlan,
+        abiIndex: KotlinKmpAbiIndex,
+    ): List<KotlinSourceFile> = buildList {
+        KotlinKmpCommonBuilder(
+            targetPackage,
+            className,
+            callbackModels,
+            callbackModelsByCanonicalId,
+            directBindingModels,
+            callbackBindings,
+            namePlan,
+            abiIndex,
+        ).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpJvmBuilder(
+            targetPackage,
+            className,
+            callbackModels,
+            directBindingModels,
+            namePlan,
+            jvmRecordLayouts,
+            abiIndex,
+        ).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpAndroidBuilder(targetPackage, className, callbackModels, directBindingModels, namePlan).also { scoped.accept(it); addAll(it.getFiles()) }
+        KotlinKmpNativeBuilder(
+            targetPackage,
+            className,
+            callbackModels,
+            directBindingModels,
+            namePlan,
+            abiIndex,
+        ).also { scoped.accept(it); addAll(it.getFiles()) }
     }
 
     private fun sanitizeClassName(name: String): String =
         name.substringAfterLast('/')
+            .substringAfterLast('\\')
             .replace(Regex("[^a-zA-Z0-9_]"), "_")
             .replace(Regex("^\\d+"), "_")
 }

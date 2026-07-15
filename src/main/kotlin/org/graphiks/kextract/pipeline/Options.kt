@@ -1,6 +1,7 @@
 package org.graphiks.kextract.pipeline
 
 import org.graphiks.kextract.cli.DllMap
+import org.graphiks.kextract.callbacks.CallbackBindingsConfig
 
 /**
  * Immutable configuration snapshot passed through the generation pipeline.
@@ -19,6 +20,8 @@ data class Options(
     val win32Mode: Boolean = false,
     val dllMap: DllMap? = null,
     val useInitMethod: Boolean = false,
+    val multiplatform: Boolean = false,
+    val callbackBindings: CallbackBindingsConfig? = null,
 ) {
     /** A shared library descriptor. */
     data class Library(val libSpec: String, val specKind: SpecKind) {

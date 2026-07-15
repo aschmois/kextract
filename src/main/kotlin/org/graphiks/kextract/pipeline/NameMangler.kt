@@ -220,7 +220,9 @@ class NameMangler(private val headerName: String) : Declaration.Visitor<Unit> {
         fun javaSafeIdentifiers(names: List<String>): List<String> = names.map { javaSafeIdentifier(it) }
 
         fun javaSafeIdentifier(name: String, checkAllChars: Boolean): String {
-            if (checkAllChars) {
+            val needsCleanup = checkAllChars || name.isEmpty() || name.any { !Character.isJavaIdentifierPart(it) && it != '_' }
+            if (needsCleanup) {
+                if (name.isEmpty()) return "_"
                 val chars = name.toCharArray()
                 return buildString {
                     append(if (Character.isJavaIdentifierStart(chars[0])) chars[0] else '_')

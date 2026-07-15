@@ -2,12 +2,20 @@ package org.graphiks.kextract.pipeline
 
 import com.github.ajalt.clikt.core.main
 import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.Position
+import org.graphiks.kextract.Type
+import org.graphiks.kextract.callbacks.CallbackAnalyzer
+import org.graphiks.kextract.callbacks.CallbackBindingsConfig
+import org.graphiks.kextract.callbacks.CanonicalDeclarationIndex
+import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import java.io.File
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
+import kotlin.io.path.exists
+import kotlin.io.path.readText
 import kotlin.io.path.writeText
 
 /**
@@ -109,7 +117,7 @@ class KextractTool(private val logger: Logger) {
             if (e.cause != null) logger.err("kextract.parse.cause", e.cause!!.message ?: "")
             if (DEBUG) e.printStackTrace()
             return FAILURE
-        }
+        }.withStaticConstDeclarations(headers)
 
         if (DEBUG) {
             System.err.println("Parsed ${decl.members().size} top-level declarations:")
@@ -165,41 +173,119 @@ class KextractTool(private val logger: Logger) {
         headerName: String,
         options: Options
     ): List<KotlinSourceFile> {
+        require(options.multiplatform || options.callbackBindings == null) {
+            "callbackBindings requires multiplatform generation"
+        }
         var d = decl
         d = IncludeFilter(options.includeHelper).scan(d)
         d = DuplicateFilter().scan(d)
-        d = UnsupportedFilter(logger).scan(d)
+        d = UnsupportedFilter(
+            logger,
+            allowVariableWidthCallbackScalars = options.multiplatform,
+        ).scan(d)
         d = MissingDepChecker(logger).scan(d)
         if (logger.hasErrors()) return emptyList()
 
+        val callbackBindings = if (options.multiplatform) {
+            CallbackAnalyzer.validate(
+                CanonicalDeclarationIndex(d),
+                options.callbackBindings ?: CallbackBindingsConfig(),
+            )
+        } else {
+            ValidatedCallbackBindings.EMPTY
+        }
         val transformed = NameMangler(headerName).scan(d)
         return KotlinGenerator().generate(
             transformed, headerName, options.targetPackage,
             options.libraries, options.useSystemLoadLibrary,
             options.splitOutput, options.variadicArgs,
             options.win32Mode, options.dllMap,
-            options.useInitMethod
+            options.useInitMethod, options.multiplatform,
+            callbackBindings,
         )
     }
 
-    private fun writeKotlin(results: List<KotlinSourceFile>, outputDir: Path): Int {
-        return try {
-            for (result in results) {
-                val outputPath = outputDir.resolve(result.getPath())
-                outputPath.parent.createDirectories()
-                outputPath.writeText(result.contents)
-            }
-            SUCCESS
-        } catch (e: Exception) {
-            System.err.println("Error writing Kotlin files: ${e.message}")
-            OUTPUT_ERROR
+    private fun writeKotlin(results: List<KotlinSourceFile>, outputDir: Path): Int = try {
+        for (result in results) {
+            val outputPath = outputDir.resolve(result.getPath())
+            outputPath.parent.createDirectories()
+            outputPath.writeText(result.contents)
         }
+        SUCCESS
+    } catch (e: Exception) {
+        System.err.println("Error writing Kotlin files: ${e.message}")
+        OUTPUT_ERROR
     }
 
     private fun generateTmpSource(headers: List<String>): String =
         headers.joinToString("\n") { header ->
             if (isSpecialHeaderName(header)) "#include $header" else "#include \"$header\""
         }
+
+    private fun Declaration.Scoped.withStaticConstDeclarations(headers: List<String>): Declaration.Scoped {
+        val existingConstants = members().filterIsInstance<Declaration.Constant>().map { it.name() }.toSet()
+        val constants = headers
+            .filterNot { isSpecialHeaderName(it) }
+            .flatMap { scanStaticConstDeclarations(Path.of(it), mutableSetOf()) }
+            .filterNot { it.name() in existingConstants }
+
+        if (constants.isEmpty()) return this
+
+        return Declaration.toplevel(pos(), *(members() + constants).toTypedArray())
+    }
+
+    private fun scanStaticConstDeclarations(path: Path, seen: MutableSet<Path>): List<Declaration.Constant> {
+        val normalized = path.toAbsolutePath().normalize()
+        if (!seen.add(normalized) || !normalized.exists()) return emptyList()
+
+        val source = normalized.readText()
+        val localIncludes = Regex("""#include\s+"([^"]+)"""")
+            .findAll(source)
+            .map { normalized.parent.resolve(it.groupValues[1]).normalize() }
+            .toList()
+
+        val constants = Regex("""static\s+const\s+(WGPU\w+)\s+(WGPU\w+)\s*=\s*([^;]+);""")
+            .findAll(source)
+            .mapNotNull { match ->
+                val typeName = match.groupValues[1]
+                val constantName = match.groupValues[2]
+                val value = evaluateIntegerExpression(match.groupValues[3]) ?: return@mapNotNull null
+                Declaration.constant(
+                    Position(normalized, 1, 1),
+                    constantName,
+                    value,
+                    Type.typedef(typeName, Type.primitive(Type.Primitive.Kind.LongLong))
+                )
+            }
+            .toList()
+
+        return constants + localIncludes.flatMap { scanStaticConstDeclarations(it, seen) }
+    }
+
+    private fun evaluateIntegerExpression(expression: String): Long? {
+        val cleaned = expression
+            .replace(Regex("""/\*.*?\*/"""), "")
+            .replace(Regex("""\b[UuLl]+\b"""), "")
+            .trim()
+
+        return cleaned
+            .split('|')
+            .map { it.trim().removeSurrounding("(", ")").trim() }
+            .fold(0L) { acc, part ->
+                val value = evaluateIntegerTerm(part) ?: return null
+                acc or value
+            }
+    }
+
+    private fun evaluateIntegerTerm(term: String): Long? {
+        val shift = Regex("""^1\s*<<\s*(\d+)$""").matchEntire(term)
+        if (shift != null) return 1L shl shift.groupValues[1].toInt()
+
+        return when {
+            term.startsWith("0x", ignoreCase = true) -> term.removePrefix("0x").removePrefix("0X").toULongOrNull(16)?.toLong()
+            else -> term.toLongOrNull()
+        }
+    }
 
     private fun hasObjCDeclarations(decl: Declaration.Scoped): Boolean =
         decl.members().any { it is Declaration.ObjCClass || it is Declaration.ObjCProtocol || it is Declaration.ObjCCategory }

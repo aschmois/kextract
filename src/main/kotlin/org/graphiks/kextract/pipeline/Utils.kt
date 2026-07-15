@@ -32,13 +32,31 @@ internal fun Type.isPointer(): Boolean = when {
 }
 
 internal fun Type.isEnum(): Boolean = when {
-    this is Type.Declared -> tree().isEnum()
+    this is Type.Declared -> {
+        val t = tree()
+        if (t is Declaration.Typedef) {
+            t.type().isEnum()
+        } else {
+            t.isEnum()
+        }
+    }
     this is Type.Delegated && kind() == Type.Delegated.Kind.TYPEDEF -> type().isEnum()
     else -> false
 }
 
 private fun Type.structOrUnionDecl(): Declaration.Scoped? = when {
-    this is Type.Declared && tree().isStructOrUnion() -> tree()
+    this is Type.Declared -> {
+        val t = tree()
+        if (t.isStructOrUnion()) {
+            if (t is Declaration.Typedef) {
+                t.type().structOrUnionDecl()
+            } else {
+                t
+            }
+        } else {
+            null
+        }
+    }
     this is Type.Delegated && kind() == Type.Delegated.Kind.TYPEDEF -> type().structOrUnionDecl()
     else -> null
 }

@@ -12,6 +12,7 @@ import org.graphiks.kextract.DeclarationImpl
 import org.graphiks.kextract.clang.Cursor
 import org.graphiks.kextract.clang.CursorKind
 import org.graphiks.kextract.clang.CursorLanguage
+import org.graphiks.kextract.clang.EvalResult
 import org.graphiks.kextract.clang.LinkageKind
 import org.graphiks.kextract.clang.PrintingPolicy
 import org.graphiks.kextract.clang.PrintingPolicyProperty
@@ -19,10 +20,12 @@ import org.graphiks.kextract.clang.SourceLocation
 import org.graphiks.kextract.clang.TypeKind
 import org.graphiks.kextract.DeclarationImpl.AnonymousStruct
 import org.graphiks.kextract.DeclarationImpl.ClangAlignOf
+import org.graphiks.kextract.DeclarationImpl.ClangUnnamedRecord
 import org.graphiks.kextract.DeclarationImpl.ClangOffsetOf
 import org.graphiks.kextract.DeclarationImpl.ClangSizeOf
 import org.graphiks.kextract.DeclarationImpl.NestedDeclarations
 import org.graphiks.kextract.DeclarationImpl.DeclarationString
+import org.graphiks.kextract.DeclarationImpl.SourceComment
 import org.graphiks.kextract.DeclarationImpl.TypedefEnumScoped
 
 import java.nio.file.Path
@@ -37,6 +40,11 @@ internal class TreeMaker {
 
     fun addAttributes(d: Declaration?, c: Cursor): Declaration? {
         if (d == null) return null
+        val rawComment = c.rawCommentText().trim()
+        val briefComment = c.briefCommentText().trim()
+        if (rawComment.isNotEmpty() || briefComment.isNotEmpty()) {
+            SourceComment.with(d, rawComment, briefComment)
+        }
         val attributes: MutableMap<String, MutableList<String>> = mutableMapOf()
         c.forEach { child ->
             if (child.isAttribute()) {
@@ -97,7 +105,7 @@ internal class TreeMaker {
             CursorKind.StructDecl -> createRecord(c, Declaration.Scoped.Kind.STRUCT)
             CursorKind.UnionDecl -> createRecord(c, Declaration.Scoped.Kind.UNION)
             CursorKind.TypedefDecl -> createTypedefNew(c)
-            CursorKind.VarDecl -> createVar(c, Declaration.Variable.Kind.GLOBAL)
+            CursorKind.VarDecl -> createGlobalVar(c)
             // Objective-C declarations
             CursorKind.ObjCInterfaceDecl -> createObjCClass(c)
             CursorKind.ObjCProtocolDecl  -> createObjCProtocol(c)
@@ -221,6 +229,9 @@ internal class TreeMaker {
         }
         ClangSizeOf.with(structOrUnionDecl, recordCursor.type().size() * 8L)
         ClangAlignOf.with(structOrUnionDecl, recordCursor.type().align() * 8L)
+        if (recordCursor.isAnonymous()) {
+            ClangUnnamedRecord.with(structOrUnionDecl)
+        }
         if (recordCursor.isAnonymousStruct()) {
             AnonymousStruct.with(structOrUnionDecl, offsetOfAnonymousRecordNew(parent, recordCursor, recordCursor))
         }
@@ -361,6 +372,22 @@ internal class TreeMaker {
         checkCursorAnyNew(c, CursorKind.VarDecl, CursorKind.FieldDecl, CursorKind.ParmDecl)
         val type = toType(c)
         return withNestedTypesNew(Declaration.`var`(kind, CursorPosition.of(c), c.spelling(), type), c, false)
+    }
+
+    private fun createGlobalVar(c: Cursor): Declaration {
+        if (c.isBitField()) throw AssertionError("Cannot get here!")
+        checkCursorNew(c, CursorKind.VarDecl)
+        val type = toType(c)
+        if (c.type().isConstQualifierdType()) {
+            val initializer = c.getVarDeclInitializer()
+            val evaluated = if (initializer.isInvalid()) c.eval() else initializer.eval()
+            evaluated.use { result ->
+                if (result.getKind() == EvalResult.Kind.Integral) {
+                    return Declaration.constant(CursorPosition.of(c), c.spelling(), result.getAsInt(), type)
+                }
+            }
+        }
+        return withNestedTypesNew(Declaration.`var`(Declaration.Variable.Kind.GLOBAL, CursorPosition.of(c), c.spelling(), type), c, false)
     }
 
     private fun <D : Declaration> withNestedTypesNew(d: D, c: Cursor, ignoreNestedParams: Boolean): D {

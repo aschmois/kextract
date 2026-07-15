@@ -45,6 +45,10 @@ object LibClang {
     @JvmStatic
     fun CXStrToString(cxstr: MemorySegment): String {
         val buf = clang_getCString(cxstr)
+        if (buf == MemorySegment.NULL) {
+            clang_disposeString(cxstr)
+            return ""
+        }
         // Reinterpret with unbounded size so getString can scan for null terminator
         val str = buf.reinterpret(Long.MAX_VALUE).getString(0)
         clang_disposeString(cxstr)

@@ -3,7 +3,7 @@ import java.net.URI
 
 plugins {
     java
-    id("org.jetbrains.kotlin.jvm") version "2.3.21"
+    id("org.jetbrains.kotlin.jvm")
 }
 
 kotlin { jvmToolchain(25) }
@@ -141,8 +141,8 @@ sourceSets {
             setSrcDirs(listOf("src/test/kotlin"))
             exclude("ManualKotlinGen.kt")
         }
-        compileClasspath += sourceSets["kmain"].output
-        runtimeClasspath += sourceSets["kmain"].output
+        compileClasspath += sourceSets["kmain"].output + sourceSets["kmain"].compileClasspath
+        runtimeClasspath += sourceSets["kmain"].output + sourceSets["kmain"].runtimeClasspath
     }
 }
 
@@ -157,30 +157,61 @@ dependencies {
     "kmainImplementation"("com.fasterxml.jackson.dataformat:jackson-dataformat-yaml:2.18.0")
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.14.4")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.14.4")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation("org.junit.platform:junit-platform-launcher")
     testImplementation("org.jetbrains.kotlin:kotlin-test:2.3.21")
     val kotestVersion = "6.1.11"
     testImplementation("io.kotest:kotest-runner-junit5:$kotestVersion")
     testImplementation("io.kotest:kotest-assertions-core:$kotestVersion")
     testImplementation("io.kotest:kotest-property:$kotestVersion")
+    testImplementation("net.java.dev.jna:jna:5.18.1")
+    testImplementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.3.21")
 }
 
 // ── Compiler configuration ────────────────────────────────────────────────────
 
 tasks.withType<Test>().configureEach {
+    val completionMarker = layout.buildDirectory.file("test-plan-completion/$name.properties")
+    val llvmLibraryDirectory = "$llvm_home/$os_lib_dir"
+    val inheritedLibraryPath = System.getenv("LD_LIBRARY_PATH")?.takeIf(String::isNotBlank)
+    val librarySearchPaths = mutableListOf<String>()
+
     dependsOn("downloadLLVM")
     useJUnitPlatform()
-    // -Xrs disables the JVM signal handlers that fight with libclang's own
-    //   crash-recovery signal handlers on Linux. Without it the test JVM exits
-    //   with SIGSEGV in libc syscall during shutdown, even when all tests pass.
+    if (Os.isName("linux")) {
+        val testJdkHome = javaLauncher.get().metadata.installationPath.asFile
+        val libjsig = testJdkHome.resolve("lib/libjsig.so")
+        if (!libjsig.isFile) {
+            throw GradleException(
+                "Cannot configure Linux test signal chaining: expected the test toolchain's " +
+                    "libjsig.so at $libjsig",
+            )
+        }
+        librarySearchPaths += libjsig.parentFile.absolutePath
+        val inheritedPreload = System.getenv("LD_PRELOAD")?.takeIf(String::isNotBlank)
+        // glibc cannot escape spaces in LD_PRELOAD entries, so resolve the basename
+        // through LD_LIBRARY_PATH instead of embedding the test JDK's absolute path.
+        environment(
+            "LD_PRELOAD",
+            listOfNotNull(libjsig.name, inheritedPreload).joinToString(File.pathSeparator),
+        )
+    }
+    librarySearchPaths += llvmLibraryDirectory
+    inheritedLibraryPath?.let(librarySearchPaths::add)
+    environment("LD_LIBRARY_PATH", librarySearchPaths.joinToString(File.pathSeparator))
+    if (!Os.isFamily(Os.FAMILY_WINDOWS)) {
+        environment("LIBCLANG_DISABLE_CRASH_RECOVERY", "1")
+    }
+    doFirst {
+        completionMarker.get().asFile.delete()
+    }
+    systemProperty("kextract.testCompletionMarker", completionMarker.get().asFile.absolutePath)
     // --enable-native-access is required for Panama FFI in JDK 22+.
-    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xrs")
-    systemProperty("java.library.path", "$llvm_home/$os_lib_dir")
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    systemProperty("java.library.path", llvmLibraryDirectory)
     // Help the OS dynamic linker resolve transitive libclang dependencies
     // (libclang.so → libLLVM.so.22) when dlopen opens libclang. java.library.path
     // only feeds System.loadLibrary(); the inner dlopen() chain uses LD_LIBRARY_PATH
     // / DYLD_LIBRARY_PATH / PATH instead.
-    environment("LD_LIBRARY_PATH",   "$llvm_home/$os_lib_dir")
     environment("DYLD_LIBRARY_PATH", "$llvm_home/$os_lib_dir")
     environment("PATH",              "$llvm_home/$os_lib_dir${File.pathSeparator}${System.getenv("PATH") ?: ""}")
 }

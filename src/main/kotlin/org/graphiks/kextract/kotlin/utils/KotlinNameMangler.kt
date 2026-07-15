@@ -15,10 +15,12 @@ object KotlinNameMangler {
         // Soft keywords
         "file", "field", "property", "receiver", "param", "setparam", "delegate",
         // Hard keywords
-        "package", "import", "class", "interface", "object", "data", "sealed",
+        "package", "import", "class", "interface", "object", "sealed",
         "fun", "val", "var", "typealias", "constructor", "by", "get", "set", "where",
         "if", "else", "when", "try", "catch", "finally", "for", "while", "do", "continue",
-        "break", "return", "throw", "is", "in", "as", "this", "super", "null", "true", "false"
+        "break", "return", "throw", "is", "in", "as", "this", "super", "null", "true", "false",
+        // Reserved for future use
+        "typeof",
     )
 
     /**
@@ -61,4 +63,6 @@ object KotlinNameMangler {
     }
 
     fun mangle(decl: Declaration): String = mangle(decl.name())
+
+    fun escape(name: String): String = if (mangle(name) == name) name else "`$name`"
 }
