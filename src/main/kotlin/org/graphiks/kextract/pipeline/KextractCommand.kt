@@ -45,6 +45,12 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         help = "Library to link against (prefix \":\" for a path, e.g. \":libfoo.so\")"
     ).multiple()
 
+    val jvmNativeResourcesDir by option(
+        "--jvm-native-resources",
+        metavar = "DIR",
+        help = "Root containing platform native bundles for multiplatform JVM output",
+    )
+
     val systemLoad by option("--use-system-load-library",
         help = "Use System.loadLibrary instead of SymbolLookup.libraryLookup"
     ).flag()
@@ -193,6 +199,9 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
         if (callbackBindingsPath != null && !multiplatform) {
             throw IllegalArgumentException("--callback-bindings requires --multiplatform")
         }
+        if (jvmNativeResourcesDir != null && !multiplatform) {
+            throw IllegalArgumentException("--jvm-native-resources requires --multiplatform")
+        }
         val callbackBindings = callbackBindingsPath?.let {
             CallbackBindingsLoader.load(Path.of(it))
         }
@@ -208,6 +217,7 @@ class KextractCommand(private val logger: Logger) : CliktCommand(name = "kextrac
             useSystemLoadLibrary = systemLoad,
             targetPackage      = targetPackage,
             outputDir          = outputDir,
+            jvmNativeResourcesDir = jvmNativeResourcesDir,
             sharedClassName    = symbolsClass,
             splitOutput        = splitOutput,
             variadicArgs       = variadicArgsMap,

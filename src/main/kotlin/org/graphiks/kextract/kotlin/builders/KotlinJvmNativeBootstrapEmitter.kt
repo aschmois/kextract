@@ -17,22 +17,22 @@ internal class KotlinJvmNativeBootstrapEmitter(
         builder.appendLine("private object $bootstrapName {")
         builder.indent()
         builder.appendLine("@kotlin.jvm.Volatile private var loaded: kotlin.Boolean = false")
-        builder.appendLine()
+        builder.appendBlankLine()
         builder.appendLine("fun resolve(name: kotlin.String): $memorySegmentName {")
         builder.indent()
         builder.appendLine("load()")
         builder.appendLine("return $delegateResolverName(name)")
         builder.unindent()
         builder.appendLine("}")
-        builder.appendLine()
+        builder.appendBlankLine()
         emitLoadController(builder)
         if (bundledPlatforms.isNotEmpty()) {
-            builder.appendLine()
+            builder.appendBlankLine()
             emitBundleSupport(builder, bundledPlatforms)
         }
         builder.unindent()
         builder.appendLine("}")
-        builder.appendLine()
+        builder.appendBlankLine()
     }
 
     private fun emitLoadController(builder: SourceBuilder) {
@@ -96,7 +96,7 @@ internal class KotlinJvmNativeBootstrapEmitter(
                 "val libraryPaths: kotlin.collections.Map<kotlin.String, kotlin.String>" +
                 ")",
         )
-        builder.appendLine()
+        builder.appendBlankLine()
         builder.appendLine(
             "private val bundles: kotlin.collections.Map<kotlin.String, Bundle> = kotlin.collections.mapOf(",
         )
@@ -128,13 +128,13 @@ internal class KotlinJvmNativeBootstrapEmitter(
         }
         builder.unindent()
         builder.appendLine(")")
-        builder.appendLine()
+        builder.appendBlankLine()
         emitCurrentPlatform(builder)
-        builder.appendLine()
+        builder.appendBlankLine()
         emitExtractBundle(builder)
-        builder.appendLine()
+        builder.appendBlankLine()
         emitCopyResource(builder)
-        builder.appendLine()
+        builder.appendBlankLine()
         emitSha256(builder)
     }
 

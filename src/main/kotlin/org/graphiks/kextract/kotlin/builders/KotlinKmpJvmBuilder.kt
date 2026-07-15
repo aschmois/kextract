@@ -303,7 +303,7 @@ internal class KotlinKmpJvmBuilder(
                 KotlinSourceFile(
                     targetPackage,
                     className + "Jvm",
-                    builder.toString(),
+                    builder.toString().trimEnd() + "\n",
                     sourceRoot = "jvmMain/kotlin",
                 ),
             )

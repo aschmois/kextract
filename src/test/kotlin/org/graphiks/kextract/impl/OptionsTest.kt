@@ -13,6 +13,7 @@ class OptionsTest {
         val options = Options()
         assertEquals("", options.targetPackage)
         assertEquals(".", options.outputDir)
+        assertNull(options.jvmNativeResourcesDir)
         assertEquals(false, options.useSystemLoadLibrary)
         assertTrue(options.clangArgs.isEmpty())
         assertTrue(options.libraries.isEmpty())
@@ -25,6 +26,7 @@ class OptionsTest {
         val options = Options(
             targetPackage      = "org.test",
             outputDir          = "/output",
+            jvmNativeResourcesDir = "/resources",
             useSystemLoadLibrary = true,
             clangArgs          = listOf("-I/include"),
             libraries          = listOf(lib),
@@ -33,6 +35,7 @@ class OptionsTest {
 
         assertEquals("org.test", options.targetPackage)
         assertEquals("/output", options.outputDir)
+        assertEquals("/resources", options.jvmNativeResourcesDir)
         assertEquals(true, options.useSystemLoadLibrary)
         assertEquals(listOf("-I/include"), options.clangArgs)
         assertEquals(1, options.libraries.size)

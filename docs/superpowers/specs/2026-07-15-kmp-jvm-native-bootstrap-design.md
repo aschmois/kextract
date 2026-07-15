@@ -55,7 +55,8 @@ is the platform mapping of that logical name:
 | `win32-x86-64` | `wgpu_native.dll` |
 
 The conventional generation-time resource root is
-`<output>/jvmMain/resources`. Each recognized platform directory is a complete
+`<output>/jvmMain/resources`, or below the explicit root supplied with
+`--jvm-native-resources`. Each recognized platform directory is a complete
 bundle. `kextract` recursively indexes every regular file in these directories,
 including native dependencies and auxiliary files, and embeds the relative
 paths plus SHA-256 hashes in the generated JVM source.

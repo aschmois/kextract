@@ -237,6 +237,42 @@ class GeneratorIntegrationTest : FreeSpec({
             }
         }
 
+        "indexes JVM native libraries from an explicit resources directory" {
+            val header = Files.createTempFile("kextract_bootstrap_external_resources_", ".h")
+            val output = Files.createTempDirectory("kextract_bootstrap_external_output_")
+            val resources = Files.createTempDirectory("kextract_bootstrap_external_resources_")
+            try {
+                header.toFile().writeText("void sample_call(void);")
+                val linuxResources = resources.resolve("linux-x86-64")
+                Files.createDirectories(linuxResources)
+                Files.write(linuxResources.resolve("libsample.so"), byteArrayOf(7, 8, 9))
+
+                KextractTool(Logger.DEFAULT).runGeneration(
+                    listOf(header.toString()),
+                    Options(
+                        targetPackage = "test",
+                        outputDir = output.toString(),
+                        jvmNativeResourcesDir = resources.toString(),
+                        multiplatform = true,
+                        libraries = listOf(Options.Library.parse("sample")),
+                    ),
+                ) shouldBe KextractTool.SUCCESS
+
+                val className = header.fileName.toString().replace(Regex("[^a-zA-Z0-9_]"), "_")
+                val jvm = output.resolve("jvmMain/kotlin/test/${className}Jvm.kt").toFile().readText()
+
+                jvm shouldContain "\"libsample.so\""
+                jvm shouldContain "\"sample\" to \"libsample.so\""
+                jvm shouldContain "System.load(bundleDirectory.resolve(libraryPath0).toAbsolutePath().normalize().toString())"
+                jvm.lineSequence().any { line -> line.endsWith(' ') } shouldBe false
+                jvm.endsWith("\n\n") shouldBe false
+            } finally {
+                Files.deleteIfExists(header)
+                output.toFile().deleteRecursively()
+                resources.toFile().deleteRecursively()
+            }
+        }
+
         "keeps direct JVM symbol lookup when no native library is declared" {
             val jvm = generateKmpFile("void sample_call(void);", "jvmMain", "Jvm")
 
