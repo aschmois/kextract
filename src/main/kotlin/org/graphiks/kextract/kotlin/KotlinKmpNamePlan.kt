@@ -30,6 +30,7 @@ internal enum class KotlinKmpRuntimeSymbol(
     val qualifiedName: String,
     val sourceSets: Set<KotlinKmpSourceSet>,
     val preferredName: String = qualifiedName.substringAfterLast('.'),
+    val preserveOperatorName: Boolean = false,
 ) {
     NATIVE_ADDRESS("io.ygdrasil.kffi.NativeAddress", allSourceSets()),
     CALLBACK("io.ygdrasil.kffi.Callback", common()),
@@ -76,9 +77,11 @@ internal enum class KotlinKmpRuntimeSymbol(
     ULONG_VAR("kotlinx.cinterop.ULongVar", native()),
     USHORT_VAR("kotlinx.cinterop.UShortVar", native()),
     C_VALUE_FACTORY("kotlinx.cinterop.cValue", native()),
+    GET("kotlinx.cinterop.get", native(), preserveOperatorName = true),
     POINTED("kotlinx.cinterop.pointed", native()),
     PTR("kotlinx.cinterop.ptr", native()),
     REINTERPRET("kotlinx.cinterop.reinterpret", native()),
+    SET("kotlinx.cinterop.set", native(), preserveOperatorName = true),
     SIZE_OF("kotlinx.cinterop.sizeOf", native()),
     STATIC_C_FUNCTION("kotlinx.cinterop.staticCFunction", native()),
     USE_CONTENTS("kotlinx.cinterop.useContents", native()),
@@ -164,7 +167,9 @@ internal class KotlinKmpNamePlan private constructor(
             val cTopLevelNames = KotlinKmpExternalNameCollector.collect(scoped, callbackBindings)
             val runtimeAllocator = KotlinIdentifierAllocator(cTopLevelNames)
             val runtimeNames = KotlinKmpRuntimeSymbol.entries.associateWith { symbol ->
-                if (symbol.preferredName !in cTopLevelNames) {
+                if (symbol.preserveOperatorName && symbol.preferredName !in cTopLevelNames) {
+                    symbol.preferredName
+                } else if (symbol.preferredName !in cTopLevelNames) {
                     runtimeAllocator.allocate(symbol.preferredName, "KffiRuntime")
                 } else {
                     runtimeAllocator.allocate("Kffi${symbol.preferredName}", "KffiRuntime")

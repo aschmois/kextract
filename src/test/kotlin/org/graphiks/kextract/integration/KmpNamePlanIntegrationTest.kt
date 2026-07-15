@@ -193,6 +193,36 @@ class KmpNamePlanIntegrationTest : FreeSpec({
         generated.native shouldNotContain "webgpu.native.class_"
     }
 
+    "Native inline record copies import cinterop get and set operators" {
+        val generated = generateKmpSources(
+            """
+            typedef struct Nested { int value; } Nested;
+            typedef struct Holder { Nested nested; } Holder;
+            """.trimIndent(),
+        )
+
+        generated.native shouldContain "import kotlinx.cinterop.get\n"
+        generated.native shouldContain "import kotlinx.cinterop.set\n"
+        generated.native shouldContain "destBytes[i.toInt()] = srcBytes[i.toInt()]"
+    }
+
+    "Native inline record copies invoke aliased cinterop operators explicitly" {
+        val generated = generateKmpSources(
+            """
+            typedef struct get { int value; } get;
+            typedef struct set { int value; } set;
+            typedef struct Nested { int value; } Nested;
+            typedef struct Holder { Nested nested; } Holder;
+            """.trimIndent(),
+        )
+
+        generated.native shouldContain "import kotlinx.cinterop.get as Kffiget"
+        generated.native shouldContain "import kotlinx.cinterop.set as Kffiset"
+        generated.native shouldContain
+            "destBytes.Kffiset(i.toInt(), srcBytes.Kffiget(i.toInt()))"
+        generated.native shouldNotContain "destBytes[i.toInt()] = srcBytes[i.toInt()]"
+    }
+
     "runtime classifiers are aliased whenever a C classifier shadows them" {
         val runtimeSymbolClass = Class.forName("org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol")
         val preferredName = runtimeSymbolClass.getMethod("getPreferredName")

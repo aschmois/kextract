@@ -13,12 +13,14 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_OPAQUE_POINTER
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_VALUE
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_VALUE_FACTORY
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.GET
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.MEMORY_ALLOCATOR
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.OPT_IN
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.POINTED
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.PTR
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.REINTERPRET
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.SET
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.SIZE_OF
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.USE_CONTENTS
 import org.graphiks.kextract.kotlin.KotlinKmpSourceSet
@@ -56,6 +58,8 @@ internal class KotlinKmpNativeBuilder(
     private val cValue = namePlan.runtime(C_VALUE)
     private val cOpaquePointer = namePlan.runtime(C_OPAQUE_POINTER)
     private val byteVar = namePlan.runtime(BYTE_VAR)
+    private val cinteropGet = namePlan.runtime(GET)
+    private val cinteropSet = namePlan.runtime(SET)
     private val sizeOf = namePlan.runtime(SIZE_OF)
     private val pointed = namePlan.runtime(POINTED)
     private val ptr = namePlan.runtime(PTR)
@@ -313,7 +317,7 @@ internal class KotlinKmpNativeBuilder(
                                     builder.appendLine("val byteSize = $sizeOf<$nativeFieldClassifier>().toLong()")
                                     builder.appendLine("for (i in 0L until byteSize) {")
                                     builder.indent()
-                                    builder.appendLine("destBytes[i.toInt()] = srcBytes[i.toInt()]")
+                                    builder.appendLine(byteCopyAssignment("destBytes", "srcBytes", "i.toInt()"))
                                     builder.unindent()
                                     builder.appendLine("}")
                                     builder.unindent()
@@ -378,7 +382,9 @@ internal class KotlinKmpNativeBuilder(
                             builder.appendLine("val size_$propertyName = $sizeOf<$nativeFieldClassifier>().toLong()")
                             builder.appendLine("for (i in 0L until size_$propertyName) {")
                             builder.indent()
-                            builder.appendLine("dest_$propertyName[i.toInt()] = src_$propertyName[i.toInt()]")
+                            builder.appendLine(
+                                byteCopyAssignment("dest_$propertyName", "src_$propertyName", "i.toInt()"),
+                            )
                             builder.unindent()
                             builder.appendLine("}")
                         } else {
@@ -634,21 +640,30 @@ internal class KotlinKmpNativeBuilder(
         builder.indent()
         builder.appendLine("val destBytes = this.data.xlib.$ptr.$reinterpret<$byteVar>()")
         builder.appendLine("val srcBytes = it.handler.pointer.$reinterpret<$byteVar>()")
-        builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.WGPUXlibDisplayHandle>()) destBytes[i] = srcBytes[i]")
+        builder.appendLine(
+            "for (i in 0 until $sizeOf<webgpu.native.WGPUXlibDisplayHandle>()) " +
+                byteCopyAssignment("destBytes", "srcBytes", "i"),
+        )
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine("this@toCValue.xcb?.let {")
         builder.indent()
         builder.appendLine("val destBytes = this.data.xcb.$ptr.$reinterpret<$byteVar>()")
         builder.appendLine("val srcBytes = it.handler.pointer.$reinterpret<$byteVar>()")
-        builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.WGPUXcbDisplayHandle>()) destBytes[i] = srcBytes[i]")
+        builder.appendLine(
+            "for (i in 0 until $sizeOf<webgpu.native.WGPUXcbDisplayHandle>()) " +
+                byteCopyAssignment("destBytes", "srcBytes", "i"),
+        )
         builder.unindent()
         builder.appendLine("}")
         builder.appendLine("this@toCValue.wayland?.let {")
         builder.indent()
         builder.appendLine("val destBytes = this.data.wayland.$ptr.$reinterpret<$byteVar>()")
         builder.appendLine("val srcBytes = it.handler.pointer.$reinterpret<$byteVar>()")
-        builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.WGPUWaylandDisplayHandle>()) destBytes[i] = srcBytes[i]")
+        builder.appendLine(
+            "for (i in 0 until $sizeOf<webgpu.native.WGPUWaylandDisplayHandle>()) " +
+                byteCopyAssignment("destBytes", "srcBytes", "i"),
+        )
         builder.unindent()
         builder.appendLine("}")
         builder.unindent()
@@ -681,7 +696,10 @@ internal class KotlinKmpNativeBuilder(
                 builder.appendLine("$receiver.type = WGPUNativeDisplayHandleType_$setter")
                 builder.appendLine("val destBytes = $receiver.data.$field.$ptr.$reinterpret<$byteVar>()")
                 builder.appendLine("val srcBytes = value.handler.pointer.$reinterpret<$byteVar>()")
-                builder.appendLine("for (i in 0 until $sizeOf<webgpu.native.$type>()) destBytes[i] = srcBytes[i]")
+                builder.appendLine(
+                    "for (i in 0 until $sizeOf<webgpu.native.$type>()) " +
+                        byteCopyAssignment("destBytes", "srcBytes", "i"),
+                )
             }
             builder.unindent()
             builder.appendLine("}")
@@ -690,5 +708,12 @@ internal class KotlinKmpNativeBuilder(
 
     private fun isOptionsStyle(name: String): Boolean =
         name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask") || name == "WGPUInstanceBackend" || name == "WGPUInstanceFlag" || name == "WGPUFlags"
+
+    private fun byteCopyAssignment(destination: String, source: String, index: String): String =
+        if (cinteropGet == "get" && cinteropSet == "set") {
+            "$destination[$index] = $source[$index]"
+        } else {
+            "$destination.$cinteropSet($index, $source.$cinteropGet($index))"
+        }
 
 }
