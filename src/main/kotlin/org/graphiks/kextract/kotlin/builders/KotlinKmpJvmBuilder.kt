@@ -6,6 +6,7 @@ import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
 import org.graphiks.kextract.Type
 import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
+import org.graphiks.kextract.kotlin.KotlinJvmNativeBundleIndex
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARRAY_HOLDER
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
@@ -36,6 +37,8 @@ import org.graphiks.kextract.pipeline.LayoutUtils
 import org.graphiks.kextract.kotlin.utils.TypeMapper
 import org.graphiks.kextract.pipeline.isStructOrUnion
 import org.graphiks.kextract.pipeline.isEnum
+import org.graphiks.kextract.pipeline.Options
+import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 
 internal class KotlinKmpJvmBuilder(
     private val targetPackage: String,
@@ -45,6 +48,9 @@ internal class KotlinKmpJvmBuilder(
     private val namePlan: KotlinKmpNamePlan,
     private val recordLayouts: KotlinJvmRecordLayoutPlan,
     private val abiIndex: KotlinKmpAbiIndex,
+    private val libraries: List<Options.Library>,
+    private val jvmNativeBundleIndex: KotlinJvmNativeBundleIndex,
+    private val privateNames: KotlinIdentifierAllocator,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
@@ -67,6 +73,9 @@ internal class KotlinKmpJvmBuilder(
     private val memoryLayout = namePlan.runtime(MEMORY_LAYOUT)
     private val valueLayout = namePlan.runtime(VALUE_LAYOUT)
     private val groupLayout = namePlan.runtime(GROUP_LAYOUT)
+    private val nativeBootstrapName = libraries.takeIf { it.isNotEmpty() }?.let {
+        privateNames.allocate("KextractNativeBootstrap", "nativeBootstrap")
+    }
 
     init {
         if (targetPackage.isNotEmpty()) {
@@ -78,6 +87,15 @@ internal class KotlinKmpJvmBuilder(
             .filter { KotlinKmpSourceSet.JVM in it.sourceSets }
             .forEach { builder.appendLine(namePlan.importLine(it)) }
         builder.appendLine()
+        nativeBootstrapName?.let { bootstrapName ->
+            KotlinJvmNativeBootstrapEmitter(
+                libraries = libraries,
+                bundleIndex = jvmNativeBundleIndex,
+                bootstrapName = bootstrapName,
+                delegateResolverName = namePlan.runtime(FIND_OR_THROW),
+                memorySegmentName = memorySegment,
+            ).emit(builder)
+        }
     }
 
     override fun visitScoped(decl: Declaration.Scoped) {
@@ -476,7 +494,8 @@ internal class KotlinKmpJvmBuilder(
         }.joinToString(", ")
         val invoke = "${name}_HANDLE.invokeExact($invokeArgs)"
         builder.appendLine("private val ${name}_DESC: ${namePlan.runtime(FUNCTION_DESCRIPTOR)} = ${planJvmRuntimeNames(LayoutUtils.functionDescriptorString(decl.type(), abiIndex))}")
-        builder.appendLine("private val ${name}_ADDR: $memorySegment by lazy { ${namePlan.runtime(FIND_OR_THROW)}(\"$cName\") }")
+        val resolver = nativeBootstrapName?.let { "$it.resolve" } ?: namePlan.runtime(FIND_OR_THROW)
+        builder.appendLine("private val ${name}_ADDR: $memorySegment by lazy { $resolver(\"$cName\") }")
         builder.appendLine("private val ${name}_HANDLE: ${namePlan.runtime(METHOD_HANDLE)} by lazy { ${namePlan.runtime(LINKER)}.nativeLinker().downcallHandle(${name}_ADDR, ${name}_DESC) }")
         builder.appendLine("actual fun $name(${params.joinToString(", ")}): $returnType {")
         builder.indent()

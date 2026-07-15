@@ -10,6 +10,7 @@ import org.graphiks.kextract.callbacks.CanonicalDeclarationIndex
 import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.KotlinGenerator
+import org.graphiks.kextract.kotlin.KotlinJvmNativeBundleIndex
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import java.io.File
 import java.nio.file.Path
@@ -195,13 +196,22 @@ class KextractTool(private val logger: Logger) {
             ValidatedCallbackBindings.EMPTY
         }
         val transformed = NameMangler(headerName).scan(d)
-        return KotlinGenerator().generate(
+        val jvmNativeBundleIndex = if (options.multiplatform && options.libraries.isNotEmpty()) {
+            KotlinJvmNativeBundleIndex.scan(
+                Path.of(options.outputDir).resolve("jvmMain/resources"),
+                options.libraries,
+            )
+        } else {
+            KotlinJvmNativeBundleIndex(emptyList())
+        }
+        return KotlinGenerator().generateWithJvmNativeBundle(
             transformed, headerName, options.targetPackage,
             options.libraries, options.useSystemLoadLibrary,
             options.splitOutput, options.variadicArgs,
             options.win32Mode, options.dllMap,
             options.useInitMethod, options.multiplatform,
             callbackBindings,
+            jvmNativeBundleIndex,
         )
     }
 
