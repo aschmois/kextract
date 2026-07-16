@@ -62,6 +62,13 @@ internal class TreeMaker {
         return declarationCacheNew[key]
     }
 
+    fun findUniqueScoped(kind: Declaration.Scoped.Kind, name: String): Declaration.Scoped? =
+        declarationCacheNew.values
+            .filterIsInstance<Declaration.Scoped>()
+            .filter { it.kind() == kind && it.name() == name }
+            .distinct()
+            .singleOrNull()
+
     fun createTree(c: Cursor): Declaration? {
         val lang: CursorLanguage = c.language()
         val linkage: LinkageKind = c.linkage()

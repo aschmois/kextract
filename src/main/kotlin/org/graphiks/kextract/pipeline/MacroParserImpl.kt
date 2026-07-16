@@ -3,6 +3,7 @@ package org.graphiks.kextract.pipeline
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.Position
 import org.graphiks.kextract.Type
+import org.graphiks.kextract.TypeImpl
 import org.graphiks.kextract.clang.Cursor
 import org.graphiks.kextract.clang.CursorKind
 import org.graphiks.kextract.clang.Diagnostic
@@ -24,6 +25,8 @@ internal class MacroParserImpl private constructor(
     val macroTable: MacroTable = MacroTable()
 
     companion object {
+        private val REPARSED_ENUM_ERROR = Regex("^enum ([A-Za-z_][A-Za-z0-9_]*)$")
+
         fun make(treeMaker: TreeMaker, logger: Logger, tu: TranslationUnit, args: Collection<String>): MacroParserImpl {
             val reparser: ClangReparser = try {
                 ClangReparser(tu, args, logger)
@@ -34,7 +37,23 @@ internal class MacroParserImpl private constructor(
             }
             return MacroParserImpl(reparser, treeMaker, logger)
         }
+
+        internal fun recoverReparsedEnumType(
+            type: Type,
+            findUniqueScoped: (Declaration.Scoped.Kind, String) -> Declaration.Scoped?,
+        ): Type {
+            if (type !is TypeImpl.ErronrousTypeImpl) return type
+            val match = REPARSED_ENUM_ERROR.matchEntire(type.erroneousName) ?: return type
+            val enumDecl = findUniqueScoped(
+                Declaration.Scoped.Kind.ENUM,
+                match.groupValues[1],
+            ) ?: return type
+            return Type.declared(enumDecl)
+        }
     }
+
+    internal fun recoverReparsedEnumType(type: Type): Type =
+        recoverReparsedEnumType(type, treeMaker::findUniqueScoped)
 
     /**
      * This method attempts to evaluate the macro. Evaluation occurs in two steps: first, an attempt is made
@@ -221,15 +240,15 @@ internal class MacroParserImpl private constructor(
                 val newEntry: Entry = when (result.getKind()) {
                     EvalResult.Kind.Integral -> {
                         val value = result.getAsInt()
-                        entry.success(treeMaker.toType(decl), value)
+                        entry.success(recoverReparsedEnumType(treeMaker.toType(decl)), value)
                     }
                     EvalResult.Kind.FloatingPoint -> {
                         val value = result.getAsFloat()
-                        entry.success(treeMaker.toType(decl), value)
+                        entry.success(recoverReparsedEnumType(treeMaker.toType(decl)), value)
                     }
                     EvalResult.Kind.StrLiteral -> {
                         val value = result.getAsString()
-                        entry.success(treeMaker.toType(decl), value)
+                        entry.success(recoverReparsedEnumType(treeMaker.toType(decl)), value)
                     }
                     else -> {
                         val type: Type? = if (decl.type().equals(decl.type().canonicalType())) null
