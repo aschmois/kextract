@@ -37,7 +37,7 @@ internal enum class KotlinKmpRuntimeSymbol(
     CALLBACK_EXCEPTION_HANDLER("io.ygdrasil.kffi.CallbackExceptionHandler", allSourceSets()),
     CALLBACK_POLICY("io.ygdrasil.kffi.CallbackPolicy", allSourceSets()),
     CALLBACK_REGISTRATION("io.ygdrasil.kffi.CallbackRegistration", allSourceSets()),
-    CALLBACK_RUNTIME("io.ygdrasil.kffi.CallbackRuntime", commonJvmNative()),
+    CALLBACK_RUNTIME("io.ygdrasil.kffi.CallbackRuntime", allSourceSets()),
     CALLBACK_RUNTIME_API("io.ygdrasil.kffi.CallbackRuntimeApi", allSourceSets()),
     CALLBACK_TYPE("io.ygdrasil.kffi.CallbackType", common()),
     PREPARED_CALLBACK_REGISTRATION("io.ygdrasil.kffi.PreparedCallbackRegistration", allSourceSets()),
@@ -87,6 +87,9 @@ internal enum class KotlinKmpRuntimeSymbol(
     USE_CONTENTS("kotlinx.cinterop.useContents", native()),
 
     JNA_POINTER("com.sun.jna.Pointer", android()),
+    JNA_CALLBACK_REFERENCE("com.sun.jna.CallbackReference", android()),
+    JNA_LIBRARY("com.sun.jna.Library", android()),
+    JNA_NATIVE("com.sun.jna.Native", android()),
     JNA_STRUCTURE("com.sun.jna.Structure", android()),
     JNA_UNION("com.sun.jna.Union", android()),
 

@@ -15,7 +15,6 @@ import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.NATIVE_ADDRESS
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.OPT_IN
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.SUPPRESS
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSAFE_CALLBACK_REARM_API
-import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.UNSUPPORTED_OPERATION_EXCEPTION
 import org.graphiks.kextract.kotlin.builders.SourceBuilder
 import org.graphiks.kextract.kotlin.utils.KotlinIdentifierAllocator
 
@@ -101,17 +100,33 @@ internal class KotlinCallbackBindingEmitter(
         }
     }
 
-    fun emitAndroid(builder: SourceBuilder, bindings: List<KotlinDirectFunctionBindingModel>) {
+    fun emitAndroid(
+        builder: SourceBuilder,
+        bindings: List<KotlinDirectFunctionBindingModel>,
+        toRawArgument: (String, Type) -> String,
+        rawFunction: (Declaration.Function) -> String,
+    ) {
         bindings.forEach { model ->
             val binding = model.binding
             val parameters = applicationParameters(binding)
             emitPreflightHeader(builder, binding, model.preflightName, parameters, actual = true)
             builder.indent()
-            builder.appendLine("throw ${namePlan.runtime(UNSUPPORTED_OPERATION_EXCEPTION)}(")
+            parameters.forEach { parameter ->
+                builder.appendLine(
+                    "val ${parameter.preparedName} = ${toRawArgument(parameter.name, parameter.variable.type())}",
+                )
+            }
+            builder.appendLine("return { ${preparedCallLambdaParameters(binding)} ->")
             builder.indent()
-            builder.appendLine("\"Android/JNA safe callback bindings are not supported; use raw bindings or an Android Native target\",")
+            builder.appendLine("${rawFunction(binding.function)}(")
+            builder.indent()
+            preparedPlatformArguments(binding, parameters, toRawArgument).forEach { argument ->
+                builder.appendLine("$argument,")
+            }
             builder.unindent()
             builder.appendLine(")")
+            builder.unindent()
+            builder.appendLine("}")
             builder.unindent()
             builder.appendLine("}")
             builder.appendLine()

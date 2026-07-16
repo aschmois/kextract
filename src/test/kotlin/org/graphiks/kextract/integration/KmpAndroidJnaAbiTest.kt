@@ -31,6 +31,9 @@ private fun generateAndroidSources(header: String): AndroidSources {
                 targetPackage = "sample.bindings",
                 outputDir = output.toString(),
                 multiplatform = true,
+                libraries = listOf(
+                    Options.Library("fixture", Options.Library.SpecKind.NAME),
+                ),
             ),
         ) shouldBe KextractTool.SUCCESS
 
@@ -54,6 +57,18 @@ private val RECORD_STORAGE_HEADER =
         WGPUValue inlineValue;
         WGPUValue* pointerValue;
     } WGPUContainer;
+    """.trimIndent()
+
+private val FUNCTION_ABI_HEADER =
+    """
+    typedef unsigned int WGPUFlags;
+    typedef struct WGPUValue { unsigned int value; } WGPUValue;
+    typedef struct WGPUDeviceImpl* WGPUDevice;
+
+    unsigned int sample_version(void);
+    WGPUDevice sample_create(const WGPUValue* descriptor);
+    void sample_release(WGPUDevice device);
+    WGPUValue sample_round_trip(WGPUValue value);
     """.trimIndent()
 
 private val TYPEDEF_ALIAS_HEADER =
@@ -139,8 +154,8 @@ private val ABI_HEADER =
         WGPUStringView label;
     } WGPUQueueDescriptor;
 
-    typedef void (*WGPUDeviceLostCallback)(void);
-    typedef void (*WGPUUncapturedErrorCallback)(void);
+    typedef void (*WGPUDeviceLostCallback)(void* userdata);
+    typedef void (*WGPUUncapturedErrorCallback)(void* userdata);
 
     typedef struct WGPUDeviceLostCallbackInfo {
         WGPUChainedStruct* nextInChain;
@@ -307,6 +322,36 @@ private fun compileGeneratedAndroid(sources: AndroidSources, probe: String? = nu
             )
             @CallbackRuntimeApi
             class PreparedCallbackRegistration<C : Callback>
+            @OptIn(CallbackRuntimeApi::class)
+            object CallbackRuntime {
+                fun <C : Callback> register(
+                    type: CallbackType<C>,
+                    trampoline: NativeAddress,
+                    policy: CallbackPolicy,
+                    onError: CallbackExceptionHandler,
+                    callback: C,
+                ): CallbackRegistration<C> = object : CallbackRegistration<C> {}
+                fun <C : Callback> prepare(
+                    type: CallbackType<C>,
+                    trampoline: NativeAddress,
+                    policy: CallbackPolicy,
+                    onError: CallbackExceptionHandler,
+                    callback: C,
+                ): PreparedCallbackRegistration<C> = PreparedCallbackRegistration()
+                fun <C : Callback> rearmAfterNativeQuiescence(
+                    type: CallbackType<C>,
+                    trampoline: NativeAddress,
+                    policy: CallbackPolicy,
+                    onError: CallbackExceptionHandler,
+                    callback: C,
+                ): CallbackRegistration<C> = object : CallbackRegistration<C> {}
+                fun <C : Callback> dispatchSafely(
+                    type: CallbackType<C>,
+                    userdata: NativeAddress?,
+                    dispatch: (C) -> Unit,
+                ) = Unit
+                fun reportUnroutedFailure(failure: Throwable) = Unit
+            }
             expect class CallbackHolder<T> {
                 val handler: NativeAddress
             }
@@ -407,6 +452,26 @@ private fun Declaration.metric(attributeName: String, getterName: String): Long 
 }
 
 class KmpAndroidJnaAbiTest : FreeSpec({
+    "Android functions use a lazy raw JNA library and contain no runtime stubs" {
+        val generated = generateAndroidSources(FUNCTION_ABI_HEADER)
+
+        generated.jna shouldContain "interface wgpu_hLibrary : Library"
+        generated.jna shouldContain "Native.load(\"fixture\", wgpu_hLibrary::class.java)"
+        generated.jna shouldContain "fun sample_version(): Int"
+        generated.jna shouldContain "fun sample_create(descriptor: Pointer?): Pointer?"
+        generated.jna shouldContain "fun sample_release(device: Pointer?): Unit"
+        generated.jna shouldContain
+            "fun sample_round_trip(value: sample.bindings.android.WGPUValue.ByValue): sample.bindings.android.WGPUValue.ByValue"
+
+        generated.bridge shouldContain "actual fun sample_version(): UInt"
+        generated.bridge shouldContain "actual fun sample_create(descriptor: WGPUValue?): WGPUDevice?"
+        generated.bridge shouldContain "actual fun sample_release(device: WGPUDevice?): Unit"
+        generated.bridge shouldContain "actual fun sample_round_trip(value: WGPUValue): WGPUValue"
+        generated.bridge shouldNotContain "not implemented for Android/JNA"
+
+        compileGeneratedAndroid(generated)
+    }
+
     "inline record fields use initialized JNA ByValue storage" {
         val generated = generateAndroidSources(RECORD_STORAGE_HEADER)
 

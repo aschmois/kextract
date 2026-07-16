@@ -10,6 +10,8 @@ import org.graphiks.kextract.kotlin.KotlinKmpNamePlan
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.ARRAY_HOLDER
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.C_STRING
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_LIBRARY
+import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_NATIVE
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_POINTER
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_STRUCTURE
 import org.graphiks.kextract.kotlin.KotlinKmpRuntimeSymbol.JNA_UNION
@@ -21,6 +23,7 @@ import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackBindingEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackAndroidEmitter
 import org.graphiks.kextract.kotlin.callbacks.KotlinCallbackModel
 import org.graphiks.kextract.kotlin.callbacks.KotlinDirectFunctionBindingModel
+import org.graphiks.kextract.kotlin.abi.KotlinKmpAbiIndex
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.LayoutUtils
 import org.graphiks.kextract.kotlin.utils.TypeMapper
@@ -29,23 +32,28 @@ import org.graphiks.kextract.pipeline.isEnum
 internal class KotlinKmpAndroidBuilder(
     private val targetPackage: String,
     private val className: String,
+    private val libraryName: String,
     private val callbackModels: List<KotlinCallbackModel>,
     private val directBindingModels: List<KotlinDirectFunctionBindingModel>,
     private val namePlan: KotlinKmpNamePlan,
+    private val abiIndex: KotlinKmpAbiIndex,
 ) : Declaration.Visitor<Unit> {
 
     private val builder = SourceBuilder()
     private val jnaBuilder = SourceBuilder()
+    private val jnaFunctionsBuilder = SourceBuilder()
     private val files = mutableListOf<KotlinSourceFile>()
     private val generatedNames = mutableSetOf<String>()
     private val callbackTypeNames = callbackModels.mapTo(mutableSetOf(), KotlinCallbackModel::typeName)
     private val androidPackage = if (targetPackage.isEmpty()) "android" else "$targetPackage.android"
-    private val typeMapper = KmpTypeMapper(namePlan, arraysAsHolders = false)
+    private val typeMapper = KmpTypeMapper(namePlan, arraysAsHolders = false, abiIndex = abiIndex)
     private val nativeAddress = namePlan.runtime(NATIVE_ADDRESS)
     private val cString = namePlan.runtime(C_STRING)
     private val arrayHolder = namePlan.runtime(ARRAY_HOLDER)
     private val memoryAllocator = namePlan.runtime(MEMORY_ALLOCATOR)
     private val jnaPointer = namePlan.runtime(JNA_POINTER)
+    private val jnaLibrary = namePlan.runtime(JNA_LIBRARY)
+    private val jnaNative = namePlan.runtime(JNA_NATIVE)
     private val jnaStructure = namePlan.runtime(JNA_STRUCTURE)
     private val jnaUnion = namePlan.runtime(JNA_UNION)
     private val jvmField = namePlan.runtime(JVM_FIELD)
@@ -60,11 +68,11 @@ internal class KotlinKmpAndroidBuilder(
 
         KotlinKmpRuntimeSymbol.entries
             .filter { KotlinKmpSourceSet.ANDROID in it.sourceSets }
-            .filterNot { it in setOf(JNA_POINTER, JNA_STRUCTURE, JNA_UNION, JVM_FIELD) }
+            .filterNot { it in setOf(JNA_LIBRARY, JNA_STRUCTURE, JNA_UNION, JVM_FIELD) }
             .forEach { builder.appendLine(namePlan.importLine(it)) }
         builder.appendLine()
 
-        listOf(JNA_POINTER, JNA_STRUCTURE, JNA_UNION, JVM_FIELD)
+        listOf(JNA_LIBRARY, JNA_NATIVE, JNA_POINTER, JNA_STRUCTURE, JNA_UNION, JVM_FIELD)
             .forEach { jnaBuilder.appendLine(namePlan.importLine(it)) }
         jnaBuilder.appendLine()
     }
@@ -425,11 +433,30 @@ internal class KotlinKmpAndroidBuilder(
                 for (member in decl.members()) {
                     member.accept(this)
                 }
-                KotlinCallbackAndroidEmitter(namePlan).emit(builder, callbackModels)
+                jnaBuilder.appendLine("internal interface ${className}Library : $jnaLibrary {")
+                jnaBuilder.indent()
+                jnaBuilder.appendBlock(jnaFunctionsBuilder.toString().trimEnd())
+                jnaBuilder.unindent()
+                jnaBuilder.appendLine("}")
+                jnaBuilder.appendLine()
+                jnaBuilder.appendLine("internal val ${className}LibraryInstance: ${className}Library by lazy {")
+                jnaBuilder.indent()
+                jnaBuilder.appendLine("$jnaNative.load(\"${escapeKotlinString(libraryName)}\", ${className}Library::class.java)")
+                jnaBuilder.unindent()
+                jnaBuilder.appendLine("}")
+                jnaBuilder.appendLine()
+                KotlinCallbackAndroidEmitter(
+                    typeMapper::mapFunctionType,
+                    ::mapJnaType,
+                    namePlan,
+                ).emit(builder, callbackModels)
                 KotlinCallbackBindingEmitter(typeMapper::mapFunctionType, namePlan).emitAndroid(
                     builder,
                     directBindingModels,
-                )
+                    ::toRawJnaArgument,
+                ) { function ->
+                    "$androidPackage.${className}LibraryInstance.${namePlan.rawIdentifier(function)}"
+                }
             }
             else -> {}
         }
@@ -456,15 +483,27 @@ internal class KotlinKmpAndroidBuilder(
 
     override fun visitFunction(decl: Declaration.Function) {
         if (Skip.isPresent(decl)) return
+        val name = namePlan.declaration(decl)
+        val rawName = namePlan.rawIdentifier(decl)
         val returnType = typeMapper.mapFunctionType(decl.type().returnType())
-        val params = decl.parameters().map { param ->
-            val name = namePlan.parameter(param)
-            "$name: ${typeMapper.mapFunctionType(param.type())}"
-        }.joinToString(", ")
-        builder.appendLine("actual fun ${namePlan.declaration(decl)}($params): $returnType =")
+        val params = decl.parameters().joinToString(", ") { param ->
+            "${namePlan.parameter(param)}: ${typeMapper.mapFunctionType(param.type())}"
+        }
+        val rawParams = decl.parameters().joinToString(", ") { param ->
+            "${namePlan.parameter(param)}: ${rawJnaFunctionType(param.type())}"
+        }
+        val rawReturnType = rawJnaFunctionType(decl.type().returnType())
+        jnaFunctionsBuilder.appendLine("fun $rawName($rawParams): $rawReturnType")
+
+        val rawArguments = decl.parameters().joinToString(", ") { param ->
+            toRawJnaArgument(namePlan.parameter(param), param.type())
+        }
+        val call = "$androidPackage.${className}LibraryInstance.$rawName($rawArguments)"
+        builder.appendLine("actual fun $name($params): $returnType {")
         builder.indent()
-        builder.appendLine("error(\"${decl.name()} is not implemented for Android/JNA generated bindings\")")
+        emitFunctionReturn(decl.type().returnType(), returnType, call)
         builder.unindent()
+        builder.appendLine("}")
         builder.appendLine()
     }
     override fun visitVariable(decl: Declaration.Variable) {}
@@ -493,6 +532,89 @@ internal class KotlinKmpAndroidBuilder(
     override fun visitObjCCategory(decl: Declaration.ObjCCategory) {}
 
     fun getFiles(): List<KotlinSourceFile> = files
+
+    private fun rawJnaFunctionType(type: Type): String =
+        if (type is Type.Primitive && type.kind() == Type.Primitive.Kind.Void) {
+            "Unit"
+        } else {
+            mapJnaType(type)
+        }
+
+    private fun toRawJnaArgument(name: String, type: Type): String {
+        val kmpType = typeMapper.mapFunctionType(type)
+        val rawType = rawJnaFunctionType(type)
+        return when {
+            typeMapper.isOptionsEnumType(type) ->
+                abiIndex.enum(typeMapper.enumDeclaration(type)).optionsRawToJvmCarrier("$name.rawValue")
+            typeMapper.isEnumType(type) ->
+                abiIndex.enum(typeMapper.enumDeclaration(type)).toJvmCarrier(name)
+            returnsStructByValue(type) -> {
+                val record = requireNotNull(canonicalRecordDeclaration(type))
+                val rawByValue =
+                    "$androidPackage.${namePlan.declaration(record)}.${namePlan.jnaByValue(record)}"
+                "$rawByValue($name.handler).apply { read() }"
+            }
+            rawType == "$jnaPointer?" && kmpType in setOf(nativeAddress, "$nativeAddress?") -> name
+            rawType == "$jnaPointer?" && kmpType == "$cString?" -> "$name?.handler"
+            rawType == "$jnaPointer?" && kmpType.startsWith(arrayHolder) -> "$name?.handler"
+            rawType == "$jnaPointer?" && kmpType.endsWith("?") -> "$name?.handler"
+            rawType == "$jnaPointer?" -> "$name.handler"
+            rawType == "Int" && kmpType == "Boolean" -> "if ($name) 1 else 0"
+            rawType == "Int" && kmpType == "UInt" -> "$name.toInt()"
+            rawType == "Long" && kmpType == "ULong" -> "$name.toLong()"
+            rawType == "Short" && kmpType == "UShort" -> "$name.toShort()"
+            rawType == "Byte" && kmpType == "UByte" -> "$name.toByte()"
+            else -> name
+        }
+    }
+
+    private fun emitFunctionReturn(type: Type, returnType: String, call: String) {
+        if (returnType == "Unit") {
+            builder.appendLine(call)
+            builder.appendLine("return")
+            return
+        }
+        val rawType = rawJnaFunctionType(type)
+        when {
+            typeMapper.isOptionsEnumType(type) -> {
+                val scalar = abiIndex.enum(typeMapper.enumDeclaration(type))
+                builder.appendLine(
+                    "return $returnType(${scalar.jvmCarrierToOptionsRaw(call)})",
+                )
+            }
+            typeMapper.isEnumType(type) -> {
+                val scalar = abiIndex.enum(typeMapper.enumDeclaration(type))
+                builder.appendLine("return ${scalar.fromJvmCarrier(call)}")
+            }
+            returnType == "$nativeAddress?" -> builder.appendLine("return $call")
+            returnType == "$cString?" -> builder.appendLine("return $call?.let(::$cString)")
+            returnType.endsWith("?") && returnsPointer(type) -> {
+                val nonNullable = returnType.removeSuffix("?")
+                builder.appendLine("return $call?.let { $nonNullable(it) }")
+            }
+            returnsStructByValue(type) -> builder.appendLine("return $returnType.ByValue($call)")
+            rawType == "Int" && returnType == "Boolean" -> builder.appendLine("return $call != 0")
+            rawType == "Int" && returnType == "UInt" -> builder.appendLine("return $call.toUInt()")
+            rawType == "Long" && returnType == "ULong" -> builder.appendLine("return $call.toULong()")
+            rawType == "Short" && returnType == "UShort" -> builder.appendLine("return $call.toUShort()")
+            rawType == "Byte" && returnType == "UByte" -> builder.appendLine("return $call.toUByte()")
+            else -> builder.appendLine("return $call")
+        }
+    }
+
+    private fun returnsStructByValue(type: Type): Boolean =
+        !returnsPointer(type) && canonicalRecordDeclaration(type) != null
+
+    private fun returnsPointer(type: Type): Boolean = when {
+        type is Type.Delegated && type.kind() == Type.Delegated.Kind.POINTER -> true
+        type is Type.Delegated -> returnsPointer(type.type())
+        else -> false
+    }
+
+    private fun escapeKotlinString(value: String): String = value
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("$", "\\$")
 
     private fun emitNativeDisplayHandle(decl: Declaration.Scoped) {
         val rawJnaByReference =

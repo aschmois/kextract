@@ -23,11 +23,12 @@ internal fun generateKmpSources(
     packageName: String = "sample.bindings",
     callbackBindings: CallbackBindingsConfig? = null,
 ): GeneratedKmpSources {
-    val input = Files.createTempFile("kextract-kmp-source", ".h")
+    val workspace = Files.createTempDirectory("kextract-kmp-source")
+    val input = workspace.resolve("fixture.h")
     return try {
         generateKmpSourcesFromHeaderPath(header, input, packageName, callbackBindings)
     } finally {
-        input.toFile().delete()
+        workspace.toFile().deleteRecursively()
     }
 }
 
