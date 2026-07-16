@@ -7,6 +7,7 @@ import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.utils.KotlinNameMangler
 import org.graphiks.kextract.pipeline.Options
+import java.util.IdentityHashMap
 
 /**
  * Top-level builder for Kotlin files.
@@ -36,7 +37,6 @@ class KotlinToplevelBuilder(
     private val headerBuilder get() = KotlinHeaderBuilder(mainSlot, this, variadicArgs)
     private val structBuilder get() = KotlinStructBuilder(mainSlot, this)
     private val typedefBuilder get() = KotlinTypedefBuilder(mainSlot, this)
-    private val enumBuilder get() = KotlinEnumBuilder(mainSlot, this)
     private val objcProtocolBuilder get() = KotlinObjCProtocolBuilder(mainSlot, this)
     private val objcCategoryBuilder get() = KotlinObjCCategoryBuilder(mainSlot, this)
     // objcClassBuilder is recreated after the TOPLEVEL pre-scan populates generatedClassNames
@@ -57,6 +57,10 @@ class KotlinToplevelBuilder(
      * override detection.
      */
     private var _classMethodSignatures: Map<String, Set<String>> = emptyMap()
+
+    private var _externalEnumConstants =
+        IdentityHashMap<Declaration.Scoped, MutableList<Declaration.Constant>>()
+    private var _topLevelEnumsByName: Map<String, List<Declaration.Scoped>> = emptyMap()
 
     /** Counter for round-robin split across multiple function files (avoids <clinit> > 64KB). */
     private var _functionBatch: Int = 0
@@ -247,23 +251,21 @@ class KotlinToplevelBuilder(
                 // clang creates a named ENUM scoped with the typedef name, and the redundant
                 // typedef is filtered — so this is the only place we emit the enum class.
                 if (decl.name().isNotEmpty()) {
-                    if (splitOutput) {
-                        val slotKey = if (isOptionsStyle(decl.name())) "options" else "enums"
-                        KotlinEnumBuilder(getOrCreateSlot(slotKey), this).visitEnum(decl)
+                    val externalConstants = _externalEnumConstants[decl].orEmpty()
+                    val target = if (splitOutput) {
+                        val slotKey = if (KotlinEnumSupport.isOptionsStyle(decl.name())) "options" else "enums"
+                        getOrCreateSlot(slotKey)
                     } else {
-                        enumBuilder.visitEnum(decl)
+                        mainSlot
                     }
+                    KotlinEnumBuilder(target, this, externalConstants).visitEnum(decl)
                 }
             }
             else -> {
                 // TOPLEVEL: pre-scan before generating code.
                 if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
-                    // Collect the names of all enum constants from named ENUMs inside TOPLEVEL.
-                    // Mark those named-ENUM scopeds and their constants as Skip so they are not
-                    // re-visited as standalone items.
-                    // Also mark any top-level macro Declaration.Constant whose name matches an
-                    // enum constant (clang synthesises these for each ObjC enum member).
-                    val enumConstantNames = mutableSetOf<String>()
+                    // Mark constants from named ENUMs inside TOPLEVEL as Skip so they are not
+                    // re-visited as standalone items. They will be emitted inside their enum.
                     decl.members()
                         .filterIsInstance<Declaration.Scoped>()
                         .filter { it.kind() == Declaration.Scoped.Kind.ENUM && it.name().isNotEmpty() && !Skip.isPresent(it) }
@@ -271,19 +273,10 @@ class KotlinToplevelBuilder(
                             enumScoped.members()
                                 .filterIsInstance<Declaration.Constant>()
                                 .forEach { constant ->
-                                    enumConstantNames.add(constant.name())
-                                    // The constants themselves will be emitted inside the enum
-                                    // class; mark them so they are not re-emitted as globals.
                                     Skip.with(constant)
                                 }
                         }
-                    // Suppress macro-synthesised constants that shadow enum member names
-                    if (enumConstantNames.isNotEmpty()) {
-                        decl.members()
-                            .filterIsInstance<Declaration.Constant>()
-                            .filter { it.name() in enumConstantNames && !Skip.isPresent(it) }
-                            .forEach { constant -> Skip.with(constant) }
-                    }
+                    collectExternalEnumConstants(decl)
                     // Collect generated ObjCClass names so the class builder can emit superclass
                     // clauses only for classes that will actually be generated (GRA-79).
                     val generatedObjCClassNames = decl.members()
@@ -488,8 +481,56 @@ class KotlinToplevelBuilder(
         else -> "" to key.replace('.', '_')
     }
 
-    private fun isOptionsStyle(name: String): Boolean =
-        name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
+    private fun numericValue(value: Any): Long? = when (value) {
+        is Long -> value
+        is Int -> value.toLong()
+        else -> null
+    }
+
+    private fun collectExternalEnumConstants(decl: Declaration.Scoped) {
+        val enumIndex = linkedMapOf<String, MutableList<Declaration.Scoped>>()
+        decl.members()
+            .filterIsInstance<Declaration.Scoped>()
+            .filter {
+                it.kind() == Declaration.Scoped.Kind.ENUM &&
+                    it.name().isNotEmpty()
+            }
+            .forEach { enumDecl ->
+                val candidates = enumIndex.getOrPut(enumDecl.name()) { mutableListOf() }
+                if (candidates.none { it === enumDecl }) candidates.add(enumDecl)
+            }
+        _topLevelEnumsByName = enumIndex
+
+        val external = IdentityHashMap<Declaration.Scoped, MutableList<Declaration.Constant>>()
+        for (constant in decl.members().filterIsInstance<Declaration.Constant>()) {
+            if (Skip.isPresent(constant)) continue
+            val value = numericValue(constant.value()) ?: continue
+            val resolvedEnum = KotlinEnumSupport.resolveEnum(constant.type()) ?: continue
+            val generatedEnum = resolveGeneratedEnum(resolvedEnum) ?: continue
+            val exactDuplicate = generatedEnum.members()
+                .filterIsInstance<Declaration.Constant>()
+                .any {
+                    it.name() == constant.name() && numericValue(it.value()) == value
+                }
+            if (exactDuplicate) {
+                Skip.with(constant)
+                continue
+            }
+            external.getOrPut(generatedEnum) { mutableListOf() }.add(constant)
+        }
+        _externalEnumConstants = external
+    }
+
+    fun generatedEnumKotlinName(enumDecl: Declaration.Scoped): String? =
+        resolveGeneratedEnum(enumDecl)?.let { javaName(it.name()) }
+
+    private fun resolveGeneratedEnum(enumDecl: Declaration.Scoped): Declaration.Scoped? {
+        val candidates = _topLevelEnumsByName[enumDecl.name()].orEmpty()
+        val exact = candidates.firstOrNull { it === enumDecl }
+        if (exact != null) return if (Skip.isPresent(exact)) null else exact
+
+        return candidates.filterNot(Skip::isPresent).singleOrNull()
+    }
 
     fun javaName(name: String): String = KotlinNameMangler.mangle(name)
 

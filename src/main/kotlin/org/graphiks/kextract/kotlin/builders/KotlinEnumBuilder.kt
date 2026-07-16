@@ -18,15 +18,38 @@ import org.graphiks.kextract.Declaration
  */
 class KotlinEnumBuilder(
     private val builder: SourceBuilder,
-    private val toplevel: KotlinToplevelBuilder
+    private val toplevel: KotlinToplevelBuilder,
+    private val externalConstants: List<Declaration.Constant> = emptyList(),
 ) {
+    private data class EnumEntry(val name: String, val value: Long)
+
+    private fun regularEntries(constants: List<Declaration.Constant>): List<EnumEntry> {
+        val entries = constants.map {
+            EnumEntry(toplevel.javaName(it.name()), it.value().toLongValue())
+        }.toMutableList()
+        val seenValues = entries.mapTo(mutableSetOf()) { it.value }
+        val seenNames = entries.mapTo(mutableSetOf()) { it.name }
+        for (constant in externalConstants) {
+            val value = constant.value().toLongValue()
+            if (!seenValues.add(value)) continue
+
+            val baseName = toplevel.javaName(constant.name())
+            var entryName = baseName
+            var suffix = 1
+            while (!seenNames.add(entryName)) {
+                entryName = "${baseName}_kextract${suffix++}"
+            }
+            entries += EnumEntry(entryName, value)
+        }
+        return entries
+    }
 
     fun visitEnum(decl: Declaration.Scoped) {
         require(decl.kind() == Declaration.Scoped.Kind.ENUM)
         require(decl.name().isNotEmpty())
 
         val constants = decl.members().filterIsInstance<Declaration.Constant>()
-        if (isOptionsStyle(decl.name())) {
+        if (KotlinEnumSupport.isOptionsStyle(decl.name())) {
             emitValueClass(decl, constants)
         } else {
             emitEnumClass(decl, constants)
@@ -42,19 +65,20 @@ class KotlinEnumBuilder(
         builder.appendLine(" * NS_ENUM: {@snippet lang=c : enum ${decl.name()}}")
         builder.appendLine(" */")
 
-        if (constants.isEmpty()) {
+        val entries = regularEntries(constants)
+        if (entries.isEmpty()) {
             builder.appendLine("enum class ${name}(val value: Long)")
             builder.appendLine()
             return
         }
 
-        val entries = constants.joinToString(", ") { c ->
-            "${toplevel.javaName(c.name())}(${c.value().toLongValue().toKotlinLongLiteral()})"
+        val renderedEntries = entries.joinToString(", ") { entry ->
+            "${entry.name}(${entry.value.toKotlinLongLiteral()})"
         }
 
         builder.appendLine("enum class ${name}(val value: Long) {")
         builder.indent()
-        builder.appendLine("${entries};")
+        builder.appendLine("${renderedEntries};")
         builder.appendLine()
         builder.appendLine("companion object {")
         builder.indent()
@@ -103,13 +127,6 @@ class KotlinEnumBuilder(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /**
-     * Heuristic: generate NS_OPTIONS-style (`@JvmInline value class`) when the
-     * enum name ends with "Options", "Flags", or "Mask".
-     */
-    private fun isOptionsStyle(name: String): Boolean =
-        name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
 
     /** Coerce an enum constant value (Any, typically Long or Int) to a Long for Kotlin literals. */
     private fun Any.toLongValue(): Long = when (this) {

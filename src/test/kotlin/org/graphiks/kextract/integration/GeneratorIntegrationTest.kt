@@ -117,6 +117,23 @@ class GeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    "KMP duplicate filtering" - {
+        "keeps the historical enum member output for a same-name typed macro" {
+            val src = generateCommon(
+                """
+                    typedef enum KxKmpDuplicateType : int {
+                        KxKmpDuplicate = 1
+                    } KxKmpDuplicateType;
+                    #define KxKmpDuplicate ((KxKmpDuplicateType)2)
+                """.trimIndent(),
+            )
+
+            src shouldContain "const val KxKmpDuplicate : KxKmpDuplicateType = 1"
+            src shouldNotContain "KxKmpDuplicate_kextract"
+            src shouldNotContain "KxKmpDuplicateType = 2"
+        }
+    }
+
     "KMP native display handle generation" - {
         "emits anonymous union accessors for WGPUNativeDisplayHandle" {
             val header = """
