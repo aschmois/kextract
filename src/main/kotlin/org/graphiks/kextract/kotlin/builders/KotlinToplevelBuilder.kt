@@ -36,7 +36,6 @@ class KotlinToplevelBuilder(
     private val headerBuilder get() = KotlinHeaderBuilder(mainSlot, this, variadicArgs)
     private val structBuilder get() = KotlinStructBuilder(mainSlot, this)
     private val typedefBuilder get() = KotlinTypedefBuilder(mainSlot, this)
-    private val enumBuilder get() = KotlinEnumBuilder(mainSlot, this)
     private val objcProtocolBuilder get() = KotlinObjCProtocolBuilder(mainSlot, this)
     private val objcCategoryBuilder get() = KotlinObjCCategoryBuilder(mainSlot, this)
     // objcClassBuilder is recreated after the TOPLEVEL pre-scan populates generatedClassNames
@@ -57,6 +56,8 @@ class KotlinToplevelBuilder(
      * override detection.
      */
     private var _classMethodSignatures: Map<String, Set<String>> = emptyMap()
+
+    private var _externalEnumConstants: Map<String, List<Declaration.Constant>> = emptyMap()
 
     /** Counter for round-robin split across multiple function files (avoids <clinit> > 64KB). */
     private var _functionBatch: Int = 0
@@ -247,12 +248,14 @@ class KotlinToplevelBuilder(
                 // clang creates a named ENUM scoped with the typedef name, and the redundant
                 // typedef is filtered — so this is the only place we emit the enum class.
                 if (decl.name().isNotEmpty()) {
-                    if (splitOutput) {
-                        val slotKey = if (isOptionsStyle(decl.name())) "options" else "enums"
-                        KotlinEnumBuilder(getOrCreateSlot(slotKey), this).visitEnum(decl)
+                    val externalConstants = _externalEnumConstants[decl.name()].orEmpty()
+                    val target = if (splitOutput) {
+                        val slotKey = if (KotlinEnumSupport.isOptionsStyle(decl.name())) "options" else "enums"
+                        getOrCreateSlot(slotKey)
                     } else {
-                        enumBuilder.visitEnum(decl)
+                        mainSlot
                     }
+                    KotlinEnumBuilder(target, this, externalConstants).visitEnum(decl)
                 }
             }
             else -> {
@@ -284,6 +287,7 @@ class KotlinToplevelBuilder(
                             .filter { it.name() in enumConstantNames && !Skip.isPresent(it) }
                             .forEach { constant -> Skip.with(constant) }
                     }
+                    collectExternalEnumConstants(decl)
                     // Collect generated ObjCClass names so the class builder can emit superclass
                     // clauses only for classes that will actually be generated (GRA-79).
                     val generatedObjCClassNames = decl.members()
@@ -488,8 +492,33 @@ class KotlinToplevelBuilder(
         else -> "" to key.replace('.', '_')
     }
 
-    private fun isOptionsStyle(name: String): Boolean =
-        name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
+    private fun numericValue(value: Any): Long? = when (value) {
+        is Long -> value
+        is Int -> value.toLong()
+        else -> null
+    }
+
+    private fun collectExternalEnumConstants(decl: Declaration.Scoped) {
+        val generatedEnums = decl.members()
+            .filterIsInstance<Declaration.Scoped>()
+            .filter {
+                it.kind() == Declaration.Scoped.Kind.ENUM &&
+                    it.name().isNotEmpty() &&
+                    !Skip.isPresent(it)
+            }
+            .associateBy { it.name() }
+
+        val external = linkedMapOf<String, MutableList<Declaration.Constant>>()
+        decl.members()
+            .filterIsInstance<Declaration.Constant>()
+            .filter { !Skip.isPresent(it) && numericValue(it.value()) != null }
+            .forEach { constant ->
+                val enumDecl = KotlinEnumSupport.resolveEnum(constant.type()) ?: return@forEach
+                if (generatedEnums[enumDecl.name()] == null) return@forEach
+                external.getOrPut(enumDecl.name()) { mutableListOf() }.add(constant)
+            }
+        _externalEnumConstants = external
+    }
 
     fun javaName(name: String): String = KotlinNameMangler.mangle(name)
 

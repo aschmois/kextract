@@ -11,7 +11,11 @@ import org.graphiks.kextract.pipeline.NameMangler
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.KextractTool
+import org.jetbrains.kotlin.cli.common.ExitCode
+import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
+import java.net.URLClassLoader
 import java.nio.file.Files
+import java.nio.file.Path
 
 /**
  * Integration tests for Objective-C → Kotlin/JVM binding generation.
@@ -50,6 +54,46 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
     /** Concatenates all generated source file contents. */
     fun generate(objcSource: String, pkg: String = "test"): String =
         generateAll(objcSource, pkg).joinToString("\n") { it.contents }
+
+    fun compileAndInvokeLong(
+        files: List<KotlinSourceFile>,
+        probeSource: String,
+        methodName: String,
+    ): Long {
+        val workspace = Files.createTempDirectory("kextract_objc_enum_compile_")
+        return try {
+            val sourcePaths = files.mapIndexed { index, source ->
+                workspace.resolve("${source.className}_$index.kt").also {
+                    Files.writeString(it, source.contents)
+                }
+            }
+            val probe = workspace.resolve("EnumMacroProbe.kt")
+            Files.writeString(probe, probeSource)
+            val output = Files.createDirectories(workspace.resolve("classes"))
+            val arguments = buildList {
+                addAll(listOf(
+                    "-no-stdlib",
+                    "-no-reflect",
+                    "-jvm-target", "25",
+                    "-classpath", System.getProperty("java.class.path"),
+                    "-d", output.toString(),
+                ))
+                addAll(sourcePaths.map(Path::toString))
+                add(probe.toString())
+            }
+            K2JVMCompiler().exec(System.err, *arguments.toTypedArray()) shouldBe ExitCode.OK
+            URLClassLoader(
+                arrayOf(output.toUri().toURL()),
+                ObjCGeneratorIntegrationTest::class.java.classLoader,
+            ).use { loader ->
+                loader.loadClass("test.EnumMacroProbeKt")
+                    .getMethod(methodName)
+                    .invoke(null) as Long
+            }
+        } finally {
+            workspace.toFile().deleteRecursively()
+        }
+    }
 
     /** Returns the ObjCRuntime.kt content if present, else "". */
     fun getRuntime(files: List<KotlinSourceFile>): String =
@@ -444,6 +488,36 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
 
         "enum constants not emitted as standalone top-level functions" {
             src shouldNotContain "fun KxOrderAscending()"
+        }
+    }
+
+    "enum-typed sentinel macro is generated as a usable enum value" - {
+        val files = generateAll("""
+            typedef enum : unsigned long {
+                KxEventNone  = 0,
+                KxEventKnown = 1
+            } KxEventType;
+            #define KxAnyEventType ((KxEventType)4294967295UL)
+        """.trimIndent())
+        val src = files.joinToString("\n") { it.contents }
+
+        "missing numeric value enriches the enum" {
+            src shouldContain "KxAnyEventType(4294967295L)"
+        }
+
+        "macro function boxes through fromValue" {
+            src shouldContain "fun KxAnyEventType(): KxEventType = KxEventType.fromValue(4294967295L)"
+        }
+
+        "generated value compiles and can be invoked" {
+            compileAndInvokeLong(
+                files,
+                """
+                    package test
+                    fun readAnyEventType(): Long = KxAnyEventType().value
+                """.trimIndent(),
+                "readAnyEventType",
+            ) shouldBe 4294967295L
         }
     }
 

@@ -270,28 +270,40 @@ class KotlinHeaderBuilder(
         builder.appendLine(" */")
 
         // Format the value as a valid Kotlin literal, fixing type mismatches with casts
-        val kotlinValue = constantKotlinLiteral(value, valueStr, type)
+        val enumDecl = KotlinEnumSupport.resolveEnum(decl.type())
+        val kotlinValue = constantKotlinLiteral(value, valueStr, type, enumDecl)
 
         // Constant
         builder.appendLine("fun ${name}(): ${type} = $kotlinValue")
         builder.appendLine()
     }
 
-    private fun constantKotlinLiteral(value: Any, valueStr: String, type: String): String = when (value) {
-        is String -> "\"${value}\""
-        is Long -> {
-            if (type == "Int") {
-                // Long value used in an Int constant → cast down
-                if (value == Long.MIN_VALUE) "Int.MIN_VALUE"
-                else "($valueStr).toInt()"
-            } else {
-                if (value == Long.MIN_VALUE) "Long.MIN_VALUE"
-                else valueStr
-            }
+    private fun constantKotlinLiteral(
+        value: Any,
+        valueStr: String,
+        type: String,
+        enumDecl: Declaration.Scoped?,
+    ): String {
+        val enumValue = when (value) {
+            is Long -> value
+            is Int -> value.toLong()
+            else -> null
         }
-        is Float -> if (type == "Double") "(${valueStr}f).toDouble()" else "${valueStr}f"
-        is Double -> if (type == "Float") "($valueStr).toFloat()" else valueStr
-        else -> valueStr
+        if (enumDecl != null && enumValue != null && !KotlinEnumSupport.isOptionsStyle(enumDecl.name())) {
+            val literal = if (enumValue == Long.MIN_VALUE) "Long.MIN_VALUE" else "${enumValue}L"
+            return "$type.fromValue($literal)"
+        }
+        return when (value) {
+            is String -> "\"${value}\""
+            is Long -> if (type == "Int") {
+                if (value == Long.MIN_VALUE) "Int.MIN_VALUE" else "($valueStr).toInt()"
+            } else {
+                if (value == Long.MIN_VALUE) "Long.MIN_VALUE" else valueStr
+            }
+            is Float -> if (type == "Double") "(${valueStr}f).toDouble()" else "${valueStr}f"
+            is Double -> if (type == "Float") "($valueStr).toFloat()" else valueStr
+            else -> valueStr
+        }
     }
 
     private fun isValidKotlinLiteral(value: Any): Boolean = when (value) {
