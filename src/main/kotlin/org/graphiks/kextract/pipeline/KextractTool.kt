@@ -185,7 +185,7 @@ class KextractTool(private val logger: Logger) {
         }
         var d = decl
         d = IncludeFilter(options.includeHelper).scan(d)
-        d = DuplicateFilter().scan(d)
+        d = DuplicateFilter(options.multiplatform).scan(d)
         d = UnsupportedFilter(
             logger,
             allowVariableWidthCallbackScalars = options.multiplatform,

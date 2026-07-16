@@ -11,12 +11,13 @@ class DuplicateFilterTest {
     private val intType = Type.primitive(Type.Primitive.Kind.Int)
 
     @Test
-    fun `enum members and top-level constants use separate duplicate sets`() {
+    fun `legacy enum-typed macro homonymous with an enum member survives`() {
         val enumMember = constant("KxSharedName", 1)
-        val macro = constant("KxSharedName", 2)
+        val enumDecl = Declaration.enum_(Position.NO_POSITION, "KxType", enumMember)
+        val macro = constant("KxSharedName", 2, Type.declared(enumDecl))
         val header = Declaration.toplevel(
             Position.NO_POSITION,
-            Declaration.enum_(Position.NO_POSITION, "KxType", enumMember),
+            enumDecl,
             macro,
         )
 
@@ -24,6 +25,70 @@ class DuplicateFilterTest {
 
         assertFalse(isSkipped(enumMember))
         assertFalse(isSkipped(macro))
+    }
+
+    @Test
+    fun `legacy primitive macro homonymous with an enum member is suppressed`() {
+        val enumMember = constant("KxPrimitiveShared", 1)
+        val macro = constant("KxPrimitiveShared", 2)
+        val header = Declaration.toplevel(
+            Position.NO_POSITION,
+            Declaration.enum_(Position.NO_POSITION, "KxPrimitiveType", enumMember),
+            macro,
+        )
+
+        DuplicateFilter().scan(header)
+
+        assertFalse(isSkipped(enumMember))
+        assertTrue(isSkipped(macro))
+    }
+
+    @Test
+    fun `legacy enum macro unwraps typedef and qualifier wrappers`() {
+        val enumMember = constant("KxWrappedShared", 1)
+        val enumDecl = Declaration.enum_(Position.NO_POSITION, "KxWrappedType", enumMember)
+        val wrappedEnumType = Type.typedef(
+            "KxWrappedAlias",
+            Type.qualified(Type.Delegated.Kind.VOLATILE, Type.declared(enumDecl)),
+        )
+        val macro = constant("KxWrappedShared", 2, wrappedEnumType)
+
+        DuplicateFilter().scan(
+            Declaration.toplevel(Position.NO_POSITION, enumDecl, macro),
+        )
+
+        assertFalse(isSkipped(macro))
+    }
+
+    @Test
+    fun `legacy pointer-to-enum macro homonymous with an enum member is suppressed`() {
+        val enumMember = constant("KxPointerShared", 1)
+        val enumDecl = Declaration.enum_(Position.NO_POSITION, "KxPointerType", enumMember)
+        val pointerType = Type.typedef(
+            "KxPointerAlias",
+            Type.pointer(Type.declared(enumDecl)),
+        )
+        val macro = constant("KxPointerShared", 2, pointerType)
+
+        DuplicateFilter().scan(
+            Declaration.toplevel(Position.NO_POSITION, enumDecl, macro),
+        )
+
+        assertTrue(isSkipped(macro))
+    }
+
+    @Test
+    fun `multiplatform enum-typed macro homonymous with an enum member is suppressed`() {
+        val enumMember = constant("KxKmpShared", 1)
+        val enumDecl = Declaration.enum_(Position.NO_POSITION, "KxKmpType", enumMember)
+        val macro = constant("KxKmpShared", 2, Type.declared(enumDecl))
+
+        DuplicateFilter(multiplatform = true).scan(
+            Declaration.toplevel(Position.NO_POSITION, enumDecl, macro),
+        )
+
+        assertFalse(isSkipped(enumMember))
+        assertTrue(isSkipped(macro))
     }
 
     @Test
@@ -49,8 +114,12 @@ class DuplicateFilterTest {
         assertTrue(isSkipped(duplicate))
     }
 
-    private fun constant(name: String, value: Int): Declaration.Constant =
-        Declaration.constant(Position.NO_POSITION, name, value, intType)
+    private fun constant(
+        name: String,
+        value: Int,
+        type: Type = intType,
+    ): Declaration.Constant =
+        Declaration.constant(Position.NO_POSITION, name, value, type)
 
     private fun isSkipped(declaration: Declaration): Boolean =
         declaration.attributes().any {

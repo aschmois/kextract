@@ -529,8 +529,7 @@ class KotlinToplevelBuilder(
         val exact = candidates.firstOrNull { it === enumDecl }
         if (exact != null) return if (Skip.isPresent(exact)) null else exact
 
-        val onlyCandidate = candidates.singleOrNull() ?: return null
-        return if (Skip.isPresent(onlyCandidate)) null else onlyCandidate
+        return candidates.filterNot(Skip::isPresent).singleOrNull()
     }
 
     fun javaName(name: String): String = KotlinNameMangler.mangle(name)

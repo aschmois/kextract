@@ -2,9 +2,13 @@ package org.graphiks.kextract.pipeline
 
 import org.graphiks.kextract.Declaration
 import org.graphiks.kextract.DeclarationImpl.Skip
+import org.graphiks.kextract.Type
 
-class DuplicateFilter : Declaration.Visitor<Unit> {
+class DuplicateFilter(
+    private val multiplatform: Boolean = false,
+) : Declaration.Visitor<Unit> {
 
+    private val constants = mutableSetOf<String>()
     private val enumConstants = mutableSetOf<String>()
     private val topLevelConstants = mutableSetOf<String>()
     private val variables = mutableSetOf<String>()
@@ -21,8 +25,31 @@ class DuplicateFilter : Declaration.Visitor<Unit> {
     }
 
     override fun visitConstant(constant: Declaration.Constant) {
-        val constants = if (scanningEnum) enumConstants else topLevelConstants
-        if (!constants.add(constant.name())) Skip.with(constant)
+        if (scanningEnum) {
+            enumConstants.add(constant.name())
+            if (!constants.add(constant.name())) Skip.with(constant)
+            return
+        }
+
+        if (!topLevelConstants.add(constant.name())) {
+            Skip.with(constant)
+            return
+        }
+        if (constants.add(constant.name())) return
+
+        val isLegacyEnumMacro =
+            !multiplatform &&
+                constant.name() in enumConstants &&
+                (constant.value() is Int || constant.value() is Long) &&
+                isNonPointerEnumType(constant.type())
+        if (!isLegacyEnumMacro) Skip.with(constant)
+    }
+
+    private fun isNonPointerEnumType(type: Type): Boolean = when (type) {
+        is Type.Declared -> type.tree().kind() == Declaration.Scoped.Kind.ENUM
+        is Type.Delegated ->
+            type.kind() != Type.Delegated.Kind.POINTER && isNonPointerEnumType(type.type())
+        else -> false
     }
 
     override fun visitFunction(funcTree: Declaration.Function) {

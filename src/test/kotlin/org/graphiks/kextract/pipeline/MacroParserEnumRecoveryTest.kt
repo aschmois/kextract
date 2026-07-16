@@ -87,6 +87,36 @@ class MacroParserEnumRecoveryTest {
     }
 
     @Test
+    fun `exact dollar enum error recovers the original enum declaration`() {
+        val originalEnum = Declaration.enum_(Position.NO_POSITION, "Kx\$Dollar")
+        val erroneousType = Type.error("enum Kx\$Dollar")
+
+        val recovered = recoverReparsedEnumType(erroneousType) { kind, name ->
+            assertEquals(Declaration.Scoped.Kind.ENUM, kind)
+            assertEquals("Kx\$Dollar", name)
+            originalEnum
+        }
+
+        val declared = assertIs<Type.Declared>(recovered)
+        assertSame(originalEnum, declared.tree())
+    }
+
+    @Test
+    fun `exact Unicode enum error recovers the original enum declaration`() {
+        val originalEnum = Declaration.enum_(Position.NO_POSITION, "KxÉtat")
+        val erroneousType = Type.error("enum KxÉtat")
+
+        val recovered = recoverReparsedEnumType(erroneousType) { kind, name ->
+            assertEquals(Declaration.Scoped.Kind.ENUM, kind)
+            assertEquals("KxÉtat", name)
+            originalEnum
+        }
+
+        val declared = assertIs<Type.Declared>(recovered)
+        assertSame(originalEnum, declared.tree())
+    }
+
+    @Test
     fun `enum recovery preserves unsupported and already declared types`() {
         val originalEnum = Declaration.enum_(Position.NO_POSITION, "KxEventType")
         val alreadyDeclared = Type.declared(originalEnum)
@@ -95,6 +125,8 @@ class MacroParserEnumRecoveryTest {
         val unsupported = listOf(
             Type.error("struct KxEventType"),
             Type.error("enum "),
+            Type.error("enum Kx EventType"),
+            Type.error("enum (anonymous at fixture.h:1:1)"),
             Type.error("enum Kx-EventType"),
             Type.error("enum KxEventType extra"),
         )
@@ -105,6 +137,34 @@ class MacroParserEnumRecoveryTest {
         unsupported.forEach { type ->
             assertSame(type, recoverWithoutLookup(type))
         }
+    }
+
+    @Test
+    fun `recovery pass success resolves the original erroneous enum type`() {
+        val originalEnum = Declaration.enum_(Position.NO_POSITION, "KxRecoveryType")
+        val recoveredType = recoveryPassSuccessType(
+            Type.error("enum KxRecoveryType"),
+            originalEnum,
+        )
+
+        val declared = assertIs<Type.Declared>(recoveredType)
+        assertSame(originalEnum, declared.tree())
+    }
+
+    @Test
+    fun `recovery pass success preserves non-enum missing and ambiguous original types`() {
+        val nonEnum = Type.error("struct KxRecoveryType")
+        val missing = Type.error("enum KxMissingRecoveryType")
+        val ambiguous = Type.error("enum KxAmbiguousRecoveryType")
+        val firstAmbiguous = Declaration.enum_(Position.NO_POSITION, "KxAmbiguousRecoveryType")
+        val secondAmbiguous = Declaration.enum_(Position.NO_POSITION, "KxAmbiguousRecoveryType")
+
+        assertSame(nonEnum, recoveryPassSuccessType(nonEnum))
+        assertSame(missing, recoveryPassSuccessType(missing))
+        assertSame(
+            ambiguous,
+            recoveryPassSuccessType(ambiguous, firstAmbiguous, secondAmbiguous),
+        )
     }
 
     @Test
@@ -159,6 +219,66 @@ class MacroParserEnumRecoveryTest {
         }
         recovery.isAccessible = true
         return recovery.invoke(companion, type, findUniqueScoped) as Type
+    }
+
+    private fun recoveryPassSuccessType(
+        originalType: Type,
+        vararg declarations: Declaration.Scoped,
+    ): Type {
+        val treeMaker = treeMakerWith(*declarations)
+        val macroParserClass = Class.forName("org.graphiks.kextract.pipeline.MacroParserImpl")
+        val constructor = macroParserClass.declaredConstructors.single {
+            it.parameterCount == 3
+        }
+        constructor.isAccessible = true
+        val parser = constructor.newInstance(null, treeMaker, Logger.DEFAULT)
+        val table = macroParserClass.getMethod("getMacroTable").invoke(parser)
+        table.javaClass.getMethod(
+            "enterMacro",
+            String::class.java,
+            Array<String>::class.java,
+            Position::class.java,
+        ).invoke(
+            table,
+            "KxRecoveryOnly",
+            arrayOf("KxRecoveryOnly"),
+            Position.NO_POSITION,
+        )
+
+        @Suppress("UNCHECKED_CAST")
+        val entries = table.javaClass.getMethod("getMacrosByMangledName").invoke(table)
+            as MutableMap<String, Any>
+        val unparsed = entries.values.single()
+        val recoverable = unparsed.javaClass.getMethod("failure", Type::class.java)
+            .invoke(unparsed, originalType)
+        val success = recoverable.javaClass.getMethod(
+            "success",
+            Type::class.java,
+            Any::class.java,
+        ).invoke(
+            recoverable,
+            Type.primitive(Type.Primitive.Kind.Long),
+            7L,
+        )
+        val constant = success.javaClass.getMethod("constant").invoke(success) as Declaration.Constant
+        return constant.type()
+    }
+
+    private fun treeMakerWith(vararg declarations: Declaration.Scoped): Any {
+        val treeMakerClass = Class.forName("org.graphiks.kextract.pipeline.TreeMaker")
+        val constructor = treeMakerClass.declaredConstructors.single { it.parameterCount == 0 }
+        constructor.isAccessible = true
+        val treeMaker = constructor.newInstance()
+        val cacheField = treeMakerClass.declaredFields.single {
+            it.name == "declarationCacheNew" && Map::class.java.isAssignableFrom(it.type)
+        }
+        cacheField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val cache = cacheField.get(treeMaker) as MutableMap<Any, Declaration>
+        declarations.forEachIndexed { index, declaration ->
+            cache["test-key-$index"] = declaration
+        }
+        return treeMaker
     }
 
     private fun findUniqueScoped(vararg declarations: Declaration.Scoped): Declaration.Scoped? {

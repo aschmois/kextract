@@ -673,6 +673,19 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
             ) shouldBe 2L
         }
 
+        "an enum member and exact same-name same-value macro emit only the member" {
+            val files = generateWithPipeline("""
+                typedef enum : long {
+                    KxPipelineExactDuplicate = 1
+                } KxPipelineExactDuplicateType;
+                #define KxPipelineExactDuplicate ((KxPipelineExactDuplicateType)1)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            Regex("KxPipelineExactDuplicate\\(1L\\)").findAll(src).count() shouldBe 1
+            src shouldNotContain "fun KxPipelineExactDuplicate()"
+        }
+
         "a same-name value in another enum does not suppress the target enum macro" {
             val files = generateWithPipeline("""
                 typedef enum : long {
@@ -831,6 +844,34 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
 
             src shouldNotContain "KxAmbiguousMacro(3L)"
             src shouldNotContain "KxAmbiguousHomonym.fromValue(3L)"
+        }
+
+        "a detached identity resolves the only generated homonym beside a skipped one" {
+            val generatedEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxDetachedHomonym",
+                enumConstant("KxDetachedGeneratedBase", 1),
+            )
+            val skippedEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxDetachedHomonym",
+                enumConstant("KxDetachedSkippedBase", 2),
+            )
+            markSkipped(skippedEnum)
+            val detachedEnum = Declaration.enum_(Position.NO_POSITION, "KxDetachedHomonym")
+            val macro = Declaration.constant(
+                Position.NO_POSITION,
+                "KxDetachedMacro",
+                3L,
+                Type.declared(detachedEnum),
+            )
+
+            val src = generateManual(generatedEnum, skippedEnum, macro)
+                .joinToString("\n") { it.contents }
+
+            src shouldContain "KxDetachedMacro(3L)"
+            src shouldContain
+                "fun KxDetachedMacro(): KxDetachedHomonym = KxDetachedHomonym.fromValue(3L)"
         }
 
         "an exact generated homonym receives enrichment only on that identity" {

@@ -25,7 +25,8 @@ internal class MacroParserImpl private constructor(
     val macroTable: MacroTable = MacroTable()
 
     companion object {
-        private val REPARSED_ENUM_ERROR = Regex("^enum ([A-Za-z_][A-Za-z0-9_]*)$")
+        private val REPARSED_ENUM_ERROR =
+            Regex("^enum ([\\p{L}_$][\\p{L}\\p{M}\\p{N}_$]*)$")
 
         fun make(treeMaker: TreeMaker, logger: Logger, tu: TranslationUnit, args: Collection<String>): MacroParserImpl {
             val reparser: ClangReparser = try {
@@ -186,7 +187,7 @@ internal class MacroParserImpl private constructor(
             position: Position
         ) : Entry(name, tokens, position) {
             override fun success(type: Type, value: Any): Entry =
-                Success(name, tokens, position, this.type, value)
+                Success(name, tokens, position, recoverReparsedEnumType(this.type), value)
 
             override fun failure(type: Type?): Entry =
                 UnparseableMacro(name, tokens, position)
