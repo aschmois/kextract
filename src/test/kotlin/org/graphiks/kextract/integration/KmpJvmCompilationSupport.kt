@@ -23,6 +23,7 @@ internal fun generateKmpSources(
     packageName: String = "sample.bindings",
     callbackBindings: CallbackBindingsConfig? = null,
     libraries: List<Options.Library> = emptyList(),
+    jvmNativeLibraries: List<Options.Library> = emptyList(),
     writeJvmResources: (Path) -> Unit = {},
 ): GeneratedKmpSources {
     val workspace = Files.createTempDirectory("kextract-kmp-source")
@@ -34,6 +35,7 @@ internal fun generateKmpSources(
             packageName,
             callbackBindings,
             libraries,
+            jvmNativeLibraries,
             writeJvmResources,
         )
     } finally {
@@ -47,6 +49,7 @@ internal fun generateKmpSourcesFromHeaderPath(
     packageName: String = "sample.bindings",
     callbackBindings: CallbackBindingsConfig? = null,
     libraries: List<Options.Library> = emptyList(),
+    jvmNativeLibraries: List<Options.Library> = emptyList(),
     writeJvmResources: (Path) -> Unit = {},
 ): GeneratedKmpSources {
     val output = Files.createTempDirectory("kextract-kmp-source-out")
@@ -61,6 +64,7 @@ internal fun generateKmpSourcesFromHeaderPath(
                 multiplatform = true,
                 callbackBindings = callbackBindings,
                 libraries = libraries,
+                jvmNativeLibraries = jvmNativeLibraries,
             ),
         ) shouldBe KextractTool.SUCCESS
 

@@ -58,6 +58,10 @@ class KmpJvmNativeBootstrapIntegrationTest : FreeSpec({
                     int fixture_first_downcall(void);
                 """.trimIndent(),
                 libraries = listOf(Options.Library.parse("fixture_main")),
+                jvmNativeLibraries = listOf(
+                    Options.Library.parse("fixture_dependency"),
+                    Options.Library.parse("fixture_main"),
+                ),
                 writeJvmResources = { resources ->
                     val platformResources = resources.resolve(platform.id).createDirectories()
                     Files.copy(dependency, platformResources.resolve(dependency.fileName))
