@@ -55,6 +55,10 @@ jobs:
           llvm-version: ${{ env.LLVM_VERSION }}
           platform: ${{ matrix.platform }}
 
+      - name: 'Activate MSVC'
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: 'Install kotlinc'
         if: matrix.run-examples
         shell: bash

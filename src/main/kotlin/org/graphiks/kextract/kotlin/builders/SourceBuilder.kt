@@ -16,6 +16,11 @@ open class SourceBuilder {
         sb.append("${indentString.repeat(indentLevel)}$line\n")
     }
 
+    /** Appends an empty line without indentation whitespace. */
+    fun appendBlankLine() {
+        sb.append('\n')
+    }
+
     /**
      * Appends a block of code (multi-line string) with current indentation.
      */

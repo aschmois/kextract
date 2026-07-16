@@ -179,6 +179,108 @@ class GeneratorIntegrationTest : FreeSpec({
     }
 
     "KMP function generation" - {
+        "bootstraps declared JVM native libraries before symbol lookup" {
+            val header = Files.createTempFile("kextract_bootstrap_", ".h")
+            val output = Files.createTempDirectory("kextract_bootstrap_out_")
+            try {
+                header.toFile().writeText("void sample_call(void);")
+                val linuxResources = output.resolve("jvmMain/resources/linux-x86-64")
+                Files.createDirectories(linuxResources.resolve("deps"))
+                Files.write(linuxResources.resolve("deps/libdependency.so"), byteArrayOf(1, 2, 3))
+                Files.write(linuxResources.resolve("libsample.so"), byteArrayOf(4, 5, 6))
+
+                KextractTool(Logger.DEFAULT).runGeneration(
+                    listOf(header.toString()),
+                    Options(
+                        targetPackage = "test",
+                        outputDir = output.toString(),
+                        multiplatform = true,
+                        libraries = listOf(Options.Library.parse("sample")),
+                        jvmNativeLibraries = listOf(
+                            Options.Library.parse("dependency"),
+                            Options.Library.parse("sample"),
+                            Options.Library.parse(":/opt/native/libabsolute.so"),
+                        ),
+                    ),
+                ) shouldBe KextractTool.SUCCESS
+
+                val className = header.fileName.toString().replace(Regex("[^a-zA-Z0-9_]"), "_")
+                val jvm = output.resolve("jvmMain/kotlin/test/${className}Jvm.kt").toFile().readText()
+
+                jvm shouldContain "private object KextractNativeBootstrap"
+                jvm shouldContain "@kotlin.jvm.Volatile private var loaded: kotlin.Boolean = false"
+                jvm shouldContain "kextract.native.cache.dir"
+                jvm shouldContain "\"linux-x86-64\" to Bundle("
+                jvm shouldContain "deps/libdependency.so"
+                jvm shouldContain "System.loadLibrary(\"dependency\")"
+                jvm shouldContain "System.loadLibrary(\"sample\")"
+                jvm shouldContain "Path.of(\"/opt/native/libabsolute.so\").toAbsolutePath().normalize()"
+                jvm shouldContain "KextractNativeBootstrap.resolve(\"sample_call\")"
+                jvm shouldContain "if (loaded) return"
+                jvm shouldContain "kotlin.synchronized(this)"
+                jvm shouldContain "FileChannel.open("
+                jvm shouldContain "channel.lock().use"
+                jvm shouldContain "toString().intern()"
+                jvm shouldContain "classLoader.getResources(resourceName)"
+                jvm shouldContain "StandardCopyOption.ATOMIC_MOVE"
+                jvm shouldContain "catch (_: java.nio.file.AtomicMoveNotSupportedException)"
+                (
+                    jvm.indexOf("System.loadLibrary(\"dependency\")") <
+                        jvm.indexOf("System.loadLibrary(\"sample\")")
+                ) shouldBe true
+                (
+                    jvm.indexOf("Path.of(\"/opt/native/libabsolute.so\")") <
+                        jvm.indexOf("loaded = true")
+                ) shouldBe true
+            } finally {
+                Files.deleteIfExists(header)
+                output.toFile().deleteRecursively()
+            }
+        }
+
+        "indexes JVM native libraries from an explicit resources directory" {
+            val header = Files.createTempFile("kextract_bootstrap_external_resources_", ".h")
+            val output = Files.createTempDirectory("kextract_bootstrap_external_output_")
+            val resources = Files.createTempDirectory("kextract_bootstrap_external_resources_")
+            try {
+                header.toFile().writeText("void sample_call(void);")
+                val linuxResources = resources.resolve("linux-x86-64")
+                Files.createDirectories(linuxResources)
+                Files.write(linuxResources.resolve("libsample.so"), byteArrayOf(7, 8, 9))
+
+                KextractTool(Logger.DEFAULT).runGeneration(
+                    listOf(header.toString()),
+                    Options(
+                        targetPackage = "test",
+                        outputDir = output.toString(),
+                        jvmNativeResourcesDir = resources.toString(),
+                        multiplatform = true,
+                        libraries = listOf(Options.Library.parse("sample")),
+                    ),
+                ) shouldBe KextractTool.SUCCESS
+
+                val className = header.fileName.toString().replace(Regex("[^a-zA-Z0-9_]"), "_")
+                val jvm = output.resolve("jvmMain/kotlin/test/${className}Jvm.kt").toFile().readText()
+
+                jvm shouldContain "\"libsample.so\""
+                jvm shouldContain "\"sample\" to \"libsample.so\""
+                jvm shouldContain "System.load(bundleDirectory.resolve(libraryPath0).toAbsolutePath().normalize().toString())"
+                jvm.lineSequence().any { line -> line.endsWith(' ') } shouldBe false
+                jvm.endsWith("\n\n") shouldBe false
+            } finally {
+                Files.deleteIfExists(header)
+                output.toFile().deleteRecursively()
+                resources.toFile().deleteRecursively()
+            }
+        }
+
+        "keeps direct JVM symbol lookup when no native library is declared" {
+            val jvm = generateKmpFile("void sample_call(void);", "jvmMain", "Jvm")
+
+            jvm shouldContain "by lazy { findOrThrow(\"sample_call\") }"
+            jvm shouldNotContain "KextractNativeBootstrap"
+        }
+
         "emits common and JVM wrappers for WGPU functions" {
             val header = """
                 typedef struct WGPUDeviceImpl* WGPUDevice;

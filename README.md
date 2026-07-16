@@ -44,6 +44,8 @@ kextract [OPTIONS] headers...
 | `--output <dir>` | `-o` | Output directory for generated files (default: `.`) |
 | `--target-package <pkg>` | `-t` | Package for generated Kotlin classes |
 | `--library <lib>` | `-l` | Library to link against (prefix `:` for a path, e.g. `:/usr/lib/libfoo.so`) |
+| `--jvm-native-resources <dir>` | | Root containing platform native bundles for multiplatform JVM output |
+| `--jvm-native-library <lib>` | | JVM-only library load order; defaults to `--library` |
 | `--include-path <dir>` | `-I` | Add a directory to the clang include path |
 | `-D <NAME[=VALUE]>` | | Add a preprocessor define |
 | `--clang-arg <arg>` | `-A` | Forward an arbitrary argument to clang |
@@ -65,6 +67,26 @@ kextract [OPTIONS] headers...
 
 GNU-style concatenated options (`-DFOO=1`, `-I/path`) are accepted.  
 Argument files (`@args.txt`) are supported — one argument per line, `#` comments allowed.
+
+### KMP/JVM native library bootstrap
+
+For multiplatform generation, every `--library` is loaded automatically on JVM before the first generated symbol lookup. When another platform needs a different library name, pass one or more `--jvm-native-library` entries; they replace `--library` for JVM loading only. Libraries are loaded once, in command-line order. Initialization is thread-safe; a failed load keeps the bootstrap retryable and the original exception is propagated unchanged.
+
+To bundle libraries in the generated JVM artifact, copy them below `<output>/jvmMain/resources` before invoking kextract. If the artifact packages resources from another build directory, pass that root with `--jvm-native-resources <dir>` instead:
+
+| Resource directory | `--library sample` entry |
+|---|---|
+| `darwin-aarch64` | `libsample.dylib` |
+| `darwin-x86-64` | `libsample.dylib` |
+| `linux-aarch64` | `libsample.so` |
+| `linux-x86-64` | `libsample.so` |
+| `win32-x86-64` | `sample.dll` |
+
+kextract recursively indexes the selected platform directory and embeds each relative path and SHA-256 digest in the JVM source. At runtime the complete directory is extracted to a content-addressed cache so sibling native dependencies keep their layout. The default cache root is `${java.io.tmpdir}/kextract-native`; override it with the `kextract.native.cache.dir` system property. Extraction uses a cross-process file lock, validates cached content, and replaces stale files atomically when the filesystem supports it.
+
+Named libraries missing from the bundle fall back to `System.loadLibrary`. A `--library :/absolute/path` entry uses `System.load` with a normalized absolute path. Declare dependencies that require an explicit load before their consumers, for example `--library dependency --library sample`. Libraries resolved by the operating-system loader should use relative loader paths (`$ORIGIN` on Linux or `@loader_path` on macOS); on Windows, declare dependent DLLs first.
+
+The bootstrap runs only while a generated symbol address is first initialized. Once that address and its downcall handle are lazy-initialized, normal native calls add no bootstrap check.
 
 ### C example
 

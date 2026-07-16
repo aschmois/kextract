@@ -22,11 +22,22 @@ internal fun generateKmpSources(
     header: String,
     packageName: String = "sample.bindings",
     callbackBindings: CallbackBindingsConfig? = null,
+    libraries: List<Options.Library> = emptyList(),
+    jvmNativeLibraries: List<Options.Library> = emptyList(),
+    writeJvmResources: (Path) -> Unit = {},
 ): GeneratedKmpSources {
     val workspace = Files.createTempDirectory("kextract-kmp-source")
     val input = workspace.resolve("fixture.h")
     return try {
-        generateKmpSourcesFromHeaderPath(header, input, packageName, callbackBindings)
+        generateKmpSourcesFromHeaderPath(
+            header,
+            input,
+            packageName,
+            callbackBindings,
+            libraries,
+            jvmNativeLibraries,
+            writeJvmResources,
+        )
     } finally {
         workspace.toFile().deleteRecursively()
     }
@@ -37,10 +48,14 @@ internal fun generateKmpSourcesFromHeaderPath(
     input: Path,
     packageName: String = "sample.bindings",
     callbackBindings: CallbackBindingsConfig? = null,
+    libraries: List<Options.Library> = emptyList(),
+    jvmNativeLibraries: List<Options.Library> = emptyList(),
+    writeJvmResources: (Path) -> Unit = {},
 ): GeneratedKmpSources {
     val output = Files.createTempDirectory("kextract-kmp-source-out")
     return try {
         input.toFile().writeText(header)
+        writeJvmResources(output.resolve("jvmMain/resources"))
         KextractTool(Logger.DEFAULT).runGeneration(
             listOf(input.toString()),
             Options(
@@ -48,6 +63,8 @@ internal fun generateKmpSourcesFromHeaderPath(
                 outputDir = output.toString(),
                 multiplatform = true,
                 callbackBindings = callbackBindings,
+                libraries = libraries,
+                jvmNativeLibraries = jvmNativeLibraries,
             ),
         ) shouldBe KextractTool.SUCCESS
 
@@ -117,7 +134,7 @@ internal fun compileAndInvokeGeneratedKmpJvm(
     }
 }
 
-private val KFFI_COMMON_STUB =
+internal val KFFI_COMMON_STUB =
     """
     package io.ygdrasil.kffi
 
@@ -156,7 +173,11 @@ private val KFFI_COMMON_STUB =
             policy: CallbackPolicy,
             onError: CallbackExceptionHandler,
             callback: C,
-        ): CallbackRegistration<C> = error("registration reached")
+        ): CallbackRegistration<C> = object : CallbackRegistration<C> {
+            override val callback: NativeAddress = trampoline
+            override val userdata: NativeAddress? = null
+            override fun close() = Unit
+        }
 
         fun <C : Callback> prepare(
             type: CallbackType<C>,
@@ -199,7 +220,7 @@ private val KFFI_COMMON_STUB =
     }
     """.trimIndent()
 
-private val KFFI_JVM_STUB =
+internal val KFFI_JVM_STUB =
     """
     package io.ygdrasil.kffi
 

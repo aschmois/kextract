@@ -84,6 +84,38 @@ class KotlinGenerator {
         useInitMethod: Boolean = false,
         multiplatform: Boolean = false,
         callbackBindings: ValidatedCallbackBindings = ValidatedCallbackBindings.EMPTY,
+    ): List<KotlinSourceFile> = generateWithJvmNativeBundle(
+        scoped,
+        headerName,
+        targetPackage,
+        libraries,
+        useSystemLoadLibrary,
+        splitOutput,
+        variadicArgs,
+        win32Mode,
+        dllMap,
+        useInitMethod,
+        multiplatform,
+        callbackBindings,
+        libraries,
+        KotlinJvmNativeBundleIndex(emptyList()),
+    )
+
+    internal fun generateWithJvmNativeBundle(
+        scoped: Declaration.Scoped,
+        headerName: String,
+        targetPackage: String,
+        libraries: List<Options.Library> = emptyList(),
+        useSystemLoadLibrary: Boolean = false,
+        splitOutput: Boolean = false,
+        variadicArgs: Map<String, Int> = emptyMap(),
+        win32Mode: Boolean = false,
+        dllMap: DllMap? = null,
+        useInitMethod: Boolean = false,
+        multiplatform: Boolean = false,
+        callbackBindings: ValidatedCallbackBindings = ValidatedCallbackBindings.EMPTY,
+        jvmNativeLibraries: List<Options.Library>,
+        jvmNativeBundleIndex: KotlinJvmNativeBundleIndex,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
         if (multiplatform) {
@@ -116,6 +148,9 @@ class KotlinGenerator {
                 namePlan,
                 jvmRecordLayouts,
                 abiIndex,
+                jvmNativeLibraries,
+                jvmNativeBundleIndex,
+                callbackNames,
             )
         }
 
@@ -144,6 +179,9 @@ class KotlinGenerator {
         namePlan: KotlinKmpNamePlan,
         jvmRecordLayouts: KotlinJvmRecordLayoutPlan,
         abiIndex: KotlinKmpAbiIndex,
+        jvmNativeLibraries: List<Options.Library>,
+        jvmNativeBundleIndex: KotlinJvmNativeBundleIndex,
+        privateNames: KotlinIdentifierAllocator,
     ): List<KotlinSourceFile> = buildList {
         KotlinKmpCommonBuilder(
             targetPackage,
@@ -163,6 +201,9 @@ class KotlinGenerator {
             namePlan,
             jvmRecordLayouts,
             abiIndex,
+            jvmNativeLibraries,
+            jvmNativeBundleIndex,
+            privateNames,
         ).also { scoped.accept(it); addAll(it.getFiles()) }
         KotlinKmpAndroidBuilder(
             targetPackage,

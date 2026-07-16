@@ -10,6 +10,7 @@ import org.graphiks.kextract.callbacks.CanonicalDeclarationIndex
 import org.graphiks.kextract.callbacks.ValidatedCallbackBindings
 import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.KotlinGenerator
+import org.graphiks.kextract.kotlin.KotlinJvmNativeBundleIndex
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import java.io.File
 import java.nio.file.Path
@@ -176,6 +177,12 @@ class KextractTool(private val logger: Logger) {
         require(options.multiplatform || options.callbackBindings == null) {
             "callbackBindings requires multiplatform generation"
         }
+        require(options.multiplatform || options.jvmNativeResourcesDir == null) {
+            "jvmNativeResourcesDir requires multiplatform generation"
+        }
+        require(options.multiplatform || options.jvmNativeLibraries.isEmpty()) {
+            "jvmNativeLibraries requires multiplatform generation"
+        }
         var d = decl
         d = IncludeFilter(options.includeHelper).scan(d)
         d = DuplicateFilter().scan(d)
@@ -195,13 +202,25 @@ class KextractTool(private val logger: Logger) {
             ValidatedCallbackBindings.EMPTY
         }
         val transformed = NameMangler(headerName).scan(d)
-        return KotlinGenerator().generate(
+        val jvmNativeLibraries = options.jvmNativeLibraries.ifEmpty { options.libraries }
+        val jvmNativeBundleIndex = if (options.multiplatform && jvmNativeLibraries.isNotEmpty()) {
+            KotlinJvmNativeBundleIndex.scan(
+                options.jvmNativeResourcesDir?.let(Path::of)
+                    ?: Path.of(options.outputDir).resolve("jvmMain/resources"),
+                jvmNativeLibraries,
+            )
+        } else {
+            KotlinJvmNativeBundleIndex(emptyList())
+        }
+        return KotlinGenerator().generateWithJvmNativeBundle(
             transformed, headerName, options.targetPackage,
             options.libraries, options.useSystemLoadLibrary,
             options.splitOutput, options.variadicArgs,
             options.win32Mode, options.dllMap,
             options.useInitMethod, options.multiplatform,
             callbackBindings,
+            jvmNativeLibraries,
+            jvmNativeBundleIndex,
         )
     }
 

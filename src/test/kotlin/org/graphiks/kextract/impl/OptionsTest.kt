@@ -13,29 +13,36 @@ class OptionsTest {
         val options = Options()
         assertEquals("", options.targetPackage)
         assertEquals(".", options.outputDir)
+        assertNull(options.jvmNativeResourcesDir)
         assertEquals(false, options.useSystemLoadLibrary)
         assertTrue(options.clangArgs.isEmpty())
         assertTrue(options.libraries.isEmpty())
+        assertTrue(options.jvmNativeLibraries.isEmpty())
         assertNull(options.sharedClassName)
     }
 
     @Test
     fun `Options constructor sets all properties`() {
         val lib = Options.Library.parse("mylib")
+        val jvmLib = Options.Library.parse("myjvmlib")
         val options = Options(
             targetPackage      = "org.test",
             outputDir          = "/output",
+            jvmNativeResourcesDir = "/resources",
             useSystemLoadLibrary = true,
             clangArgs          = listOf("-I/include"),
             libraries          = listOf(lib),
+            jvmNativeLibraries = listOf(jvmLib),
             sharedClassName    = "Symbols"
         )
 
         assertEquals("org.test", options.targetPackage)
         assertEquals("/output", options.outputDir)
+        assertEquals("/resources", options.jvmNativeResourcesDir)
         assertEquals(true, options.useSystemLoadLibrary)
         assertEquals(listOf("-I/include"), options.clangArgs)
         assertEquals(1, options.libraries.size)
+        assertEquals(listOf(jvmLib), options.jvmNativeLibraries)
         assertEquals("Symbols", options.sharedClassName)
     }
 
