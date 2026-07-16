@@ -246,7 +246,9 @@ class KotlinHeaderBuilder(
             return
         }
 
-        val type = TypeMapper.map(decl.type())
+        val enumDecl = KotlinEnumSupport.resolveEnum(decl.type())
+        val generatedEnumName = enumDecl?.let(toplevel::generatedEnumKotlinName)
+        val type = generatedEnumName ?: TypeMapper.map(decl.type())
 
         // Skip string-valued constants when the type is MemorySegment (e.g. char* macros):
         // a Kotlin String literal cannot be assigned to a MemorySegment at compile time.
@@ -270,8 +272,12 @@ class KotlinHeaderBuilder(
         builder.appendLine(" */")
 
         // Format the value as a valid Kotlin literal, fixing type mismatches with casts
-        val enumDecl = KotlinEnumSupport.resolveEnum(decl.type())
-        val kotlinValue = constantKotlinLiteral(value, valueStr, type, enumDecl)
+        val kotlinValue = constantKotlinLiteral(
+            value,
+            valueStr,
+            type,
+            enumDecl.takeIf { generatedEnumName != null },
+        )
 
         // Constant
         builder.appendLine("fun ${name}(): ${type} = $kotlinValue")

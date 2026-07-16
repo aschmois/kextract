@@ -7,10 +7,15 @@ import io.kotest.matchers.collections.shouldHaveAtLeastSize
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.kotest.matchers.string.shouldNotContain
+import org.graphiks.kextract.Declaration
+import org.graphiks.kextract.Position
+import org.graphiks.kextract.Type
 import org.graphiks.kextract.pipeline.NameMangler
 import org.graphiks.kextract.kotlin.KotlinGenerator
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.pipeline.KextractTool
+import org.graphiks.kextract.pipeline.Logger
+import org.graphiks.kextract.pipeline.Options
 import org.jetbrains.kotlin.cli.common.ExitCode
 import org.jetbrains.kotlin.cli.jvm.K2JVMCompiler
 import java.net.URLClassLoader
@@ -54,6 +59,61 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
     /** Concatenates all generated source file contents. */
     fun generate(objcSource: String, pkg: String = "test"): String =
         generateAll(objcSource, pkg).joinToString("\n") { it.contents }
+
+    /** Runs every production filter and reads back all Kotlin files written by the tool. */
+    fun generateWithPipeline(objcSource: String, pkg: String = "test"): List<KotlinSourceFile> {
+        val workspace = Files.createTempDirectory("kextract_objc_pipeline_test_")
+        val input = workspace.resolve("fixture.h")
+        val output = workspace.resolve("output")
+        return try {
+            Files.writeString(input, objcSource)
+            KextractTool(Logger.DEFAULT).runGeneration(
+                listOf(input.toString()),
+                Options(
+                    clangArgs = listOf("-x", "objective-c"),
+                    targetPackage = pkg,
+                    outputDir = output.toString(),
+                ),
+            ) shouldBe KextractTool.SUCCESS
+
+            Files.walk(output).use { paths ->
+                paths
+                    .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".kt") }
+                    .sorted()
+                    .map { path ->
+                        KotlinSourceFile(
+                            packageName = pkg,
+                            className = path.fileName.toString().removeSuffix(".kt"),
+                            contents = Files.readString(path),
+                        )
+                    }
+                    .toList()
+            }
+        } finally {
+            workspace.toFile().deleteRecursively()
+        }
+    }
+
+    fun generateManual(vararg declarations: Declaration): List<KotlinSourceFile> =
+        KotlinGenerator().generate(
+            Declaration.toplevel(Position.NO_POSITION, *declarations),
+            "manual.h",
+            "test",
+        )
+
+    fun enumConstant(name: String, value: Long): Declaration.Constant =
+        Declaration.constant(
+            Position.NO_POSITION,
+            name,
+            value,
+            Type.primitive(Type.Primitive.Kind.Long),
+        )
+
+    fun markSkipped(declaration: Declaration) {
+        val skipClass = Class.forName("org.graphiks.kextract.DeclarationImpl\$Skip")
+        val skip = skipClass.getField("INSTANCE").get(null) as Declaration.Attribute
+        declaration.addAttribute(skip)
+    }
 
     fun compileAndInvokeLong(
         files: List<KotlinSourceFile>,
@@ -588,6 +648,214 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
                 }
             """.trimIndent().replace("<INDENTED_BLANK_LINE>", "    ")
             src shouldContain historicalDeclaration
+        }
+    }
+
+    "enum-typed macros through the full generation pipeline" - {
+        "an enum member and same-name macro with another value both survive" {
+            val files = generateWithPipeline("""
+                typedef enum : long {
+                    KxPipelineCollision = 1
+                } KxPipelineCollisionType;
+                #define KxPipelineCollision ((KxPipelineCollisionType)2)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            src shouldContain "KxPipelineCollision(1L), KxPipelineCollision_kextract1(2L);"
+            src shouldContain "fun KxPipelineCollision(): KxPipelineCollisionType = KxPipelineCollisionType.fromValue(2L)"
+            compileAndInvokeLong(
+                files,
+                """
+                    package test
+                    fun readPipelineCollision(): Long = KxPipelineCollision().value
+                """.trimIndent(),
+                "readPipelineCollision",
+            ) shouldBe 2L
+        }
+
+        "a same-name value in another enum does not suppress the target enum macro" {
+            val files = generateWithPipeline("""
+                typedef enum : long {
+                    KxCrossEnumShared = 1
+                } KxCrossEnumFirst;
+                typedef enum : long {
+                    KxCrossEnumSecondBase = 0
+                } KxCrossEnumSecond;
+                #define KxCrossEnumShared ((KxCrossEnumSecond)1)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            src shouldContain "KxCrossEnumSecondBase(0L), KxCrossEnumShared(1L);"
+            src shouldContain "fun KxCrossEnumShared(): KxCrossEnumSecond = KxCrossEnumSecond.fromValue(1L)"
+        }
+
+        "an anonymous enum macro stays on the literal path" {
+            val files = generateWithPipeline("""
+                #define KxAnonymousMacro ((enum { KxAnonymousInline = 1 })2)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            src shouldContain "fun KxAnonymousMacro()"
+            src shouldNotContain ".fromValue("
+        }
+
+        "a pointer-to-enum macro is not boxed as an enum" {
+            val files = generateWithPipeline("""
+                typedef enum : long {
+                    KxPointerBase = 1
+                } KxPointerType;
+                typedef KxPointerType *KxPointerAlias;
+                #define KxPointerMacro ((KxPointerAlias)0)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            src shouldNotContain "fun KxPointerMacro()"
+            src shouldNotContain "KxPointerType.fromValue("
+            src shouldNotContain "MemorySegment.fromValue("
+        }
+
+        "a generated enum and macro share the mangled Kotlin type name" {
+            val files = generateWithPipeline("""
+                typedef enum : long {
+                    KxStringBase = 1
+                } String;
+                #define KxStringExtra ((String)2)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            src shouldContain "enum class String_"
+            src shouldContain "fun KxStringExtra(): String_ = String_.fromValue(2L)"
+            compileAndInvokeLong(
+                files,
+                """
+                    package test
+                    fun readMangledEnumMacro(): Long = KxStringExtra().value
+                """.trimIndent(),
+                "readMangledEnumMacro",
+            ) shouldBe 2L
+        }
+
+        "a dollar enum name is boxed with its mangled Kotlin type" {
+            val files = generateWithPipeline("""
+                typedef enum : long {
+                    KxDollarBase = 1
+                } Kx${'$'}Dollar;
+                #define KxDollarExtra ((Kx${'$'}Dollar)2)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            src shouldContain "enum class Kx_Dollar"
+            src shouldContain "KxDollarBase(1L), KxDollarExtra(2L);"
+            src shouldContain "fun KxDollarExtra(): Kx_Dollar = Kx_Dollar.fromValue(2L)"
+            compileAndInvokeLong(
+                files,
+                """
+                    package test
+                    fun readDollarEnumMacro(): Long = KxDollarExtra().value
+                """.trimIndent(),
+                "readDollarEnumMacro",
+            ) shouldBe 2L
+        }
+
+        "a Unicode enum name is boxed with its mangled Kotlin type" {
+            val files = generateWithPipeline("""
+                typedef enum : long {
+                    KxUnicodeBase = 3
+                } KxÉtat;
+                #define KxUnicodeExtra ((KxÉtat)4)
+            """.trimIndent())
+            val src = files.joinToString("\n") { it.contents }
+
+            src shouldContain "enum class Kx_tat"
+            src shouldContain "KxUnicodeBase(3L), KxUnicodeExtra(4L);"
+            src shouldContain "fun KxUnicodeExtra(): Kx_tat = Kx_tat.fromValue(4L)"
+            compileAndInvokeLong(
+                files,
+                """
+                    package test
+                    fun readUnicodeEnumMacro(): Long = KxUnicodeExtra().value
+                """.trimIndent(),
+                "readUnicodeEnumMacro",
+            ) shouldBe 4L
+        }
+    }
+
+    "manual enum identity resolution" - {
+        "an exact skipped homonym is never redirected to a generated enum" {
+            val generatedEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxSkippedHomonym",
+                enumConstant("KxGeneratedBase", 1),
+            )
+            val skippedEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxSkippedHomonym",
+                enumConstant("KxSkippedBase", 2),
+            )
+            markSkipped(skippedEnum)
+            val macro = Declaration.constant(
+                Position.NO_POSITION,
+                "KxSkippedExactMacro",
+                3L,
+                Type.declared(skippedEnum),
+            )
+
+            val src = generateManual(generatedEnum, skippedEnum, macro)
+                .joinToString("\n") { it.contents }
+
+            src shouldNotContain "KxSkippedExactMacro(3L)"
+            src shouldNotContain "KxSkippedHomonym.fromValue(3L)"
+        }
+
+        "a portable reparse homonym is unresolved when top-level candidates are ambiguous" {
+            val firstEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxAmbiguousHomonym",
+                enumConstant("KxAmbiguousFirst", 1),
+            )
+            val secondEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxAmbiguousHomonym",
+                enumConstant("KxAmbiguousSecond", 2),
+            )
+            val reparsedEnum = Declaration.enum_(Position.NO_POSITION, "KxAmbiguousHomonym")
+            val macro = Declaration.constant(
+                Position.NO_POSITION,
+                "KxAmbiguousMacro",
+                3L,
+                Type.declared(reparsedEnum),
+            )
+
+            val src = generateManual(firstEnum, secondEnum, macro)
+                .joinToString("\n") { it.contents }
+
+            src shouldNotContain "KxAmbiguousMacro(3L)"
+            src shouldNotContain "KxAmbiguousHomonym.fromValue(3L)"
+        }
+
+        "an exact generated homonym receives enrichment only on that identity" {
+            val targetEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxExactHomonym",
+                enumConstant("KxExactTargetBase", 1),
+            )
+            val otherEnum = Declaration.enum_(
+                Position.NO_POSITION,
+                "KxExactHomonym",
+                enumConstant("KxExactOtherBase", 2),
+            )
+            val macro = Declaration.constant(
+                Position.NO_POSITION,
+                "KxExactMacro",
+                3L,
+                Type.declared(targetEnum),
+            )
+
+            val src = generateManual(targetEnum, otherEnum, macro)
+                .joinToString("\n") { it.contents }
+
+            Regex("KxExactMacro\\(3L\\)").findAll(src).count() shouldBe 1
+            src shouldContain "fun KxExactMacro(): KxExactHomonym = KxExactHomonym.fromValue(3L)"
         }
     }
 

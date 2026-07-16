@@ -5,13 +5,15 @@ import org.graphiks.kextract.DeclarationImpl.Skip
 
 class DuplicateFilter : Declaration.Visitor<Unit> {
 
-    private val constants = mutableSetOf<String>()
+    private val enumConstants = mutableSetOf<String>()
+    private val topLevelConstants = mutableSetOf<String>()
     private val variables = mutableSetOf<String>()
     private val typedefs = mutableSetOf<String>()
     private val functions = mutableSetOf<String>()
     private val objcClasses = mutableSetOf<String>()
     private val objcProtocols = mutableSetOf<String>()
     private val objcCategories = mutableSetOf<String>()
+    private var scanningEnum = false
 
     fun scan(header: Declaration.Scoped): Declaration.Scoped {
         header.members().forEach { it.accept(this) }
@@ -19,6 +21,7 @@ class DuplicateFilter : Declaration.Visitor<Unit> {
     }
 
     override fun visitConstant(constant: Declaration.Constant) {
+        val constants = if (scanningEnum) enumConstants else topLevelConstants
         if (!constants.add(constant.name())) Skip.with(constant)
     }
 
@@ -36,7 +39,13 @@ class DuplicateFilter : Declaration.Visitor<Unit> {
 
     override fun visitScoped(d: Declaration.Scoped) {
         if (d.isEnum()) {
-            d.members().forEach { it.accept(this) }
+            val previousScanningEnum = scanningEnum
+            scanningEnum = true
+            try {
+                d.members().forEach { it.accept(this) }
+            } finally {
+                scanningEnum = previousScanningEnum
+            }
         }
     }
 

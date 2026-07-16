@@ -12,6 +12,7 @@ import kotlin.io.path.writeText
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 
 class MacroParserEnumRecoveryTest {
@@ -106,6 +107,17 @@ class MacroParserEnumRecoveryTest {
         }
     }
 
+    @Test
+    fun `scoped lookup requires referentially unique declarations`() {
+        val enumDeclaration = StructurallyComparableEnum("KxIdentityType")
+        val structurallyEqualDeclaration = StructurallyComparableEnum("KxIdentityType")
+
+        assertEquals(enumDeclaration, structurallyEqualDeclaration)
+        assertSame(enumDeclaration, findUniqueScoped(enumDeclaration))
+        assertSame(enumDeclaration, findUniqueScoped(enumDeclaration, enumDeclaration))
+        assertNull(findUniqueScoped(enumDeclaration, structurallyEqualDeclaration))
+    }
+
     private fun writeFixture(): Path {
         tempDir.resolve("kx_types.h").writeText(
             """
@@ -147,5 +159,54 @@ class MacroParserEnumRecoveryTest {
         }
         recovery.isAccessible = true
         return recovery.invoke(companion, type, findUniqueScoped) as Type
+    }
+
+    private fun findUniqueScoped(vararg declarations: Declaration.Scoped): Declaration.Scoped? {
+        val treeMakerClass = Class.forName("org.graphiks.kextract.pipeline.TreeMaker")
+        val constructor = treeMakerClass.declaredConstructors.single { it.parameterCount == 0 }
+        constructor.isAccessible = true
+        val treeMaker = constructor.newInstance()
+
+        val cacheField = treeMakerClass.declaredFields.single {
+            it.name == "declarationCacheNew" && Map::class.java.isAssignableFrom(it.type)
+        }
+        cacheField.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val cache = cacheField.get(treeMaker) as MutableMap<Any, Declaration>
+        declarations.forEachIndexed { index, declaration ->
+            cache["test-key-$index"] = declaration
+        }
+
+        val lookup = treeMakerClass.declaredMethods.single {
+            it.name == "findUniqueScoped" &&
+                it.parameterCount == 2 &&
+                it.parameterTypes[0] == Declaration.Scoped.Kind::class.java &&
+                it.parameterTypes[1] == String::class.java
+        }
+        lookup.isAccessible = true
+        return lookup.invoke(
+            treeMaker,
+            Declaration.Scoped.Kind.ENUM,
+            "KxIdentityType",
+        ) as Declaration.Scoped?
+    }
+
+    private class StructurallyComparableEnum(
+        private val enumName: String,
+    ) : Declaration.Scoped {
+        override fun pos(): Position = Position.NO_POSITION
+        override fun name(): String = enumName
+        override fun members(): List<Declaration> = emptyList()
+        override fun kind(): Declaration.Scoped.Kind = Declaration.Scoped.Kind.ENUM
+        override fun <R> accept(visitor: Declaration.Visitor<R>): R = visitor.visitScoped(this)
+        override fun attributes(): Collection<Declaration.Attribute> = emptyList()
+        override fun <R : Declaration.Attribute> getAttribute(attributeClass: Class<R>): R? = null
+        override fun <R : Declaration.Attribute> addAttribute(attribute: R) =
+            error("attributes are not supported by this test declaration")
+
+        override fun equals(other: Any?): Boolean =
+            other is StructurallyComparableEnum && enumName == other.enumName
+
+        override fun hashCode(): Int = enumName.hashCode()
     }
 }

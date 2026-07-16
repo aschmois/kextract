@@ -7,6 +7,7 @@ import org.graphiks.kextract.cli.DllMap
 import org.graphiks.kextract.kotlin.models.KotlinSourceFile
 import org.graphiks.kextract.kotlin.utils.KotlinNameMangler
 import org.graphiks.kextract.pipeline.Options
+import java.util.IdentityHashMap
 
 /**
  * Top-level builder for Kotlin files.
@@ -57,7 +58,9 @@ class KotlinToplevelBuilder(
      */
     private var _classMethodSignatures: Map<String, Set<String>> = emptyMap()
 
-    private var _externalEnumConstants: Map<String, List<Declaration.Constant>> = emptyMap()
+    private var _externalEnumConstants =
+        IdentityHashMap<Declaration.Scoped, MutableList<Declaration.Constant>>()
+    private var _topLevelEnumsByName: Map<String, List<Declaration.Scoped>> = emptyMap()
 
     /** Counter for round-robin split across multiple function files (avoids <clinit> > 64KB). */
     private var _functionBatch: Int = 0
@@ -248,7 +251,7 @@ class KotlinToplevelBuilder(
                 // clang creates a named ENUM scoped with the typedef name, and the redundant
                 // typedef is filtered — so this is the only place we emit the enum class.
                 if (decl.name().isNotEmpty()) {
-                    val externalConstants = _externalEnumConstants[decl.name()].orEmpty()
+                    val externalConstants = _externalEnumConstants[decl].orEmpty()
                     val target = if (splitOutput) {
                         val slotKey = if (KotlinEnumSupport.isOptionsStyle(decl.name())) "options" else "enums"
                         getOrCreateSlot(slotKey)
@@ -485,36 +488,49 @@ class KotlinToplevelBuilder(
     }
 
     private fun collectExternalEnumConstants(decl: Declaration.Scoped) {
-        val generatedEnums = decl.members()
+        val enumIndex = linkedMapOf<String, MutableList<Declaration.Scoped>>()
+        decl.members()
             .filterIsInstance<Declaration.Scoped>()
             .filter {
                 it.kind() == Declaration.Scoped.Kind.ENUM &&
-                    it.name().isNotEmpty() &&
-                    !Skip.isPresent(it)
+                    it.name().isNotEmpty()
             }
-            .associateBy { it.name() }
+            .forEach { enumDecl ->
+                val candidates = enumIndex.getOrPut(enumDecl.name()) { mutableListOf() }
+                if (candidates.none { it === enumDecl }) candidates.add(enumDecl)
+            }
+        _topLevelEnumsByName = enumIndex
 
-        val enumMembersByName = generatedEnums.values
-            .flatMap { it.members().filterIsInstance<Declaration.Constant>() }
-            .groupBy { it.name() }
-
-        val external = linkedMapOf<String, MutableList<Declaration.Constant>>()
+        val external = IdentityHashMap<Declaration.Scoped, MutableList<Declaration.Constant>>()
         for (constant in decl.members().filterIsInstance<Declaration.Constant>()) {
             if (Skip.isPresent(constant)) continue
-            val value = numericValue(constant.value())
-            val exactDuplicate = value != null && enumMembersByName[constant.name()]
-                .orEmpty()
-                .any { numericValue(it.value()) == value }
+            val value = numericValue(constant.value()) ?: continue
+            val resolvedEnum = KotlinEnumSupport.resolveEnum(constant.type()) ?: continue
+            val generatedEnum = resolveGeneratedEnum(resolvedEnum) ?: continue
+            val exactDuplicate = generatedEnum.members()
+                .filterIsInstance<Declaration.Constant>()
+                .any {
+                    it.name() == constant.name() && numericValue(it.value()) == value
+                }
             if (exactDuplicate) {
                 Skip.with(constant)
                 continue
             }
-            val enumDecl = KotlinEnumSupport.resolveEnum(constant.type()) ?: continue
-            if (value != null && generatedEnums[enumDecl.name()] != null) {
-                external.getOrPut(enumDecl.name()) { mutableListOf() }.add(constant)
-            }
+            external.getOrPut(generatedEnum) { mutableListOf() }.add(constant)
         }
         _externalEnumConstants = external
+    }
+
+    fun generatedEnumKotlinName(enumDecl: Declaration.Scoped): String? =
+        resolveGeneratedEnum(enumDecl)?.let { javaName(it.name()) }
+
+    private fun resolveGeneratedEnum(enumDecl: Declaration.Scoped): Declaration.Scoped? {
+        val candidates = _topLevelEnumsByName[enumDecl.name()].orEmpty()
+        val exact = candidates.firstOrNull { it === enumDecl }
+        if (exact != null) return if (Skip.isPresent(exact)) null else exact
+
+        val onlyCandidate = candidates.singleOrNull() ?: return null
+        return if (Skip.isPresent(onlyCandidate)) null else onlyCandidate
     }
 
     fun javaName(name: String): String = KotlinNameMangler.mangle(name)
