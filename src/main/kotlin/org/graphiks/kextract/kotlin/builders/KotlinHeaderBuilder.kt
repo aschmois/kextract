@@ -289,9 +289,13 @@ class KotlinHeaderBuilder(
             is Int -> value.toLong()
             else -> null
         }
-        if (enumDecl != null && enumValue != null && !KotlinEnumSupport.isOptionsStyle(enumDecl.name())) {
+        if (enumDecl != null && enumValue != null) {
             val literal = if (enumValue == Long.MIN_VALUE) "Long.MIN_VALUE" else "${enumValue}L"
-            return "$type.fromValue($literal)"
+            return if (KotlinEnumSupport.isOptionsStyle(enumDecl.name())) {
+                "$type($literal)"
+            } else {
+                "$type.fromValue($literal)"
+            }
         }
         return when (value) {
             is String -> "\"${value}\""

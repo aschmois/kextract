@@ -261,12 +261,8 @@ class KotlinToplevelBuilder(
             else -> {
                 // TOPLEVEL: pre-scan before generating code.
                 if (decl.kind() == Declaration.Scoped.Kind.TOPLEVEL) {
-                    // Collect the names of all enum constants from named ENUMs inside TOPLEVEL.
-                    // Mark those named-ENUM scopeds and their constants as Skip so they are not
-                    // re-visited as standalone items.
-                    // Also mark any top-level macro Declaration.Constant whose name matches an
-                    // enum constant (clang synthesises these for each ObjC enum member).
-                    val enumConstantNames = mutableSetOf<String>()
+                    // Mark constants from named ENUMs inside TOPLEVEL as Skip so they are not
+                    // re-visited as standalone items. They will be emitted inside their enum.
                     decl.members()
                         .filterIsInstance<Declaration.Scoped>()
                         .filter { it.kind() == Declaration.Scoped.Kind.ENUM && it.name().isNotEmpty() && !Skip.isPresent(it) }
@@ -274,19 +270,9 @@ class KotlinToplevelBuilder(
                             enumScoped.members()
                                 .filterIsInstance<Declaration.Constant>()
                                 .forEach { constant ->
-                                    enumConstantNames.add(constant.name())
-                                    // The constants themselves will be emitted inside the enum
-                                    // class; mark them so they are not re-emitted as globals.
                                     Skip.with(constant)
                                 }
                         }
-                    // Suppress macro-synthesised constants that shadow enum member names
-                    if (enumConstantNames.isNotEmpty()) {
-                        decl.members()
-                            .filterIsInstance<Declaration.Constant>()
-                            .filter { it.name() in enumConstantNames && !Skip.isPresent(it) }
-                            .forEach { constant -> Skip.with(constant) }
-                    }
                     collectExternalEnumConstants(decl)
                     // Collect generated ObjCClass names so the class builder can emit superclass
                     // clauses only for classes that will actually be generated (GRA-79).
@@ -508,15 +494,26 @@ class KotlinToplevelBuilder(
             }
             .associateBy { it.name() }
 
+        val enumMembersByName = generatedEnums.values
+            .flatMap { it.members().filterIsInstance<Declaration.Constant>() }
+            .groupBy { it.name() }
+
         val external = linkedMapOf<String, MutableList<Declaration.Constant>>()
-        decl.members()
-            .filterIsInstance<Declaration.Constant>()
-            .filter { !Skip.isPresent(it) && numericValue(it.value()) != null }
-            .forEach { constant ->
-                val enumDecl = KotlinEnumSupport.resolveEnum(constant.type()) ?: return@forEach
-                if (generatedEnums[enumDecl.name()] == null) return@forEach
+        for (constant in decl.members().filterIsInstance<Declaration.Constant>()) {
+            if (Skip.isPresent(constant)) continue
+            val value = numericValue(constant.value())
+            val exactDuplicate = value != null && enumMembersByName[constant.name()]
+                .orEmpty()
+                .any { numericValue(it.value()) == value }
+            if (exactDuplicate) {
+                Skip.with(constant)
+                continue
+            }
+            val enumDecl = KotlinEnumSupport.resolveEnum(constant.type()) ?: continue
+            if (value != null && generatedEnums[enumDecl.name()] != null) {
                 external.getOrPut(enumDecl.name()) { mutableListOf() }.add(constant)
             }
+        }
         _externalEnumConstants = external
     }
 

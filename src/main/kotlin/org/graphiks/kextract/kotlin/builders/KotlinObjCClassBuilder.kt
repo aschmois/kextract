@@ -197,11 +197,11 @@ class KotlinObjCClassBuilder(
                 builder.appendLine("return ObjCRuntime.msgSendStret($retLayout, $receiver, sel$argsExpr) as $retKotlin")
             }
             else -> {
-                val enumDecl = resolveDecl(retType, Declaration.Scoped.Kind.ENUM)
+                val enumDecl = KotlinEnumSupport.resolveEnum(retType)
                 if (enumDecl != null) {
                     // Enum/value-class return: get the underlying Long and re-box it.
                     val raw = "ObjCRuntime.msgSend(ValueLayout.JAVA_LONG, $receiver, sel$argsExpr) as Long"
-                    if (isOptionsStyle(enumDecl.name()))
+                    if (KotlinEnumSupport.isOptionsStyle(enumDecl.name()))
                         builder.appendLine("return $retKotlin($raw)")
                     else
                         builder.appendLine("return $retKotlin.fromValue($raw)")
@@ -316,10 +316,10 @@ class KotlinObjCClassBuilder(
                 builder.appendLine("return ObjCRuntime.msgSendStret($retLayout, ptr, sel) as $retKotlin")
             }
             else -> {
-                val enumDecl = resolveDecl(prop.type(), Declaration.Scoped.Kind.ENUM)
+                val enumDecl = KotlinEnumSupport.resolveEnum(prop.type())
                 if (enumDecl != null) {
                     val raw = "ObjCRuntime.msgSend(ValueLayout.JAVA_LONG, ptr, sel) as Long"
-                    if (isOptionsStyle(enumDecl.name()))
+                    if (KotlinEnumSupport.isOptionsStyle(enumDecl.name()))
                         builder.appendLine("return $retKotlin($raw)")
                     else
                         builder.appendLine("return $retKotlin.fromValue($raw)")
@@ -498,9 +498,9 @@ class KotlinObjCClassBuilder(
          * - Everything else → `name` unchanged.
          */
         fun unboxedArgExpr(type: Type, name: String): String {
-            val enumDecl = resolveDecl(type, Declaration.Scoped.Kind.ENUM)
+            val enumDecl = KotlinEnumSupport.resolveEnum(type)
             if (enumDecl != null) {
-                return if (isOptionsStyle(enumDecl.name())) "$name.rawValue" else "$name.value"
+                return if (KotlinEnumSupport.isOptionsStyle(enumDecl.name())) "$name.rawValue" else "$name.value"
             }
             val structDecl = resolveDecl(type, Declaration.Scoped.Kind.STRUCT)
             if (structDecl != null) {
@@ -526,9 +526,6 @@ class KotlinObjCClassBuilder(
                 resolveDecl(type.type(), target)
             else -> null
         }
-
-        private fun isOptionsStyle(name: String): Boolean =
-            name.endsWith("Options") || name.endsWith("Flags") || name.endsWith("Mask")
     }
 
     /**

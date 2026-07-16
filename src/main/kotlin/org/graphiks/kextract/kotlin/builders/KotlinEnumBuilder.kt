@@ -28,11 +28,18 @@ class KotlinEnumBuilder(
             EnumEntry(toplevel.javaName(it.name()), it.value().toLongValue())
         }.toMutableList()
         val seenValues = entries.mapTo(mutableSetOf()) { it.value }
+        val seenNames = entries.mapTo(mutableSetOf()) { it.name }
         for (constant in externalConstants) {
             val value = constant.value().toLongValue()
-            if (seenValues.add(value)) {
-                entries += EnumEntry(toplevel.javaName(constant.name()), value)
+            if (!seenValues.add(value)) continue
+
+            val baseName = toplevel.javaName(constant.name())
+            var entryName = baseName
+            var suffix = 1
+            while (!seenNames.add(entryName)) {
+                entryName = "${baseName}_kextract${suffix++}"
             }
+            entries += EnumEntry(entryName, value)
         }
         return entries
     }
@@ -72,7 +79,7 @@ class KotlinEnumBuilder(
         builder.appendLine("enum class ${name}(val value: Long) {")
         builder.indent()
         builder.appendLine("${renderedEntries};")
-        builder.appendLine()
+        builder.appendBlankLine()
         builder.appendLine("companion object {")
         builder.indent()
         // Use firstOrNull so unknown values (e.g. future SDK additions) produce a clear error

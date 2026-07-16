@@ -521,6 +521,75 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
         }
     }
 
+    "enum-typed macro edge cases" - {
+        "matching a declared value does not add a duplicate entry" {
+            val src = generate("""
+                typedef enum : long { KxKnown = 1 } KxAliasType;
+                #define KxKnownAlias ((KxAliasType)1)
+            """.trimIndent())
+            src shouldNotContain "KxKnownAlias(1L)"
+            src shouldContain "fun KxKnownAlias(): KxAliasType = KxAliasType.fromValue(1L)"
+        }
+
+        "multiple external macros sharing a value add one canonical entry" {
+            val src = generate("""
+                typedef enum : long { KxBase = 1 } KxSharedType;
+                #define KxExternalFirst ((KxSharedType)42)
+                #define KxExternalSecond ((KxSharedType)42)
+            """.trimIndent())
+            src shouldContain "KxExternalFirst(42L)"
+            src shouldNotContain "KxExternalSecond(42L)"
+            src shouldContain "fun KxExternalFirst(): KxSharedType = KxSharedType.fromValue(42L)"
+            src shouldContain "fun KxExternalSecond(): KxSharedType = KxSharedType.fromValue(42L)"
+        }
+
+        "same name with another value receives a deterministic suffix" {
+            val src = generate("""
+                typedef enum : long { KxCollision = 1 } KxCollisionType;
+                #define KxCollision ((KxCollisionType)2)
+            """.trimIndent())
+            src shouldContain "KxCollision(1L)"
+            src shouldContain "KxCollision_kextract1(2L)"
+            src shouldContain "fun KxCollision(): KxCollisionType = KxCollisionType.fromValue(2L)"
+        }
+
+        "options-style macros use the value-class constructor" {
+            val src = generate("""
+                typedef enum : long {
+                    KxFeatureA = 1,
+                    KxFeatureB = 2
+                } KxFeatureOptions;
+                #define KxCombinedFeatures ((KxFeatureOptions)3)
+            """.trimIndent())
+            src shouldContain "fun KxCombinedFeatures(): KxFeatureOptions = KxFeatureOptions(3L)"
+            src shouldNotContain "KxCombinedFeatures(3L)"
+        }
+
+        "primitive macro generation remains unchanged" {
+            val src = generate("#define KX_ANSWER 42")
+            src shouldContain "fun KX_ANSWER(): Int = (42).toInt()"
+        }
+
+        "regular enum without external macros keeps its exact declaration" {
+            val src = generate("""
+                typedef enum : long {
+                    KxStableZero = 0,
+                    KxStableOne = 1
+                } KxStableType;
+            """.trimIndent())
+            src shouldContain """
+                enum class KxStableType(val value: Long) {
+                    KxStableZero(0L), KxStableOne(1L);
+
+                    companion object {
+                        fun fromValue(v: Long): KxStableType = entries.firstOrNull { it.value == v }
+                            ?: error("Unknown KxStableType value: ${'$'}v")
+                    }
+                }
+            """.trimIndent()
+        }
+    }
+
     "NS_OPTIONS generates @JvmInline value class" - {
         val src = generate("""
             typedef enum : long {
