@@ -28,6 +28,20 @@ class DuplicateFilterTest {
     }
 
     @Test
+    fun `legacy enum-typed non-numeric macro homonym is suppressed`() {
+        val enumMember = constant("KxNonNumericShared", 1)
+        val enumDecl = Declaration.enum_(Position.NO_POSITION, "KxNonNumericType", enumMember)
+        val macro = constant("KxNonNumericShared", 2.0f, Type.declared(enumDecl))
+
+        DuplicateFilter().scan(
+            Declaration.toplevel(Position.NO_POSITION, enumDecl, macro),
+        )
+
+        assertFalse(isSkipped(enumMember))
+        assertTrue(isSkipped(macro))
+    }
+
+    @Test
     fun `legacy primitive macro homonymous with an enum member is suppressed`() {
         val enumMember = constant("KxPrimitiveShared", 1)
         val macro = constant("KxPrimitiveShared", 2)
@@ -116,7 +130,7 @@ class DuplicateFilterTest {
 
     private fun constant(
         name: String,
-        value: Int,
+        value: Any,
         type: Type = intType,
     ): Declaration.Constant =
         Declaration.constant(Position.NO_POSITION, name, value, type)

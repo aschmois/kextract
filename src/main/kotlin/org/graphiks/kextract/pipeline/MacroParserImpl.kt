@@ -25,8 +25,7 @@ internal class MacroParserImpl private constructor(
     val macroTable: MacroTable = MacroTable()
 
     companion object {
-        private val REPARSED_ENUM_ERROR =
-            Regex("^enum ([\\p{L}_$][\\p{L}\\p{M}\\p{N}_$]*)$")
+        private const val REPARSED_ENUM_PREFIX = "enum "
 
         fun make(treeMaker: TreeMaker, logger: Logger, tu: TranslationUnit, args: Collection<String>): MacroParserImpl {
             val reparser: ClangReparser = try {
@@ -44,13 +43,41 @@ internal class MacroParserImpl private constructor(
             findUniqueScoped: (Declaration.Scoped.Kind, String) -> Declaration.Scoped?,
         ): Type {
             if (type !is TypeImpl.ErronrousTypeImpl) return type
-            val match = REPARSED_ENUM_ERROR.matchEntire(type.erroneousName) ?: return type
+            val name = reparsedEnumName(type.erroneousName) ?: return type
             val enumDecl = findUniqueScoped(
                 Declaration.Scoped.Kind.ENUM,
-                match.groupValues[1],
+                name,
             ) ?: return type
             return Type.declared(enumDecl)
         }
+
+        private fun reparsedEnumName(erroneousName: String): String? {
+            if (!erroneousName.startsWith(REPARSED_ENUM_PREFIX)) return null
+            val name = erroneousName.substring(REPARSED_ENUM_PREFIX.length)
+            if (name.isEmpty()) return null
+
+            var index = 0
+            var codePoint = name.codePointAt(index)
+            if (!isIdentifierStart(codePoint)) return null
+            index += Character.charCount(codePoint)
+
+            while (index < name.length) {
+                codePoint = name.codePointAt(index)
+                if (!isIdentifierPart(codePoint)) return null
+                index += Character.charCount(codePoint)
+            }
+            return name
+        }
+
+        private fun isIdentifierStart(codePoint: Int): Boolean =
+            codePoint == '_'.code ||
+                codePoint == '$'.code ||
+                Character.isUnicodeIdentifierStart(codePoint)
+
+        private fun isIdentifierPart(codePoint: Int): Boolean =
+            codePoint == '_'.code ||
+                codePoint == '$'.code ||
+                Character.isUnicodeIdentifierPart(codePoint)
     }
 
     internal fun recoverReparsedEnumType(type: Type): Type =

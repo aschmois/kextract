@@ -117,6 +117,26 @@ class MacroParserEnumRecoveryTest {
     }
 
     @Test
+    fun `exact enum name accepts Unicode identifier start exception at the start`() {
+        assertExactEnumNameRecovers("℘Leading")
+    }
+
+    @Test
+    fun `exact enum name accepts Unicode identifier start exception in continuation`() {
+        assertExactEnumNameRecovers("Kx℘Later")
+    }
+
+    @Test
+    fun `exact enum name accepts Unicode identifier part exception in continuation`() {
+        assertExactEnumNameRecovers("Kx·Part")
+    }
+
+    @Test
+    fun `exact enum name preserves supplementary Unicode identifier code points`() {
+        assertExactEnumNameRecovers("Kx𐐀Type")
+    }
+
+    @Test
     fun `enum recovery preserves unsupported and already declared types`() {
         val originalEnum = Declaration.enum_(Position.NO_POSITION, "KxEventType")
         val alreadyDeclared = Type.declared(originalEnum)
@@ -204,6 +224,19 @@ class MacroParserEnumRecoveryTest {
         recoverReparsedEnumType(type) { _, _ ->
             error("lookup must not run for $type")
         }
+
+    private fun assertExactEnumNameRecovers(name: String) {
+        val originalEnum = Declaration.enum_(Position.NO_POSITION, name)
+
+        val recovered = recoverReparsedEnumType(Type.error("enum $name")) { kind, candidate ->
+            assertEquals(Declaration.Scoped.Kind.ENUM, kind)
+            assertEquals(name, candidate)
+            originalEnum
+        }
+
+        val declared = assertIs<Type.Declared>(recovered)
+        assertSame(originalEnum, declared.tree())
+    }
 
     private fun recoverReparsedEnumType(
         type: Type,
