@@ -577,16 +577,17 @@ class ObjCGeneratorIntegrationTest : FreeSpec({
                     KxStableOne = 1
                 } KxStableType;
             """.trimIndent())
-            src shouldContain """
+            val historicalDeclaration = """
                 enum class KxStableType(val value: Long) {
                     KxStableZero(0L), KxStableOne(1L);
-
+                <INDENTED_BLANK_LINE>
                     companion object {
                         fun fromValue(v: Long): KxStableType = entries.firstOrNull { it.value == v }
                             ?: error("Unknown KxStableType value: ${'$'}v")
                     }
                 }
-            """.trimIndent()
+            """.trimIndent().replace("<INDENTED_BLANK_LINE>", "    ")
+            src shouldContain historicalDeclaration
         }
     }
 

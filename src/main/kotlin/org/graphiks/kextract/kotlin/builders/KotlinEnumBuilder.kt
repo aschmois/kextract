@@ -79,7 +79,7 @@ class KotlinEnumBuilder(
         builder.appendLine("enum class ${name}(val value: Long) {")
         builder.indent()
         builder.appendLine("${renderedEntries};")
-        builder.appendBlankLine()
+        builder.appendLine()
         builder.appendLine("companion object {")
         builder.indent()
         // Use firstOrNull so unknown values (e.g. future SDK additions) produce a clear error
