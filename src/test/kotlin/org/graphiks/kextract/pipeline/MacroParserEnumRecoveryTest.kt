@@ -24,6 +24,14 @@ class MacroParserEnumRecoveryTest {
     @Test
     fun `PCH-backed macro survives the complete generation pipeline`() {
         val input = writeFixture()
+        val parsedMacroValue = KextractTool.parse(
+            listOf(input.toString()),
+            *parserOptions().toTypedArray(),
+        ).members()
+            .filterIsInstance<Declaration.Constant>()
+            .single { it.name() == "KxAnyEventType" }
+            .value()
+        val expectedLiteral = "${assertIs<Long>(parsedMacroValue)}L"
         val output = tempDir.resolve("output")
         val errors = ByteArrayOutputStream()
         val logger = Logger(
@@ -45,10 +53,10 @@ class MacroParserEnumRecoveryTest {
             .walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .joinToString("\n") { it.readText() }
-        assertContains(generated, "KxAnyEventType(-1L)")
+        assertContains(generated, "KxAnyEventType($expectedLiteral)")
         assertContains(
             generated,
-            "fun KxAnyEventType(): KxEventType = KxEventType.fromValue(-1L)",
+            "fun KxAnyEventType(): KxEventType = KxEventType.fromValue($expectedLiteral)",
         )
     }
 
