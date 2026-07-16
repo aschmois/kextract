@@ -45,6 +45,7 @@ kextract [OPTIONS] headers...
 | `--target-package <pkg>` | `-t` | Package for generated Kotlin classes |
 | `--library <lib>` | `-l` | Library to link against (prefix `:` for a path, e.g. `:/usr/lib/libfoo.so`) |
 | `--jvm-native-resources <dir>` | | Root containing platform native bundles for multiplatform JVM output |
+| `--jvm-native-library <lib>` | | JVM-only library load order; defaults to `--library` |
 | `--include-path <dir>` | `-I` | Add a directory to the clang include path |
 | `-D <NAME[=VALUE]>` | | Add a preprocessor define |
 | `--clang-arg <arg>` | `-A` | Forward an arbitrary argument to clang |
@@ -69,7 +70,7 @@ Argument files (`@args.txt`) are supported — one argument per line, `#` commen
 
 ### KMP/JVM native library bootstrap
 
-For multiplatform generation, every `--library` is loaded automatically on JVM before the first generated symbol lookup. Libraries are loaded once, in command-line order. Initialization is thread-safe; a failed load keeps the bootstrap retryable and the original exception is propagated unchanged.
+For multiplatform generation, every `--library` is loaded automatically on JVM before the first generated symbol lookup. When another platform needs a different library name, pass one or more `--jvm-native-library` entries; they replace `--library` for JVM loading only. Libraries are loaded once, in command-line order. Initialization is thread-safe; a failed load keeps the bootstrap retryable and the original exception is propagated unchanged.
 
 To bundle libraries in the generated JVM artifact, copy them below `<output>/jvmMain/resources` before invoking kextract. If the artifact packages resources from another build directory, pass that root with `--jvm-native-resources <dir>` instead:
 

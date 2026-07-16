@@ -13,6 +13,7 @@ data class Options(
     val targetPackage: String = "",
     val outputDir: String = ".",
     val jvmNativeResourcesDir: String? = null,
+    val jvmNativeLibraries: List<Library> = emptyList(),
     val sharedClassName: String? = null,
     val splitOutput: Boolean = false,
     val variadicArgs: Map<String, Int> = emptyMap(),

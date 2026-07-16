@@ -17,12 +17,14 @@ class OptionsTest {
         assertEquals(false, options.useSystemLoadLibrary)
         assertTrue(options.clangArgs.isEmpty())
         assertTrue(options.libraries.isEmpty())
+        assertTrue(options.jvmNativeLibraries.isEmpty())
         assertNull(options.sharedClassName)
     }
 
     @Test
     fun `Options constructor sets all properties`() {
         val lib = Options.Library.parse("mylib")
+        val jvmLib = Options.Library.parse("myjvmlib")
         val options = Options(
             targetPackage      = "org.test",
             outputDir          = "/output",
@@ -30,6 +32,7 @@ class OptionsTest {
             useSystemLoadLibrary = true,
             clangArgs          = listOf("-I/include"),
             libraries          = listOf(lib),
+            jvmNativeLibraries = listOf(jvmLib),
             sharedClassName    = "Symbols"
         )
 
@@ -39,6 +42,7 @@ class OptionsTest {
         assertEquals(true, options.useSystemLoadLibrary)
         assertEquals(listOf("-I/include"), options.clangArgs)
         assertEquals(1, options.libraries.size)
+        assertEquals(listOf(jvmLib), options.jvmNativeLibraries)
         assertEquals("Symbols", options.sharedClassName)
     }
 

@@ -11,6 +11,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -224,5 +225,31 @@ class CommandLineTest {
         }
 
         assertEquals("--callback-bindings requires --multiplatform", failure.message)
+    }
+
+    @Test
+    fun `JVM native library override is parsed independently from the platform library`() {
+        val header = tempDir.resolve("cli-jvm.h").also {
+            Files.writeString(it, "void cli_jvm_call(void);")
+        }
+        val output = tempDir.resolve("generated-jvm-override")
+        val logger = Logger(
+            PrintWriter(ByteArrayOutputStream(), true),
+            PrintWriter(ByteArrayOutputStream(), true),
+        )
+
+        KextractCommand(logger).main(
+            listOf(
+                "--multiplatform",
+                "--library", "platform_name",
+                "--jvm-native-library", "jvm_name",
+                "--output", output.toString(),
+                header.toString(),
+            ),
+        )
+
+        val jvm = output.resolve("jvmMain/kotlin/cli_jvm_hJvm.kt").toFile().readText()
+        assertContains(jvm, "System.loadLibrary(\"jvm_name\")")
+        assertFalse(jvm.contains("System.loadLibrary(\"platform_name\")"))
     }
 }

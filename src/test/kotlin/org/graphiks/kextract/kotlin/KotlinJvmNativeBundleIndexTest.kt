@@ -43,6 +43,10 @@ class KotlinJvmNativeBundleIndexTest {
                 outputDir = output.toString(),
                 multiplatform = true,
                 libraries = listOf(Options.Library.parse("sample")),
+                jvmNativeLibraries = listOf(
+                    Options.Library.parse("sample"),
+                    Options.Library.parse(":/opt/native/libabsolute.so"),
+                ),
             ),
         )
 
@@ -54,6 +58,7 @@ class KotlinJvmNativeBundleIndexTest {
         mappedNames.values.toSet().forEach { mappedName -> assertContains(generated, mappedName) }
         assertContains(generated, "deps/libsupport.bin")
         assertContains(generated, "f26350dafe3f19aabfd69ac463fb5daf76015c9a2763e76e2ad32fc0fcfedf31")
+        assertContains(generated, "Path.of(\"/opt/native/libabsolute.so\").toAbsolutePath().normalize()")
     }
 
     @Test

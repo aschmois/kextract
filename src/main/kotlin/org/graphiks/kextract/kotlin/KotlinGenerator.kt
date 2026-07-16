@@ -97,6 +97,7 @@ class KotlinGenerator {
         useInitMethod,
         multiplatform,
         callbackBindings,
+        libraries,
         KotlinJvmNativeBundleIndex(emptyList()),
     )
 
@@ -113,6 +114,7 @@ class KotlinGenerator {
         useInitMethod: Boolean = false,
         multiplatform: Boolean = false,
         callbackBindings: ValidatedCallbackBindings = ValidatedCallbackBindings.EMPTY,
+        jvmNativeLibraries: List<Options.Library>,
         jvmNativeBundleIndex: KotlinJvmNativeBundleIndex,
     ): List<KotlinSourceFile> {
         val className = sanitizeClassName(headerName)
@@ -146,7 +148,7 @@ class KotlinGenerator {
                 namePlan,
                 jvmRecordLayouts,
                 abiIndex,
-                libraries,
+                jvmNativeLibraries,
                 jvmNativeBundleIndex,
                 callbackNames,
             )
@@ -177,7 +179,7 @@ class KotlinGenerator {
         namePlan: KotlinKmpNamePlan,
         jvmRecordLayouts: KotlinJvmRecordLayoutPlan,
         abiIndex: KotlinKmpAbiIndex,
-        libraries: List<Options.Library>,
+        jvmNativeLibraries: List<Options.Library>,
         jvmNativeBundleIndex: KotlinJvmNativeBundleIndex,
         privateNames: KotlinIdentifierAllocator,
     ): List<KotlinSourceFile> = buildList {
@@ -199,7 +201,7 @@ class KotlinGenerator {
             namePlan,
             jvmRecordLayouts,
             abiIndex,
-            libraries,
+            jvmNativeLibraries,
             jvmNativeBundleIndex,
             privateNames,
         ).also { scoped.accept(it); addAll(it.getFiles()) }

@@ -180,6 +180,9 @@ class KextractTool(private val logger: Logger) {
         require(options.multiplatform || options.jvmNativeResourcesDir == null) {
             "jvmNativeResourcesDir requires multiplatform generation"
         }
+        require(options.multiplatform || options.jvmNativeLibraries.isEmpty()) {
+            "jvmNativeLibraries requires multiplatform generation"
+        }
         var d = decl
         d = IncludeFilter(options.includeHelper).scan(d)
         d = DuplicateFilter().scan(d)
@@ -199,11 +202,12 @@ class KextractTool(private val logger: Logger) {
             ValidatedCallbackBindings.EMPTY
         }
         val transformed = NameMangler(headerName).scan(d)
-        val jvmNativeBundleIndex = if (options.multiplatform && options.libraries.isNotEmpty()) {
+        val jvmNativeLibraries = options.jvmNativeLibraries.ifEmpty { options.libraries }
+        val jvmNativeBundleIndex = if (options.multiplatform && jvmNativeLibraries.isNotEmpty()) {
             KotlinJvmNativeBundleIndex.scan(
                 options.jvmNativeResourcesDir?.let(Path::of)
                     ?: Path.of(options.outputDir).resolve("jvmMain/resources"),
-                options.libraries,
+                jvmNativeLibraries,
             )
         } else {
             KotlinJvmNativeBundleIndex(emptyList())
@@ -215,6 +219,7 @@ class KextractTool(private val logger: Logger) {
             options.win32Mode, options.dllMap,
             options.useInitMethod, options.multiplatform,
             callbackBindings,
+            jvmNativeLibraries,
             jvmNativeBundleIndex,
         )
     }

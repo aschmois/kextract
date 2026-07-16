@@ -196,6 +196,11 @@ class GeneratorIntegrationTest : FreeSpec({
                         outputDir = output.toString(),
                         multiplatform = true,
                         libraries = listOf(Options.Library.parse("sample")),
+                        jvmNativeLibraries = listOf(
+                            Options.Library.parse("dependency"),
+                            Options.Library.parse("sample"),
+                            Options.Library.parse(":/opt/native/libabsolute.so"),
+                        ),
                     ),
                 ) shouldBe KextractTool.SUCCESS
 
@@ -207,7 +212,9 @@ class GeneratorIntegrationTest : FreeSpec({
                 jvm shouldContain "kextract.native.cache.dir"
                 jvm shouldContain "\"linux-x86-64\" to Bundle("
                 jvm shouldContain "deps/libdependency.so"
+                jvm shouldContain "System.loadLibrary(\"dependency\")"
                 jvm shouldContain "System.loadLibrary(\"sample\")"
+                jvm shouldContain "Path.of(\"/opt/native/libabsolute.so\").toAbsolutePath().normalize()"
                 jvm shouldContain "KextractNativeBootstrap.resolve(\"sample_call\")"
                 jvm shouldContain "if (loaded) return"
                 jvm shouldContain "kotlin.synchronized(this)"
@@ -217,6 +224,14 @@ class GeneratorIntegrationTest : FreeSpec({
                 jvm shouldContain "classLoader.getResources(resourceName)"
                 jvm shouldContain "StandardCopyOption.ATOMIC_MOVE"
                 jvm shouldContain "catch (_: java.nio.file.AtomicMoveNotSupportedException)"
+                (
+                    jvm.indexOf("System.loadLibrary(\"dependency\")") <
+                        jvm.indexOf("System.loadLibrary(\"sample\")")
+                ) shouldBe true
+                (
+                    jvm.indexOf("Path.of(\"/opt/native/libabsolute.so\")") <
+                        jvm.indexOf("loaded = true")
+                ) shouldBe true
             } finally {
                 Files.deleteIfExists(header)
                 output.toFile().deleteRecursively()
