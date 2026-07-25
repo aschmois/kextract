@@ -220,7 +220,7 @@ internal class KotlinKmpJvmBuilder(
                             ?.let(abiIndex::enum)
                         when {
                             fieldType == cString -> {
-                                builder.appendLine("get() = (${fieldName}_VH.get(handler.handler, 0L) as? $memorySegment)?.let(::$nativeAddress)?.let(::$cString)")
+                                builder.appendLine("get() = (${fieldName}_VH.get(handler.handler, 0L) as? $memorySegment)?.takeIf { it != $memorySegment.NULL }?.let(::$nativeAddress)?.let(::$cString)")
                                 builder.appendLine("set(value) = ${fieldName}_VH.set(handler.handler, 0L, value?.handler?.handler ?: $memorySegment.NULL)")
                             }
                             fieldType == nativeAddress -> {
@@ -265,7 +265,7 @@ internal class KotlinKmpJvmBuilder(
                             else -> {
                                 if (fieldType.endsWith("?")) {
                                     val nonOptType = fieldType.removeSuffix("?")
-                                    builder.appendLine("get() = (${fieldName}_VH.get(handler.handler, 0L) as? $memorySegment)?.let(::$nativeAddress)?.let { $nonOptType(it) }")
+                                    builder.appendLine("get() = (${fieldName}_VH.get(handler.handler, 0L) as? $memorySegment)?.takeIf { it != $memorySegment.NULL }?.let(::$nativeAddress)?.let { $nonOptType(it) }")
                                     builder.appendLine("set(value) = ${fieldName}_VH.set(handler.handler, 0L, value?.handler?.handler ?: $memorySegment.NULL)")
                                 } else {
                                     builder.appendLine("get() = ${fieldName}_VH.get(handler.handler, 0L) as $fieldType")
